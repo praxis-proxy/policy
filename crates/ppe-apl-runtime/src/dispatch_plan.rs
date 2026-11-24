@@ -602,12 +602,10 @@ pub(crate) fn collect_fetch_plugin_names(route: &CompiledRoute) -> Vec<String> {
     out
 }
 
-/// Return whether a compiled route reads acquired metadata.
+/// Return whether a route half reads acquired metadata.
 ///
-/// Metadata can be consumed by a `fetch(...)` effect, a predicate at any
-/// nesting depth, a PDP argument, or a conditional field-pipeline stage.
-/// Keeping this analysis on the compiled route ensures inherited and nested
-/// policy surfaces receive the same capability treatment.
+/// Includes nested predicates, elicitation recipients and scopes, PDP policy
+/// dependencies, fetches, restrictions, and conditional field pipelines.
 pub(crate) fn route_uses_metadata(
     route: &CompiledRoute,
     request_half: bool,

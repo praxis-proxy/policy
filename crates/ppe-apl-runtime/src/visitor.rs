@@ -1562,12 +1562,8 @@ fn install_handler(
     // downstream plugins see empty views) and rejects mutations on the
     // way out (label / delegation appends fail monotonicity checks).
     //
-    // Granted caps = union of this half's plugin caps plus route-wide
-    // fixed-family bridge caps (with per-route overrides applied) ∪ the
-    // host-supplied baseline. The baseline
-    // typically covers read-only attributes APL predicates touch
-    // (`subject.*`, `role.*`, `delegated`, …) even when no plugins are
-    // referenced.
+    // The host baseline supplies attributes that policy predicates need even
+    // when the route references no plugins.
     let mut capabilities = base_capabilities.clone();
     capabilities.extend(crate::dispatch_plan::route_capability_union(
         &route,
@@ -1586,11 +1582,7 @@ fn install_handler(
     // normalized parts for gated `llm.input.*` bag keys. This grant is
     // intrinsic rather than left to the replaceable baseline.
     capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_LLM_REQUEST.to_owned());
-    // Route predicates and metadata fetches read acquired facts under
-    // `metadata.*`. Grant the synthetic handler access only when this
-    // compiled route actually reaches one of those surfaces. Plugins
-    // dispatched from the route still contribute their own declared
-    // `read_metadata` capability through `route_capability_union`.
+    // A metadata dependency in one half must not grant access to the other.
     if crate::dispatch_plan::route_uses_metadata(&route, phase == Phase::Pre, pdp.as_deref()) {
         capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_METADATA.to_owned());
     }

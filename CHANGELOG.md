@@ -232,9 +232,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - APL attribute paths accept one leading `$` on a segment after the first,
   so policies read provenance leaves such as `metadata.account.$outcome`.
   The synthetic APL handler infers `read_metadata` independently for the
-  request and response halves from compiled predicates, field pipelines,
-  restrictions, fetches, and PDP policy dependencies. Custom PDP resolvers can
-  report opaque policy dependencies through `PdpResolver::requires_metadata`.
+  request and response halves from predicates, elicitation recipients and
+  scopes, field pipelines, restrictions, fetches, and PDP policy dependencies.
+  Custom PDP resolvers can report opaque policy dependencies through
+  `PdpResolver::requires_metadata`.
   `source_references_metadata` and `source_references_metadata_under` are
   available to resolver implementations that need conservative source scans.
   ([#242](https://github.com/praxis-proxy/policy/issues/242))

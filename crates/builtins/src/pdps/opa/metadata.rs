@@ -15,7 +15,7 @@ pub(super) fn last_module_references_metadata(engine: &mut Engine) -> bool {
         .is_some_and(|module| module_references_metadata(module))
 }
 
-/// Parse one Rego module and inspect its input dependencies.
+/// Return whether a valid Rego module reads `input.metadata`.
 pub(super) fn source_references_metadata(source: &str) -> bool {
     let mut engine = Engine::new();
     engine
