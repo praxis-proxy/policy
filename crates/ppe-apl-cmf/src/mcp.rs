@@ -15,9 +15,6 @@
 // something about the contract, not about this request. The arguments
 // themselves reach policy as `args.*`.
 //
-// Icons stay off too: they are display metadata, and no rule keys on an icon
-// URL.
-//
 // Namespace:
 //   mcp.tool.name           : String     (always set if tool present)
 //   mcp.tool.title          : String
@@ -27,14 +24,11 @@
 //   mcp.tool.annotations.<k>: flattened JSON (JSON walker — same as custom.*)
 //   mcp.resource.uri        : String     (always set if resource present)
 //   mcp.resource.name       : String
-//   mcp.resource.title      : String
 //   mcp.resource.description: String
 //   mcp.resource.mime_type  : String
-//   mcp.resource.size       : Int        (saturates at i64::MAX)
 //   mcp.resource.server_id  : String
 //   mcp.resource.annotations.<k> : flattened JSON
 //   mcp.prompt.name         : String     (always set if prompt present)
-//   mcp.prompt.title        : String
 //   mcp.prompt.description  : String
 //   mcp.prompt.server_id    : String
 //   mcp.prompt.annotations.<k>   : flattened JSON
@@ -67,19 +61,11 @@ pub fn extract_mcp(mcp: &MCPExtension, bag: &mut AttributeBag) {
         if let Some(v) = &res.name {
             bag.set("mcp.resource.name", v.clone());
         }
-        if let Some(v) = &res.title {
-            bag.set("mcp.resource.title", v.clone());
-        }
         if let Some(v) = &res.description {
             bag.set("mcp.resource.description", v.clone());
         }
         if let Some(v) = &res.mime_type {
             bag.set("mcp.resource.mime_type", v.clone());
-        }
-        if let Some(v) = res.size {
-            // Saturating, so an oversized resource still compares as large in a
-            // size limit rather than wrapping to a negative number.
-            bag.set("mcp.resource.size", i64::try_from(v).unwrap_or(i64::MAX));
         }
         if let Some(v) = &res.server_id {
             bag.set("mcp.resource.server_id", v.clone());
@@ -90,9 +76,6 @@ pub fn extract_mcp(mcp: &MCPExtension, bag: &mut AttributeBag) {
     }
     if let Some(prompt) = &mcp.prompt {
         bag.set("mcp.prompt.name", prompt.name.clone());
-        if let Some(v) = &prompt.title {
-            bag.set("mcp.prompt.title", v.clone());
-        }
         if let Some(v) = &prompt.description {
             bag.set("mcp.prompt.description", v.clone());
         }
@@ -117,9 +100,7 @@ pub fn extract_mcp(mcp: &MCPExtension, bag: &mut AttributeBag) {
 )]
 mod tests {
     use super::*;
-    use praxis_policy_core::extensions::mcp::{
-        Icon, PromptMetadata, ResourceMetadata, ToolMetadata,
-    };
+    use praxis_policy_core::extensions::mcp::{PromptMetadata, ResourceMetadata, ToolMetadata};
 
     #[test]
     fn tool_metadata_flattens() {
@@ -234,119 +215,6 @@ mod tests {
         assert_eq!(
             bag.get_string("mcp.resource.mime_type"),
             Some("application/json")
-        );
-    }
-
-    #[test]
-    fn resource_title_flattens() {
-        let mcp = MCPExtension {
-            resource: Some(ResourceMetadata {
-                uri: "hr://employees/123".into(),
-                title: Some("Employee record".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let mut bag = AttributeBag::new();
-        extract_mcp(&mcp, &mut bag);
-        assert_eq!(
-            bag.get_string("mcp.resource.title"),
-            Some("Employee record"),
-            "resource title should reach the bag as a string"
-        );
-    }
-
-    #[test]
-    fn resource_size_flattens() {
-        let mcp = MCPExtension {
-            resource: Some(ResourceMetadata {
-                uri: "file:///big.bin".into(),
-                size: Some(10_485_760),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let mut bag = AttributeBag::new();
-        extract_mcp(&mcp, &mut bag);
-        assert_eq!(
-            bag.get_int("mcp.resource.size"),
-            Some(10_485_760),
-            "resource size should reach the bag as an integer"
-        );
-    }
-
-    #[test]
-    fn resource_size_above_i64_max_saturates() {
-        let mcp = MCPExtension {
-            resource: Some(ResourceMetadata {
-                uri: "file:///huge.bin".into(),
-                size: Some(u64::MAX),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let mut bag = AttributeBag::new();
-        extract_mcp(&mcp, &mut bag);
-        assert_eq!(
-            bag.get_int("mcp.resource.size"),
-            Some(i64::MAX),
-            "a size beyond i64 must saturate, not wrap negative"
-        );
-    }
-
-    #[test]
-    fn prompt_title_flattens() {
-        let mcp = MCPExtension {
-            prompt: Some(PromptMetadata {
-                name: "code_review".into(),
-                title: Some("Request Code Review".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let mut bag = AttributeBag::new();
-        extract_mcp(&mcp, &mut bag);
-        assert_eq!(
-            bag.get_string("mcp.prompt.title"),
-            Some("Request Code Review"),
-            "prompt title should reach the bag as a string"
-        );
-    }
-
-    #[test]
-    fn icons_are_not_in_the_attribute_bag() {
-        let icons = Some(vec![Icon {
-            src: "https://example.com/icon.png".into(),
-            mime_type: Some("image/png".into()),
-            sizes: Some(vec!["48x48".into()]),
-        }]);
-        let mcp = MCPExtension {
-            tool: Some(ToolMetadata {
-                name: "search".into(),
-                icons: icons.clone(),
-                ..Default::default()
-            }),
-            resource: Some(ResourceMetadata {
-                uri: "file:///x".into(),
-                icons: icons.clone(),
-                ..Default::default()
-            }),
-            prompt: Some(PromptMetadata {
-                name: "summarize".into(),
-                icons,
-                ..Default::default()
-            }),
-        };
-        let mut bag = AttributeBag::new();
-        extract_mcp(&mcp, &mut bag);
-        let icon_keys: Vec<&str> = bag
-            .iter()
-            .map(|(k, _)| k)
-            .filter(|k| k.contains("icon"))
-            .collect();
-        assert!(
-            icon_keys.is_empty(),
-            "icons are display metadata and must stay off the bag, found {icon_keys:?}"
         );
     }
 }
