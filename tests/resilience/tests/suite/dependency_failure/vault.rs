@@ -3,7 +3,7 @@
 
 //! Vault fails while the engine resolves a declared secret at startup.
 //!
-//! `docs/content/configuration.md` ("Resolution and refresh"): every
+//! `docs/content/reference/configuration.md` ("Resolution and refresh"): every
 //! declared value is read during `initialize()`, and one that cannot be read
 //! stops startup, since a never-resolved credential has no last-good value.
 //! A failure on a later `refresh_secrets()` keeps the last-good value; the

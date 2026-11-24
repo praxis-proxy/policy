@@ -1541,15 +1541,13 @@ fn install_handler(
     // downstream plugins see empty views) and rejects mutations on the
     // way out (label / delegation appends fail monotonicity checks).
     //
-    // Granted caps = union of every plugin's caps (with per-route
-    // overrides applied) ∪ host-supplied baseline. The baseline
-    // typically covers read-only attributes APL predicates touch
-    // (`subject.*`, `role.*`, `delegated`, …) even when no plugins are
-    // referenced.
+    // The host baseline supplies attributes that policy predicates need even
+    // when the route references no plugins.
     let mut capabilities = base_capabilities.clone();
     capabilities.extend(crate::dispatch_plan::route_capability_union(
         &route,
         plugin_registry,
+        phase == Phase::Pre,
     ));
     // Every synthetic policy handler (the entity-less HTTP catch-all, per-entity
     // routes, and defaults) is granted `read_headers` and `read_query` so `http.*` request
@@ -1563,10 +1561,10 @@ fn install_handler(
     // normalized parts for gated `llm.input.*` bag keys. This grant is
     // intrinsic rather than left to the replaceable baseline.
     capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_LLM_REQUEST.to_owned());
-    // Route predicates read acquired facts under `metadata.*`, so the grant is
-    // intrinsic like `read_headers`. It is a no-op when nothing is installed.
-    // Plugins dispatched from the route still need their own `read_metadata`.
-    capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_METADATA.to_owned());
+    // A metadata dependency in one half must not grant access to the other.
+    if crate::dispatch_plan::route_uses_metadata(&route, phase == Phase::Pre, pdp.as_deref()) {
+        capabilities.insert(praxis_policy_apl_cmf::constants::CAP_READ_METADATA.to_owned());
+    }
     // Only the pre-invocation handler for a route that fetches may publish the
     // framework-stamped record returned by that operation.
     if phase == Phase::Pre && !crate::dispatch_plan::collect_fetch_plugin_names(&route).is_empty() {

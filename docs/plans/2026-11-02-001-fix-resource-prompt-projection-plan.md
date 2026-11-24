@@ -301,8 +301,11 @@ Detailed comparison of the three envelope strategies is in Appendix C.
 | Host contract misconfiguration | Policy may not see expected data | Six host recipes with concrete examples and missing-layer behavior. |
 
 **Security caveat:** Issue 75 does not establish complete inspection of all
-content in arbitrary MCP messages. Deployments requiring that guarantee must
-enforce the stated host normalization constraints or await Issue 76.
+content in arbitrary MCP messages. Host normalization covers only projected
+text; `Resource.blob` is excluded and needs separate inspection or rejection.
+Deployments requiring complete inspection must enforce both constraints.
+Issue 76 addresses individual parts and native prompt messages, not blob
+inspection.
 
 ## 8. Open questions for review
 
@@ -1049,7 +1052,7 @@ and must be called out explicitly.
 
 #### In this PR: the contract, in a new guide
 
-A new doc, `docs/content/host-integration-guide.md`, holding only the contract
+A new doc, `docs/content/guides/host-integration-guide.md`, holding only the contract
 for now. It is linked from `docs/content/index.md`, from `cmf.md`, and from the
 `mcp` slot section of `cmf-extensions.md`. It covers:
 
@@ -1076,7 +1079,7 @@ contract does not move when the recipes arrive.
 #### Follow-up PR: full host integration guide
 
 The worked recipes below follow in a separate PR. They are added to
-`docs/content/host-integration-guide.md`, build on the contract already there,
+`docs/content/guides/host-integration-guide.md`, build on the contract already there,
 and do not change it.
 
 ##### Structure
@@ -1203,7 +1206,7 @@ Issue 75 lands first. The projection helpers are standalone functions so Issue
 
 #### Commit 4: host contract section
 
-- [ ] `docs/content/host-integration-guide.md` holds the contract (MUSTs, layer
+- [ ] `docs/content/guides/host-integration-guide.md` holds the contract (MUSTs, layer
   definitions, two known gaps) and is linked from `index.md`, `cmf.md` and
   `cmf-extensions.md`
 - [ ] The guide's resource and prompt policy fences are loaded by the docs
@@ -1212,7 +1215,7 @@ Issue 75 lands first. The projection helpers are standalone functions so Issue
 
 #### Follow-up PR: full host integration guide
 
-- [ ] `docs/content/host-integration-guide.md` covers all six entity/phase
+- [ ] `docs/content/guides/host-integration-guide.md` covers all six entity/phase
   combinations
 - [ ] Each recipe covers all three layers: MetaExtension, MCPExtension,
   ContentPart

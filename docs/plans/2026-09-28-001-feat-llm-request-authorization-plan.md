@@ -662,8 +662,8 @@ the documented limits, and that no deny path leaks payload text.
 
 **Files:**
 - Modify: `docs/content/apl/pdp.md`
-- Modify: `docs/content/extensions.md`
-- Modify: `docs/content/cmf-extensions.md`
+- Modify: `docs/content/concepts/extensions.md`
+- Modify: `docs/content/concepts/cmf-extensions.md`
 - Modify: `docs/content/apl/attributes.md`
 - Modify: `CHANGELOG.md`
 - Modify: `Cargo.toml` (workspace version and internal pins)

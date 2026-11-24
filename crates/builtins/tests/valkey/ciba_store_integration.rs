@@ -492,7 +492,7 @@ async fn an_approval_dispatched_on_one_replica_redeems_on_another() {
 }
 
 #[tokio::test]
-#[ignore = "needs PPE_ACL_VALKEY and the ACL users from docs/content/testing.md"]
+#[ignore = "needs PPE_ACL_VALKEY and the ACL users from docs/content/guides/testing.md"]
 async fn documented_acl_users_compartmentalize_the_two_stores() {
     use praxis_policy_apl_runtime::SessionStore as _;
     use praxis_policy_builtins::session::valkey::{ValkeyConfig, ValkeySessionStore};

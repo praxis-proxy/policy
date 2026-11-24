@@ -1015,8 +1015,9 @@ configuring this needs to know the trust model they are opting into.
 
 Document the host's obligation from R29 explicitly, next to the block rather than in a
 release note: a contract on an `http:` route needs the request line on the HTTP extension at
-both invocations, and without it the global contract governs. `docs/upgrade-apl.md` is the
-precedent for a per-key operator-facing reference in this tree; there is no general config
+both invocations, and without it the global contract governs.
+`docs/content/guides/upgrade-apl.md` is the precedent for a per-key
+operator-facing reference in this tree; there is no general config
 reference document yet, so this either starts one or extends that one. Decide which in U10
 rather than assuming a file that does not exist.
 
@@ -1203,7 +1204,8 @@ useful on its own.
 
 - Whether `csv` is worth shipping, or whether `json` plus members covers every real case. R13 requires *an* encoding declaration, not specifically this set.
 - Whether `effective_policy` should render structured output rather than text.
-- Whether U10 starts a general config reference document or extends `docs/upgrade-apl.md`.
+- Whether U10 starts a general config reference document or extends
+  `docs/content/guides/upgrade-apl.md`.
 
 ---
 

@@ -179,9 +179,10 @@ Counts are occurrences, not files, gathered for this plan:
 - **Phase spellings:** `Phase::PreInvocation` / `Phase::PostInvocation`,
   `CompiledRoute.pre_invocation` / `.post_invocation`. `CompiledRoute.args` and
   `.result` keep their names, already matching their config keys. (Resolves R61.)
-- **The upgrade guide is its own document** at `docs/upgrade-apl.md`, with the
-  CHANGELOG pointing at it. A per-form list inside a changelog entry is unreadable
-  at this size. (Resolves R47b.)
+- **The upgrade guide is its own document** at
+  `docs/content/guides/upgrade-apl.md`, with the CHANGELOG pointing at it. A
+  per-form list inside a changelog entry is unreadable at this size.
+  (Resolves R47b.)
 
 ---
 
@@ -1134,8 +1135,8 @@ walking the document's tables against the corpus module list.
 **Dependencies:** U9, U10, U15
 
 **Files:**
-- Create: `docs/upgrade-apl.md` (every key and form an existing config must
-  rewrite, with before and after)
+- Create: `docs/content/guides/upgrade-apl.md` (every key and form an existing
+  config must rewrite, with before and after)
 - Modify: `CHANGELOG.md` (assemble the per-unit entries; point at the guide; give
   `response:` the entry it never got, since it shipped in 0.1.0 undocumented)
 - Verify: all three praxis-demos policies (`policy.yaml`, `policy-cel.yaml`,
@@ -1206,7 +1207,8 @@ recorded.
 
 ## Documentation / Operational Notes
 
-- `docs/apl-grammar.md` (U15) and `docs/upgrade-apl.md` (U16) are new deliverables.
+- `docs/apl-grammar.md` (U15) and `docs/content/guides/upgrade-apl.md` (U16) are
+  new deliverables.
 - `crates/ppe-apl-core/Cargo.toml` points at `docs/specs/apl-design.md`, which does
   not exist; U15 repoints it.
 - Repo convention from `CONTRIBUTING.md`: requirement and unit identifiers from

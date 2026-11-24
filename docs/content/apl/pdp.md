@@ -357,7 +357,7 @@ reaches the client.
 ### Host PDP resolvers
 
 The `read_llm_request` capability gates plugins, not PDP resolvers (see
-[Extensions](../extensions.md)). A resolver is host code that already receives
+[Extensions](../concepts/extensions.md)). A resolver is host code that already receives
 the whole bag. The evaluator calls `PdpResolver::evaluate_structured(call,
 bag, structured)`, whose default ignores `structured` and calls
 `evaluate(call, bag)`. A host resolver opts in by overriding

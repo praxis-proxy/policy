@@ -33,7 +33,8 @@ use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload, Too
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::executor::PipelineResult;
 use praxis_policy_core::extensions::{
-    LlmRequestDocument, MetaExtension, SecurityExtension, SubjectExtension, SubjectType,
+    AcquiredFacts, LlmRequestDocument, MetaExtension, MetadataCacheDisposition, SecurityExtension,
+    SubjectExtension, SubjectType,
 };
 use praxis_policy_core::hooks::payload::Extensions;
 
@@ -315,6 +316,91 @@ routes:
     assert!(
         !deny.continue_processing && deny.violation.is_some(),
         "non-empty deny set must halt with a violation",
+    );
+}
+
+#[tokio::test]
+async fn deny_set_whole_input_alias_receives_metadata_end_to_end() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+global:
+  pdp:
+    - kind: opa
+      modules:
+        - |
+          package authz
+          whole := input
+          deny contains "suspended" if whole.metadata.account.suspended
+routes:
+  - tool: get_document
+    authorization:
+      pre_invocation:
+        - opa:
+            query: data.authz.deny
+"#;
+    let mgr = build_manager_with_yaml(YAML)
+        .await
+        .expect("metadata-backed deny-set configuration loads");
+    let mut extensions = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_document"))),
+        ..Default::default()
+    };
+    extensions
+        .install_metadata(
+            "account",
+            "metadata/http",
+            AcquiredFacts::success(
+                serde_json::json!({"suspended": true}),
+                "2026-11-18T09:00:00Z"
+                    .parse()
+                    .expect("literal timestamp parses"),
+                MetadataCacheDisposition::Disabled,
+            ),
+        )
+        .expect("metadata fixture installs");
+
+    let (result, _background) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), extensions, None)
+        .await;
+
+    assert!(
+        !result.continue_processing,
+        "a suspended account must halt processing"
+    );
+    assert_eq!(
+        result
+            .violation
+            .expect("suspended account is denied")
+            .reason,
+        "OPA policy produced 1 violation(s)",
+        "the OPA deny set, rather than a timeout, must cause the halt"
+    );
+
+    let mut active_extensions = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_document"))),
+        ..Default::default()
+    };
+    active_extensions
+        .install_metadata(
+            "account",
+            "metadata/http",
+            AcquiredFacts::success(
+                serde_json::json!({"suspended": false}),
+                "2026-11-18T09:00:00Z"
+                    .parse()
+                    .expect("literal timestamp parses"),
+                MetadataCacheDisposition::Disabled,
+            ),
+        )
+        .expect("active metadata fixture installs");
+
+    let (active, _background) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), active_extensions, None)
+        .await;
+    assert!(
+        active.continue_processing && active.violation.is_none(),
+        "an account that is not suspended must continue"
     );
 }
 

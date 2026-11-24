@@ -326,8 +326,8 @@ Authorino-parity escape hatch.
   consequence is a migration constraint (RFC 7617 §2.1): once the challenge
   asks for NFC, a hash minted from a decomposed password no longer matches a
   client that complies, so such records must be re-hashed from the NFC form
-  before the flag is enabled. The operator guide in `docs/content/builtins.md`
-  states this, and
+  before the flag is enabled. The operator guide in
+  `docs/content/reference/builtins.md` states this, and
   `rfc7617_s2_1_a_hash_of_a_decomposed_password_rejects_its_nfc_form` pins it.
 
 - KTD7. **One Basic resolver per route in v1, enforced by documentation.**
@@ -1006,9 +1006,9 @@ documentation cites a figure rather than a guess.
 **Dependencies:** U3, U4, U5
 
 **Files:**
-- `docs/content/identity-delegation.md` (new recipe)
-- `docs/content/builtins.md` (catalog and feature tables)
-- `docs/content/crates.md` (feature list)
+- `docs/content/guides/identity-delegation.md` (new recipe)
+- `docs/content/reference/builtins.md` (catalog and feature tables)
+- `docs/content/reference/crates.md` (feature list)
 - `docs/content/apl/identity.md` (identity resolver list)
 - `CHANGELOG.md` (`Unreleased` / `Added`, with the issue link)
 
@@ -1045,7 +1045,7 @@ only place an operator is told the obligation exists -- and an unauthenticated
 verifier is reachable by other clients, which lets them probe user-ids around
 the resolver's failure limiter.
 
-**Patterns to follow:** `docs/content/identity-delegation.md` Recipe 7 for
+**Patterns to follow:** `docs/content/guides/identity-delegation.md` Recipe 7 for
 shape; `crates/ppe/tests/docs_examples/` for the regression hook.
 
 **Test scenarios:**
@@ -1188,9 +1188,9 @@ before closing it:
   in-process limiter keyed on the normalised user-id is owned by this plugin.
   The multi-replica and username-spray gaps are documented in U7. The quota
   plugin is experimental and excluded from the `builtins` umbrella
-  (`docs/content/builtins.md:22`); relying on it would make Basic depend on an
-  experimental feature. Relying only on the host would leave the default
-  configuration with hash cost as its sole brake.
+  (`docs/content/reference/builtins.md:22`); relying on it would make Basic
+  depend on an experimental feature. Relying only on the host would leave the
+  default configuration with hash cost as its sole brake.
 
 ---
 

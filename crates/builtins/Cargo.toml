@@ -23,6 +23,7 @@ features = [
   "jwt",
   "api-key",
   "basic",
+  "kubernetes-token-review",
   "oauth",
   "delegator-vault",
   "elicitation-ciba",
@@ -59,7 +60,14 @@ fips = [
 # system OpenSSL under the FIPS provider; it requires `fips` and excludes `jwt`.
 jwt = ["_jwt", "jsonwebtoken/aws_lc_rs"]
 jwt-openssl-fips = ["_jwt", "dep:openssl"]
-api-key = ["_engine-core", "_plugins"]
+api-key = ["_engine-core", "_plugins", "_token_lookup"]
+kubernetes-token-review = [
+  "_engine-core",
+  "_plugins",
+  "_token_lookup",
+  "_validation",
+  "dep:base64",
+]
 # RFC 7617 Basic authentication. `base64` decodes the credential and
 # `unicode-normalization` NFC-folds the user-id before it is used as an index
 # key; both must be named here, since `base64` is optional and reached only
@@ -133,6 +141,11 @@ _pdps = ["dep:stacker"]
 _session = []
 _secrets = []
 _jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64"]
+# The shared core of the resolvers that turn a credential into an identity by
+# looking it up. Crate-private: each plugin re-exports what it makes public.
+_token_lookup = ["_engine-core"]
+# Config checks more than one builtin needs. Crate-private.
+_validation = ["dep:url"]
 
 [dependencies]
 # Engine crates, optional so a consumer resolves only the layer it asked for.
@@ -441,6 +454,11 @@ required-features = ["api-key"]
 name = "identity_basic"
 path = "tests/identity_basic/main.rs"
 required-features = ["basic"]
+
+[[test]]
+name = "token_review"
+path = "tests/token_review/main.rs"
+required-features = ["kubernetes-token-review"]
 
 [[test]]
 name = "oauth"

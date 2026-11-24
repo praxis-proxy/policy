@@ -245,7 +245,7 @@ fn documented_metadata_fetch_fixture_parses() {
         "metadata source must preserve its returned payload",
     );
     assert!(
-        include_str!("../../../docs/content/pipeline.md").contains(fixture.trim()),
+        include_str!("../../../docs/content/concepts/pipeline.md").contains(fixture.trim()),
         "pipeline documentation should retain the exact tested configuration",
     );
 }

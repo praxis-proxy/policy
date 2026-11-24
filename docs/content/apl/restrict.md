@@ -150,8 +150,8 @@ the fine-grained decision, then pin routing on allow.
 Multiple `restrict` effects in one request fold into a single constraint:
 allow-sets intersect, deny-sets and `custom` grow, tier ceilings combine, and
 `on_empty` takes the strictest. The result rides out on the typed
-`candidate_constraint` extension (see [Extensions](../extensions.md)) — the same
-in-process channel minted delegation tokens use, not a request header.
+`candidate_constraint` extension (see [Extensions](../concepts/extensions.md)) —
+the same in-process channel minted delegation tokens use, not a request header.
 
 The host router evaluates it. PPE has no backend list and no live health, so it
 cannot run the match itself; it emits the constraint and the router — which owns
@@ -196,6 +196,6 @@ policy's to shape.
 
 ## Next
 
-- [Configuration](../configuration.md): declare plugins, global services,
+- [Configuration](../reference/configuration.md): declare plugins, global services,
   groups, and routes.
-- [HTTP Routing](../http-routing.md): select policy by request path and method.
+- [HTTP Routing](../guides/http-routing.md): select policy by request path and method.

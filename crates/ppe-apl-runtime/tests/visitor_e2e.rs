@@ -61,7 +61,7 @@ use praxis_policy_apl_runtime::{AplOptions, DispatchCache, MemorySessionStore, r
 // Constants
 // -----------------------------------------------------------------------------
 
-const HOST_GUIDE: &str = include_str!("../../../docs/content/host-integration-guide.md");
+const HOST_GUIDE: &str = include_str!("../../../docs/content/guides/host-integration-guide.md");
 
 static COUNT_GATE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -2189,12 +2189,12 @@ async fn llm_input_allowed(mgr: &PolicyEngine, ext: Extensions) -> bool {
 async fn gpt4_route_engine() -> Arc<PolicyEngine> {
     let page = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../docs/content/llm-routes.md"
+        "/../../docs/content/guides/llm-routes.md"
     ))
-    .expect("read docs/content/llm-routes.md");
+    .expect("read docs/content/guides/llm-routes.md");
     let (_, after) = page
         .split_once("## Worked config")
-        .expect("docs/content/llm-routes.md has a `## Worked config` section");
+        .expect("docs/content/guides/llm-routes.md has a `## Worked config` section");
     let (_, block) = after
         .split_once("```yaml\n")
         .expect("a yaml block follows the heading");

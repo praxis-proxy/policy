@@ -17,6 +17,36 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Resource and prompt payload projection.** APL fields can read resource
+  references, fetched resources and rendered prompt content. Edits are
+  written back to the selected content part; missing or ambiguous resource
+  targets deny the request. Fixed-envelope paths and read-only fields are
+  validated at load, including recursive paths. The host integration guide
+  includes tested deny and redaction examples and documents the remaining
+  multi-part and gateway adapter limits.
+  ([#305](https://github.com/praxis-proxy/policy/pull/305))
+
+- **Kubernetes `TokenReview` identity.** `identity/kubernetes-token-review`,
+  behind the `kubernetes-token-review` feature, resolves a bearer token by
+  submitting it to the API server's `TokenReview` API and maps `status.user`
+  onto the identity slots. It serves tokens that cannot be verified locally,
+  such as legacy Secret-based ServiceAccount tokens. PPE authenticates with
+  its own token from a file, re-read so a projected token rotates, or from an
+  environment variable. `audiences` are sent and checked in the answer, a
+  cached answer never outlives a JWT's `exp`, and a `401` or `403` denies as
+  `auth.directory_unavailable` rather than as a bad caller.
+  ([#213](https://github.com/praxis-proxy/policy/issues/213))
+
+### Changed
+
+- **Documentation navigation.** Organize published pages into Getting started,
+  Guides, Concepts, APL, and Reference sections. Add section landing pages
+  and a gateway integration guide, and update links and documentation test
+  fixtures to use the new page paths.
+  ([#362](https://github.com/praxis-proxy/policy/pull/362))
+
 ## [0.7.0] - 2026-11-20
 
 ### Added
@@ -62,7 +92,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   [#340](https://github.com/praxis-proxy/policy/pull/340))
 
 [RFC 7617]: https://datatracker.ietf.org/doc/html/rfc7617
-[What Basic asks of the host]: docs/content/builtins.md#what-basic-asks-of-the-host
+[What Basic asks of the host]: docs/content/reference/builtins.md#what-basic-asks-of-the-host
 
 ### Changed
 
@@ -79,6 +109,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   typed record required for publication. Sources must declare `metadata.fetch`
   and use `on_error: fail` or `ignore`.
   ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Breaking for route capability grants:** ordinary `run()` and field-pipeline
+  plugin capabilities now contribute only to the request or response handler
+  half where that plugin runs. Delegation, elicitation, and metadata-fetch
+  plugins still contribute their declared capabilities to both halves.
+  Predicates on the other half that read `client.*`, `caller.workload.*`, or
+  `this.workload.*` need `read_client` or `read_workload` in the host baseline.
+  ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 ### Fixed
 
@@ -238,7 +275,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#204](https://github.com/praxis-proxy/policy/issues/204))
 - **`reference/plugins/transcript-scanner`** reads typed prior turns through `read_agent`, including resource blobs decoded as UTF-8 with replacement, and denies with `transcript.detected` on a configured content match. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - **`llm:` routes can read the request.** One gated `Extensions.llm_request` carrier holds the optional parsed body and normalized parts. The body reaches PDPs at `llm.request`; reported parts emit `llm.input.*` bag keys, including a role-aware instruction digest and candidate count. Model and completion facts emit canonical `llm.model.*` and `llm.output.*` keys. Published `llm.model_id`, `llm.provider`, `llm.capabilities`, and `completion.*` remain value-identical aliases. The carrier is never serialized and requires `read_llm_request` for plugins. Hosts constructing `Extensions` or `OwnedExtensions` with exhaustive literals must update them. ([#70](https://github.com/praxis-proxy/policy/issues/70))
-- **`docs/content/llm-routes.md`** documents canonical keys, missing-key behavior, host obligations, and a tested worked config. ([#70](https://github.com/praxis-proxy/policy/issues/70))
+- **`docs/content/guides/llm-routes.md`** documents canonical keys, missing-key behavior, host obligations, and a tested worked config. ([#70](https://github.com/praxis-proxy/policy/issues/70))
 - Added immutable, framework-owned acquired metadata records under
   `metadata.<instance>.*`. Plugins in the same invocation need `read_metadata`
   to receive the typed slot or its APL projection, and cannot add, replace, or
@@ -248,8 +285,14 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   [#184](https://github.com/praxis-proxy/policy/issues/184).
 - APL attribute paths accept one leading `$` on a segment after the first,
   so policies read provenance leaves such as `metadata.account.$outcome`.
-  Route predicates read `metadata.*` without a host grant: the synthetic APL
-  handler holds `read_metadata` intrinsically.
+  The synthetic APL handler infers `read_metadata` independently for the
+  request and response halves from predicates, elicitation recipients and
+  scopes, field pipelines, restrictions, fetches, and PDP policy dependencies.
+  Custom PDP resolvers can report opaque policy dependencies through
+  `PdpResolver::requires_metadata`.
+  `source_references_metadata` and `source_references_metadata_under` are
+  available to resolver implementations that need conservative source scans.
+  ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 - **Typed credential locations for the `identity/jwt` plugin.** The plugin can
   now extract bearer JWTs from HTTP headers, cookies, or query parameters — one
@@ -340,7 +383,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   CryptoError>`. Propagate the error with `?`, or deny: a hashing failure
   must not fall back to an unhashed value. `CryptoError` is
   `#[non_exhaustive]` and its variants depend on the backend.
-  See the [hashing migration](docs/content/crates.md#fallible-hashing).
+  See the [hashing migration](docs/content/reference/crates.md#fallible-hashing).
 - **Breaking for builds without default features:** `praxis-policy`,
   `praxis-policy-core`, `-apl-cmf` and `-apl-runtime` with
   `default-features = false` must name `crypto-rustcrypto` or `fips`. For
@@ -681,7 +724,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - Defined requirements for audit serialization, delivery, and offline
   verification. ([#173](https://github.com/praxis-proxy/policy/pull/173))
-- The per-slot key tables in `docs/content/cmf-extensions.md` are now checked
+- The per-slot key tables in `docs/content/concepts/cmf-extensions.md` are now checked
   against the bridge rather than maintained by hand.
   `crates/ppe-apl-cmf/tests/key_catalog/` declares every key the bridge emits
   with its type, its slot and the capability that gates it, and asserts that
@@ -779,7 +822,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   copies of the same implementation registering the same `kind`, and the registry
   is last-write-wins. Versions up to 0.3.1 of the old crates stay on crates.io;
   later releases publish only the consolidated crate. See
-  [Crates](docs/content/crates.md) for the mapping.
+  [Crates](docs/content/reference/crates.md) for the mapping.
   ([#140](https://github.com/praxis-proxy/policy/pull/140))
 - Config-load errors from the JWT, OAuth and CIBA extensions now name the
   plugin kind (`identity/jwt`, `delegator/oauth`, `elicitation/ciba`) instead of
@@ -878,7 +921,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [0.2.0] - 2026-09-03
 
-> **Upgrading from 0.1.0?** Configurations require changes: this release removes ten keys, changes the default dispatch mode, and tightens APL lexical rules. `docs/upgrade-apl.md` lists the required rewrites with before-and-after examples.
+> **Upgrading from 0.1.0?** Configurations require changes: this release removes
+> ten keys, changes the default dispatch mode, and tightens APL lexical rules.
+> `docs/content/guides/upgrade-apl.md` lists the required rewrites with
+> before-and-after examples.
 >
 > `docs/content/apl/apl-grammar.md` is the normative APL grammar, replacing the parser's inline grammar comments.
 
@@ -886,7 +932,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **`assertions:` controls headers at trust boundaries.** Available alongside `authentication:` at global, default, bundle, and route scope, request assertions map engine-derived values such as `subject.id` and `claim.<name>` to upstream headers; response assertions strip or replace upstream headers. Target headers are removed before rendering, preventing a missing value from preserving client-supplied data under a trusted name.
 
-  More-specific `headers:` entries replace matching targets, `strip:` entries accumulate, and `replace_inherited: true` resets inherited rules. Tokens and peer-supplied headers cannot be sources, while fixed protocol floors protect required request and response headers. Invalid or conflicting entries fail configuration loading with their location. Assertions run after the applicable policy phase and are unsigned, so recipients must trust the network path. See `docs/content/assertions.md`. ([#28](https://github.com/praxis-proxy/policy/issues/28))
+  More-specific `headers:` entries replace matching targets, `strip:` entries accumulate, and `replace_inherited: true` resets inherited rules. Tokens and peer-supplied headers cannot be sources, while fixed protocol floors protect required request and response headers. Invalid or conflicting entries fail configuration loading with their location. Assertions run after the applicable policy phase and are unsigned, so recipients must trust the network path. See `docs/content/reference/assertions.md`. ([#28](https://github.com/praxis-proxy/policy/issues/28))
 
 - **`docs/content/apl/apl-grammar.md` is now the normative APL grammar.** It documents the EBNF, lexical rules, precedence, valid syntax by position, steps, field pipelines, and invalid forms. Conformance tests keep the parser and document aligned with accepted and rejected cases.
 
