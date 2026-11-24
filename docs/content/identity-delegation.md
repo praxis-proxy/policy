@@ -1025,6 +1025,120 @@ because `client.key_binding` is set only after a proof verifies.
 Tested: inbound verification against Keycloak 26.8 (`dpop_live`, see
 [Testing](testing.md)); the delegation legs are those of Recipes 1 and 3.
 
+---
+
+### Recipe 12: A Kubernetes token, reviewed by the API server
+
+`identity/kubernetes-token-review` sends the caller's token to the
+[TokenReview] API and maps the user the cluster names.
+
+**Use this when** a caller presents a token only the cluster can vouch for: a
+legacy Secret-based ServiceAccount token, which never expires and is revoked
+only by deleting its Secret; a bound token that must stop working soon after
+its pod is deleted, within the revocation window described below; or a token
+the cluster authenticates through a webhook or maps through its OIDC settings.
+It also returns the user's groups, which a ServiceAccount JWT does not carry.
+
+**Prefer instead** `identity/jwt` against the cluster's issuer for projected
+ServiceAccount tokens. It verifies them locally, with no call to the API server
+per request. It still needs the cluster's JWKS, fetched at startup and on
+refresh, and keeps the last key set if a refresh fails. The issuer discovery
+and JWKS must be reachable from PPE: managed clusters publish them, and a
+self-managed one grants access with a binding for `system:unauthenticated`. It
+sees only the namespace and ServiceAccount, not groups. Treat legacy tokens
+as something to migrate off rather than a reason to keep this path: they never
+expire, and Kubernetes now removes unused ones.
+
+```yaml
+plugins:
+  - name: k8s-identity
+    kind: identity/kubernetes-token-review
+    hooks: [identity.resolve]
+    capabilities: [perform_http]
+    config:
+      credential:
+        kind: header
+        name: Authorization
+      prefix: "Bearer "
+      api_server:
+        url: https://kubernetes.default.svc
+        reviewer_token:
+          kind: file
+          path: /var/run/secrets/kubernetes.io/serviceaccount/token
+          refresh_secs: 60
+        timeout_secs: 5
+      audiences: [praxis-gateway]
+      record_map:
+        subject:
+          id: username
+          roles: groups
+      cache:
+        ttl_secs: 30
+        negative_ttl_secs: 5
+
+global:
+  authentication: [k8s-identity]
+```
+
+**PPE's own identity.** The reviewer token authenticates PPE to the API server,
+and that identity needs `create` on `tokenreviews`. The built-in
+`system:auth-delegator` ClusterRole grants it. A `file` token is read again once
+`refresh_secs` has passed, so a projected ServiceAccount token rotates without a
+restart. Outside the cluster, use `kind: env` with a variable `name`, holding a
+long-lived token for a dedicated reviewer ServiceAccount.
+
+**Trust.** The bundled `HyperTransport` trusts public CA roots and has no
+custom-CA setting. A private cluster CA requires a host-installed
+`HttpTransport` configured to trust that CA. The URL must be `https://`,
+because the reviewer token travels on it.
+
+**Audiences.** With `audiences` set, the API server authenticates the token
+only for one of them, and the answer must name one in `status.audiences`.
+Without it, any token the cluster accepts for its own API signs a caller in,
+including one minted to call the API server, and the resolver logs a warning
+at load. Legacy Secret-based tokens authenticate only for the API server's own
+audience, so a deployment that serves them leaves `audiences` unset.
+
+**The record.** `status.user` is what `record_map` reads: `username`, `uid`,
+`groups` and `extra`. ServiceAccount groups contain `:`, so use the canonical
+set rather than a `role.` path:
+
+<!-- validate: apl-predicate -->
+```apl
+require(subject.roles contains "system:serviceaccounts:team-a")
+```
+
+#### Denial codes
+
+| Code | Means |
+|---|---|
+| `auth.missing_credential` | nothing at the configured location |
+| `auth.token_unauthenticated` | the API server did not authenticate the token, or not for a configured audience |
+| `auth.token_expired` | a cached answer outlived the token's own `exp` |
+| `auth.directory_unavailable` | the API server could not answer, or refused the reviewer token (`401`, `403`) |
+| `auth.mapping_failed` | the review resolved and the map could not project it |
+
+#### The revocation window
+
+Every request is reviewed unless `cache` is set. With it, a deleted pod or
+Secret keeps authenticating until the entry expires (`cache.ttl_secs`), except
+that an answer for a JWT never outlives the token's own `exp`. The API server
+caches its own answers too: a token it authenticated recently keeps passing
+for about 10 seconds after its Secret is deleted. The revocation window for a
+legacy token is therefore `cache.ttl_secs` plus that, so keep the TTL short.
+Negative caching can also delay recovery from an authenticator failure by
+`negative_ttl_secs`.
+
+Tested: end to end through Praxis against Kubernetes 1.35 (kind), with
+projected and legacy ServiceAccount tokens. A team-a token reached the
+backend, a team-b token was denied by the role check, and a default-audience
+token, a legacy token under a custom audience, an unknown token and a legacy
+token whose Secret was deleted were each refused as
+`auth.token_unauthenticated`. The API server's answers are the test suite's
+fixtures.
+
+[TokenReview]: https://kubernetes.io/docs/reference/kubernetes-api/authentication-resources/token-review-v1/
+
 ## Reading claims the way your IdP writes them
 
 The JWT identity plugin infers a subject from a token's claims. Which

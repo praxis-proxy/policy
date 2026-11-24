@@ -42,13 +42,11 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Instant;
 
-use crate::plugins::identity_api_key::crypto::hash_credential;
 use praxis_policy_core::host::HostServices;
 use serde::{Deserialize, Serialize};
 
-use crate::plugins::identity_api_key::directory::{
-    DirectoryError, KeyDirectory, KeyRecord, PresentedKey,
-};
+use crate::token_lookup::crypto::{API_KEY_CACHE, HashLabels, hash_credential};
+use crate::token_lookup::directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
 
 fn default_max_entries() -> usize {
     10_000
@@ -126,6 +124,7 @@ struct Entry {
 pub struct CachingDirectory {
     inner: std::sync::Arc<dyn KeyDirectory>,
     config: CacheConfig,
+    hash_labels: HashLabels,
     started: Instant,
     /// Resolved records, keyed by digest.
     hits: RwLock<HashMap<[u8; 32], Entry>>,
@@ -147,10 +146,18 @@ impl CachingDirectory {
         Ok(Self {
             inner,
             config,
+            hash_labels: API_KEY_CACHE,
             started: Instant::now(),
             hits: RwLock::new(HashMap::new()),
             misses: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// Report a hashing failure with `labels` rather than the API key ones.
+    #[must_use]
+    pub(crate) fn with_hash_labels(mut self, labels: HashLabels) -> Self {
+        self.hash_labels = labels;
+        self
     }
 
     /// How many resolved records are held.
@@ -183,8 +190,8 @@ impl CachingDirectory {
     /// can read the heap, for as long as the entry lives. Hashing costs one
     /// SHA-256 per lookup and removes that entirely. It is also what makes the
     /// entry safe to count, log and size.
-    fn key_of(presented: &PresentedKey) -> Result<[u8; 32], DirectoryError> {
-        hash_credential(presented, "api_key_cache")
+    fn key_of(&self, presented: &PresentedKey) -> Result<[u8; 32], DirectoryError> {
+        hash_credential(presented, self.hash_labels)
     }
 
     /// A live entry for `key`, if there is one.
@@ -232,7 +239,7 @@ impl KeyDirectory for CachingDirectory {
         presented: &PresentedKey,
         services: &dyn HostServices,
     ) -> Result<Option<KeyRecord>, DirectoryError> {
-        let key = Self::key_of(presented)?;
+        let key = self.key_of(presented)?;
         let now = self.now_ms();
 
         if let Some(entry) = Self::get(&self.hits, &key, now) {
