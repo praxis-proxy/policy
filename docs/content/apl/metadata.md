@@ -94,7 +94,9 @@ error record. An executor timeout, panic, or source error returns no trusted
 when the source denies, or returns without a record.
 
 The fetch runs inside the APL route handler, and both share the invocation's
-remaining deadline. Request-time host services preserve that absolute deadline
+remaining deadline. The Praxis embedding must seed that budget on request-time
+`Extensions` with `Extensions::with_invocation_deadline`; Policy cannot infer a
+gateway deadline. Request-time host services then preserve the absolute deadline
 across nested dispatches and cap every HTTP attempt, connect hint, retry budget,
 and backoff before transport dispatch. An adapter may configure a stricter
 deadline but cannot extend the invocation budget. If no time remains, the host

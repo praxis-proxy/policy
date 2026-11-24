@@ -939,7 +939,9 @@ impl ConfigVisitor for AplConfigVisitor {
                     continue;
                 }
                 let mut effective = global_compiled.clone();
-                if let Some(block) = apl_subblock(section) {
+                if entity != ENTITY_HTTP
+                    && let Some(block) = apl_subblock(section)
+                {
                     effective.apply_layer(
                         compile_policy_block_value(&format!("global.defaults.{entity}"), &block)
                             .map_err(|error| -> VisitorError { Box::new(error) })?,

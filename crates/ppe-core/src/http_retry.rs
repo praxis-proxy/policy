@@ -254,6 +254,7 @@ pub(crate) async fn execute_with_retry_until(
         (None, None) => None,
     };
     let mut attempt: u32 = 0;
+    let mut original_req = Some(req);
 
     loop {
         let now = Instant::now();
@@ -262,7 +263,18 @@ pub(crate) async fn execute_with_retry_until(
             return Err(HttpTransportError::Timeout);
         }
 
-        let mut attempt_req = req.clone();
+        let final_attempt = attempt.saturating_add(1) >= policy.max_attempts;
+        let mut attempt_req = if final_attempt {
+            let Some(request) = original_req.take() else {
+                return Err(HttpTransportError::Timeout);
+            };
+            request
+        } else {
+            let Some(request) = original_req.as_ref() else {
+                return Err(HttpTransportError::Timeout);
+            };
+            request.clone()
+        };
         if let Some(remaining) = remaining {
             attempt_req.timeout = attempt_req.timeout.min(remaining);
             attempt_req.connect_timeout = attempt_req
@@ -276,11 +288,10 @@ pub(crate) async fn execute_with_retry_until(
         let attempt_deadline = deadline.map_or(attempt_deadline, |invocation| {
             invocation.min(attempt_deadline)
         });
-        let result =
-            match tokio::time::timeout_at(attempt_deadline, transport.execute(attempt_req)).await {
-                Ok(result) => result,
-                Err(_) => Err(HttpTransportError::Timeout),
-            };
+        let result = match execute_at_deadline(transport, attempt_req, attempt_deadline).await {
+            Ok(result) => result,
+            Err(_) => Err(HttpTransportError::Timeout),
+        };
         let err = match result {
             Ok(response) => return Ok(response),
             Err(error) => error,
@@ -301,6 +312,23 @@ pub(crate) async fn execute_with_retry_until(
             tokio::time::sleep(delay).await;
         }
     }
+}
+
+async fn execute_at_deadline(
+    transport: &dyn HttpTransport,
+    req: HttpRequest,
+    deadline: Instant,
+) -> Result<Result<HttpResponse, HttpTransportError>, ()> {
+    if Instant::now() >= deadline {
+        return Err(());
+    }
+    let result = tokio::time::timeout_at(deadline, transport.execute(req))
+        .await
+        .map_err(|_timeout_error| ())?;
+    if Instant::now() >= deadline && result.is_ok() {
+        return Err(());
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

@@ -407,6 +407,32 @@ fn expression_path(expression: &Expr) -> Option<Vec<String>> {
     }
 }
 
+fn expression_path_info(expression: &Expr) -> Option<(Vec<String>, bool)> {
+    match expression {
+        Expr::RefBrack { refr, index, .. } => {
+            let (path, expands) = expression_path_info(refr)?;
+            match index.as_ref() {
+                Expr::String { value, .. } | Expr::RawString { value, .. } => {
+                    let mut path = path;
+                    path.push(value.as_string().ok()?.to_string());
+                    Some((path, expands))
+                },
+                _ => Some((path, true)),
+            }
+        },
+        Expr::RefDot { refr, field, .. } => {
+            let (mut path, expands) = expression_path_info(refr)?;
+            path.push(field.1.as_string().ok()?.to_string());
+            Some((path, expands))
+        },
+        Expr::Var { value, .. } => value
+            .as_string()
+            .ok()
+            .map(|name| (vec![name.to_string()], false)),
+        _ => None,
+    }
+}
+
 fn module_import_aliases(module: &Module) -> HashMap<String, Vec<String>> {
     module
         .imports
@@ -431,7 +457,19 @@ fn collect_rule_references(
     match rule {
         Rule::Spec { head, bodies, .. } => {
             match head {
-                RuleHead::Compr { assign, .. } | RuleHead::Func { assign, .. } => {
+                RuleHead::Compr { refr, assign, .. } => {
+                    collect_head_index_references(refr, package, imports, out);
+                    if let Some(assign) = assign {
+                        collect_expression_references(&assign.value, package, imports, out);
+                    }
+                },
+                RuleHead::Func {
+                    refr, args, assign, ..
+                } => {
+                    collect_head_index_references(refr, package, imports, out);
+                    for arg in args {
+                        collect_expression_references(arg, package, imports, out);
+                    }
                     if let Some(assign) = assign {
                         collect_expression_references(&assign.value, package, imports, out);
                     }
@@ -452,6 +490,22 @@ fn collect_rule_references(
         Rule::Default { value, .. } => {
             collect_expression_references(value, package, imports, out);
         },
+    }
+}
+
+fn collect_head_index_references(
+    expression: &Expr,
+    package: &[String],
+    imports: &HashMap<String, Vec<String>>,
+    out: &mut HashSet<RulePath>,
+) {
+    match expression {
+        Expr::RefBrack { refr, index, .. } => {
+            collect_head_index_references(refr, package, imports, out);
+            collect_expression_references(index, package, imports, out);
+        },
+        Expr::RefDot { refr, .. } => collect_head_index_references(refr, package, imports, out),
+        _ => {},
     }
 }
 
@@ -497,7 +551,7 @@ fn collect_expression_references(
     imports: &HashMap<String, Vec<String>>,
     out: &mut HashSet<RulePath>,
 ) {
-    if let Some(path) = expression_path(expression) {
+    if let Some((path, expands)) = expression_path_info(expression) {
         let resolved = if path.first().is_some_and(|part| part == "data") {
             Some(path)
         } else if let Some(imported) = path.first().and_then(|head| imports.get(head)) {
@@ -516,9 +570,13 @@ fn collect_expression_references(
             None
         };
         if let Some(mut resolved) = resolved {
-            while resolved.len() > 1 {
-                out.insert(resolved.clone());
-                resolved.pop();
+            if expands {
+                while resolved.len() > 1 {
+                    out.insert(resolved.clone());
+                    resolved.pop();
+                }
+            } else {
+                out.insert(resolved);
             }
         }
     }

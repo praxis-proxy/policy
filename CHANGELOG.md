@@ -19,6 +19,15 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Bounded metadata callout contracts.** `HostServices::remaining_invocation_time`
+  and `Extensions::with_invocation_deadline` let the embedding propagate the
+  gateway invocation budget through nested metadata dispatch. Stable metadata
+  callout error classes and codes, plus the versioned value-free
+  `MetadataCalloutAuditEvent` and `CalloutObserver`, provide bounded operational
+  reporting without exposing request or response values.
+  ([#246](https://github.com/praxis-proxy/policy/issues/246),
+  [#247](https://github.com/praxis-proxy/policy/issues/247))
+
 - **Kubernetes `TokenReview` identity.** `identity/kubernetes-token-review`,
   behind the `kubernetes-token-review` feature, resolves a bearer token by
   submitting it to the API server's `TokenReview` API and maps `status.user`
@@ -31,6 +40,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#213](https://github.com/praxis-proxy/policy/issues/213))
 
 ### Changed
+
+- **Deadline-aware HTTP retries.** Public `execute_with_retry` now bounds each
+  attempt, shrinks later attempt budgets, and returns
+  `HttpTransportError::Timeout` when the retry or invocation budget expires
+  instead of necessarily returning the last transport error.
+  ([#246](https://github.com/praxis-proxy/policy/issues/246))
 
 - **Documentation navigation.** Organize published pages into Getting started,
   Guides, Concepts, APL, and Reference sections. Add section landing pages

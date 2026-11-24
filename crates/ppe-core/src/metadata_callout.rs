@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use http::uri::Authority;
+use http::{StatusCode, uri::Authority};
 use serde::Serialize;
 
 use crate::extensions::{MetadataCacheDisposition, MetadataOutcome};
@@ -165,6 +165,19 @@ impl MetadataCalloutAuditEvent {
         )
     }
 
+    /// Create an audit record for a successful source operation with its accepted status.
+    #[must_use]
+    pub fn success_with_accepted_status(
+        instance: impl Into<String>,
+        authority: &Authority,
+        cache: MetadataCacheDisposition,
+        status: StatusCode,
+    ) -> Self {
+        let mut event = Self::success(instance, authority, cache);
+        event.accepted_status = Some(status.as_u16());
+        event
+    }
+
     /// Create an audit record for a normalized source failure.
     #[must_use]
     pub fn error(
@@ -179,13 +192,6 @@ impl MetadataCalloutAuditEvent {
             cache,
             MetadataCalloutAuditResult::Error { error_code },
         )
-    }
-
-    /// Attach an accepted upstream status selected for exposure.
-    #[must_use]
-    pub const fn with_accepted_status(mut self, status: u16) -> Self {
-        self.accepted_status = Some(status);
-        self
     }
 
     /// Attach a circuit-breaker transition caused by this operation.
@@ -362,17 +368,16 @@ mod tests {
     }
 
     #[test]
-    fn audit_serialization_is_versioned_and_value_free() {
+    fn successful_audit_serialization_is_versioned_and_value_free() {
         let authority: Authority = "metadata.example:8443"
             .parse()
             .expect("authority should parse");
-        let event = MetadataCalloutAuditEvent::error(
+        let event = MetadataCalloutAuditEvent::success_with_accepted_status(
             "account",
             &authority,
             MetadataCacheDisposition::Miss,
-            MetadataCalloutErrorCode::Timeout,
+            StatusCode::OK,
         )
-        .with_accepted_status(503)
         .with_breaker_transition(MetadataCircuitBreakerTransition::ClosedToOpen)
         .with_credential_interpolation()
         .with_response_counts(17, 2);
@@ -382,19 +387,19 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "accepted_status": 503,
+                "accepted_status": 200,
                 "authority": "metadata.example:8443",
                 "breaker_transition": "closed_to_open",
                 "cache": "miss",
                 "credential_interpolation": true,
-                "error_code": "metadata.timeout",
                 "instance": "account",
-                "outcome": "error",
+                "outcome": "success",
                 "rejected_key_count": 2,
                 "response_node_count": 17,
                 "schema_version": 1,
                 "stale": false
-            })
+            }),
+            "successful audit schema should expose only bounded operational metadata"
         );
         let encoded = value.to_string();
         for forbidden in [
@@ -408,5 +413,63 @@ mod tests {
         ] {
             assert!(!encoded.contains(forbidden), "forbidden field: {forbidden}");
         }
+    }
+
+    #[test]
+    fn failed_audit_serialization_has_error_code_without_accepted_status() {
+        let authority: Authority = "metadata.example:8443"
+            .parse()
+            .expect("authority should parse");
+        let event = MetadataCalloutAuditEvent::error(
+            "account",
+            &authority,
+            MetadataCacheDisposition::Miss,
+            MetadataCalloutErrorCode::Timeout,
+        );
+
+        assert_eq!(
+            serde_json::to_value(event).expect("audit event should serialize"),
+            json!({
+                "authority": "metadata.example:8443",
+                "cache": "miss",
+                "credential_interpolation": false,
+                "error_code": "metadata.timeout",
+                "instance": "account",
+                "outcome": "error",
+                "rejected_key_count": 0,
+                "response_node_count": 0,
+                "schema_version": 1,
+                "stale": false
+            }),
+            "failed audits must not claim that an upstream status was accepted"
+        );
+    }
+
+    #[test]
+    fn audit_authority_strips_userinfo_and_rejects_path_or_query_data() {
+        let authority: Authority = "user:password@metadata.example:8443"
+            .parse()
+            .expect("RFC 3986 authority with userinfo should parse");
+        let event = MetadataCalloutAuditEvent::success(
+            "account",
+            &authority,
+            MetadataCacheDisposition::Disabled,
+        );
+
+        assert_eq!(
+            event.authority(),
+            "metadata.example:8443",
+            "audit authority must not retain credential-bearing userinfo"
+        );
+        assert!(
+            "metadata.example/path".parse::<Authority>().is_err(),
+            "a path must not enter the audit record through Authority"
+        );
+        assert!(
+            "metadata.example?token=secret"
+                .parse::<Authority>()
+                .is_err(),
+            "a query must not enter the audit record through Authority"
+        );
     }
 }
