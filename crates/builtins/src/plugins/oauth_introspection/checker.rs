@@ -32,15 +32,23 @@ enum Status {
 }
 
 impl IntrospectionPlugin {
-    /// The slot's raw inbound token, when it names this plugin's issuer.
+    /// The slot's raw inbound token, when it belongs to this plugin's issuer.
+    ///
+    /// The issuer the authenticating resolver recorded decides, so an opaque
+    /// token it vouched for is covered, and a JWT it recorded for another
+    /// issuer is not sent here whatever its `iss` says. With nothing
+    /// recorded, a JWT's `iss` decides, and an opaque token is left alone.
     fn token_for<'ext>(&self, ext: &'ext Extensions, slot: IdentitySlot) -> Option<&'ext str> {
         let token = ext
             .raw_credentials
             .as_ref()?
             .inbound_tokens
             .get(&slot.token_role())?;
-        (issuer_of(&token.token).as_deref() == Some(self.settings.issuer.as_str()))
-            .then_some(token.token.as_str())
+        let ours = match token.issuer.as_deref() {
+            Some(recorded) => recorded == self.settings.issuer,
+            None => issuer_of(&token.token).as_deref() == Some(self.settings.issuer.as_str()),
+        };
+        ours.then_some(token.token.as_str())
     }
 
     /// Ask the issuer about one slot's token, logging what the caller is
@@ -111,13 +119,16 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use praxis_policy_core::extensions::raw_credentials::TokenKind;
     use praxis_policy_core::http::HttpTransportError;
     use praxis_policy_core::http_testing::FakeTransport;
     use praxis_policy_core::revocation::CheckPoint;
     use serde_json::json;
 
     use super::*;
-    use crate::plugins::oauth_introspection::test_support::{ISSUER, ext, jwt, plugin as checker};
+    use crate::plugins::oauth_introspection::test_support::{
+        ISSUER, ext, ext_with, inbound, jwt, plugin as checker,
+    };
 
     // -------------------------------------------------------------------------
     // Fixtures
@@ -293,6 +304,32 @@ mod tests {
 
         assert_eq!(vouched(&result), vec![IdentitySlot::Client], "vouched");
         assert_eq!(transport.call_count(), 1, "one slot, one call");
+    }
+
+    #[tokio::test]
+    async fn an_opaque_token_recorded_for_this_issuer_is_checked() {
+        let transport =
+            Arc::new(FakeTransport::new().json("/introspect", 200, r#"{"active":true}"#));
+        let token = inbound("opaque-8xLq", TokenKind::Opaque).with_issuer(ISSUER);
+        let ext = ext_with(&transport, &[(IdentitySlot::Subject, token)]);
+
+        let result = run(&checker(json!({})), &asked(&[IdentitySlot::Subject]), &ext).await;
+
+        assert_eq!(vouched(&result), vec![IdentitySlot::Subject], "vouched");
+        assert_eq!(transport.call_count(), 1, "sent to the issuer that vouched");
+    }
+
+    #[tokio::test]
+    async fn a_recorded_issuer_outranks_the_one_a_jwt_names() {
+        let transport =
+            Arc::new(FakeTransport::new().json("/introspect", 200, r#"{"active":true}"#));
+        let token = inbound(&jwt(ISSUER), TokenKind::Jwt).with_issuer("https://other.example");
+        let ext = ext_with(&transport, &[(IdentitySlot::Subject, token)]);
+
+        let result = run(&checker(json!({})), &asked(&[IdentitySlot::Subject]), &ext).await;
+
+        assert!(vouched(&result).is_empty(), "recorded for another issuer");
+        assert_eq!(transport.call_count(), 0, "the token never left");
     }
 
     // -------------------------------------------------------------------------

@@ -46,6 +46,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **`form_urlencode_component`.** `praxis_policy_core::http` exposes the
   per-value encoder `form_urlencode` already used, for callers building an
   RFC 6749 Basic credential.
+- **`RawInboundToken::issuer`.** A resolver can record the issuer that
+  vouched for a token with `RawInboundToken::with_issuer`. It is serialized
+  and shown in `Debug`; the token still is not. The introspection checker
+  sends a token to its endpoint when the recorded issuer is its own, so an
+  opaque token can be checked, and never when the recorded issuer is
+  another, whatever a JWT's `iss` says.
 
 ### Changed
 
@@ -55,7 +61,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `..Default::default()`, and exhaustive destructuring must name the fields
   or use `..`. `ConfigScope` adds `Revocation` and `RevocationStep`, and
   `RouteResolutionError` adds `RevocationUnavailable`; downstream exhaustive
-  matches must handle the new variants. All of these are also reachable
+  matches must handle the new variants. `RawInboundToken` adds `issuer`;
+  build it with `RawInboundToken::new`, or initialize the field in an
+  exhaustive literal. All of these are also reachable
   through the `praxis_policy` facade's crate re-exports.
   ([#205](https://github.com/praxis-proxy/policy/issues/205))
 

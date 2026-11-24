@@ -1475,9 +1475,11 @@ it through.
 `oauth/introspection` uses
 [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662) token introspection to
 ask the issuer whether a token is still active. It only handles a slot
-whose raw token is a JWT with an `iss` that matches the `issuer` setting
-exactly. It never sends tokens from other issuers, or opaque tokens, to the
-endpoint. Another checker has to handle those slots.
+whose raw token belongs to the `issuer` setting, compared exactly. When the
+resolver that authenticated the token recorded its issuer, that decides.
+Otherwise the token must be a JWT whose `iss` matches. It never sends a
+token to the endpoint when the token belongs to another issuer, or is
+opaque with no issuer recorded. Another checker has to handle those slots.
 
 If the issuer answers `active: true`, the checker vouches for the slot, and
 `active: false` denies with `auth.revoked`. A timeout, a transport error,

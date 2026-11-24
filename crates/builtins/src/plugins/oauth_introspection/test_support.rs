@@ -59,23 +59,36 @@ pub(crate) fn jwt(iss: &str) -> String {
     )
 }
 
-/// Extensions carrying `transport` and one raw inbound token per slot.
+/// Extensions carrying `transport` and one raw inbound JWT per slot, with no
+/// issuer recorded.
 pub(crate) fn ext(transport: &Arc<FakeTransport>, tokens: &[(IdentitySlot, String)]) -> Extensions {
+    let tokens: Vec<_> = tokens
+        .iter()
+        .map(|(slot, token)| (*slot, inbound(token, TokenKind::Jwt)))
+        .collect();
+    ext_with(transport, &tokens)
+}
+
+/// A raw inbound token from the `authorization` header.
+pub(crate) fn inbound(token: &str, kind: TokenKind) -> RawInboundToken {
+    RawInboundToken::new(
+        token,
+        Credential::Header {
+            name: "authorization".into(),
+        },
+        kind,
+    )
+}
+
+/// Extensions carrying `transport` and `tokens`, one per slot.
+pub(crate) fn ext_with(
+    transport: &Arc<FakeTransport>,
+    tokens: &[(IdentitySlot, RawInboundToken)],
+) -> Extensions {
     let http: Arc<dyn HttpTransport> = transport.clone();
     let inbound_tokens: HashMap<_, _> = tokens
         .iter()
-        .map(|(slot, token)| {
-            (
-                slot.token_role(),
-                RawInboundToken::new(
-                    token.clone(),
-                    Credential::Header {
-                        name: "authorization".into(),
-                    },
-                    TokenKind::Jwt,
-                ),
-            )
-        })
+        .map(|(slot, token)| (slot.token_role(), token.clone()))
         .collect();
     Extensions {
         http_transport: HttpTransportSlot::installed(http),
