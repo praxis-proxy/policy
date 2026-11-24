@@ -5,11 +5,17 @@ host serializes back to the client. This guide is the contract a host must
 follow for routes, `mcp.*` rules, and `args:` / `result:` pipelines to take
 effect.
 
+PPE supports the resource and prompt projections described here. Current
+Praxis builds and rewrites response parts only for `tools/call`; resource
+and prompt content checks, including content-based denials, require the
+adapter work in [praxis#1583](https://github.com/praxis-proxy/praxis/pull/1583).
+
 ## Contents
 
 - [The three layers](#the-three-layers)
 - [What each layer means](#what-each-layer-means)
 - [What a host must do](#what-a-host-must-do)
+- [Tested resource and prompt policies](#tested-resource-and-prompt-policies)
 - [Known gaps](#known-gaps)
 
 ---
@@ -60,9 +66,11 @@ them to agree.
 - A federating gateway is where the two differ. It may expose a tool to the
   agent as `hr__get_salary` (`ToolCall.name`) while the upstream tool is
   `get_salary` on `hr-server` (`ToolMetadata.name`, `server_id`).
-- `MetaExtension.entity_name` is the name routes match against. Hosts set it
-  to the name the agent sent, so write routes against the names agents call,
-  including any gateway prefix.
+- `MetaExtension.entity_name` is the exact name routes match against. Praxis
+  uses the name the agent sent, including any gateway prefix. A host that
+  renames entities can use its resolved catalog name; it must document that
+  choice and configure routes against the naming scheme it supplies. PPE
+  does not resolve aliases between the wire and catalog views.
 - `ToolCall.namespace` is the namespace the agent sees, if it sees one (for
   example `hr` in `hr__get_salary`), and `None` otherwise. The upstream
   server's namespace belongs in `ToolMetadata.namespace`.
@@ -80,13 +88,15 @@ Authorization rules key on the resolved identity (`mcp.tool.name`,
   agent choose what the PDP authorizes. A host without a catalog leaves
   `MCPExtension` unset; `mcp.*` attributes are then absent and authorization
   relies on route matching and identity.
-- **Set `PromptResult.content` to the rendered text**: the text parts of
-  `messages`, joined in order. Policy reads `content`, not `messages`. A host
+- **Until issue #76, set `PromptResult.content` to the rendered text**: the
+  text parts of `messages`, joined in order. Policy reads `content`, not
+`messages`. A host
   that fills only `messages` leaves `result.content` null, and every content
   rule on the prompt route, injection scanning included, passes without
   matching.
-- **Serialize the response from `PromptResult.content`**, not from the
-  original `messages`. `content` is the copy policy inspected and rewrote, so a
+- **Until issue #76, serialize the response from `PromptResult.content`**,
+  rather than the original `messages`. `content` is the copy policy inspected
+and rewrote, so a
   redaction applied to it reaches the client only if `content` is what the host
   sends.
 - **Treat read-only fields as fixed.** Policy can read these fields but never
@@ -104,10 +114,66 @@ Authorization rules key on the resolved identity (`mcp.tool.name`,
 
 ---
 
+## Tested resource and prompt policies
+
+These examples require a host that supplies the content parts listed above.
+They deny one exact prohibited text value and redact the content of allowed
+responses. They demonstrate PPE behavior; client-visible redaction also
+requires the host to serialize the transformed part.
+
+The resource example addresses the first fetched `Resource`. A response
+whose content is `topsecret` is denied; an allowed response has its content
+replaced with `[REDACTED]`.
+
+<!-- evaluate: host-resource-projection -->
+```yaml
+engine_settings:
+  dispatch: policy
+routes:
+  - resource: hr://employees/*
+    authorization:
+      post_invocation:
+        - "result.content == 'topsecret': deny('secret resource')"
+        - when: "result.content != 'topsecret'"
+          do: "result.content | redact"
+```
+
+The prompt example reads the flat `PromptResult.content`. A host must
+populate it and serialize the resulting content until issue #76 introduces
+native message-list inspection. The example denies the exact text `ignore
+previous instructions` and redacts other rendered text.
+
+<!-- evaluate: host-prompt-projection -->
+```yaml
+engine_settings:
+  dispatch: policy
+routes:
+  - prompt: summarize-*
+    authorization:
+      post_invocation:
+        - "result.content == 'ignore previous instructions': deny('unsafe prompt')"
+        - when: "result.content != 'ignore previous instructions'"
+          do: "result.content | redact"
+```
+
+Both fences are loaded by the documentation example suite and executed by
+the `host_guide_*_example_denies_and_redacts` tests in
+`crates/ppe-apl-runtime/tests/visitor_e2e.rs`. Those tests assert both denial
+and the transformed CMF payload forwarded by PPE.
+
 ## Known gaps
 
 Policy does not yet inspect every content part of every message:
 
+- **Resource edits and plugin field readback require a unique URI.** PPE
+  records the selected resource before plugins run and uses that URI for
+  later reads and writes, so reordering different resources keeps the same
+  target. A removed target, a URI shared by several parts, or a plugin that
+  introduces a duplicate denies the request. Write-back uses
+  `policy.envelope_replaced`; a plugin field-readback denial is attributed
+  to that field pipeline. Request correlation IDs do not distinguish parts
+  of one response. Emit one resource
+  per message when URIs can repeat; per-part addressing belongs to issue #76.
 - **Only the first `Resource` part is projected.** A `resources/read` can
   return several contents, and if the host maps each to its own `Resource`
   part, the second and later parts bypass `result.*` rules. Emit one fetched

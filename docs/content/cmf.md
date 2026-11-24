@@ -7,7 +7,8 @@ and resources without depending on the transport protocol.
 
 ## Why a common format
 
-Without CMF, tool-result redaction and LLM-output redaction require separate code
+Without CMF, tool-result redaction and LLM-output redaction require separate
+code
 for separate payload types. CMF gives every interception point the same
 representation. The same APL policy can inspect a tool result, a fetched
 resource, a rendered prompt, or a model completion. Field pipelines (`args:` /
@@ -23,14 +24,17 @@ that transformed part. If the host instead forwards the original upstream
 body, the redaction has no effect on what the client sees.
 
 Praxis currently re-serializes tool results from their CMF parts, so
-redactions on `tool:` routes reach the client. Resource and prompt responses
-are not yet re-serialized
-([praxis#1583](https://github.com/praxis-proxy/praxis/pull/1583) adds this);
-until then, redactions on `resource:` and `prompt:` routes change the CMF
-message but not what the client receives. On `llm:` routes, Praxis forwards
-the original inference body; `result:` pipelines and `**` redactions on those
-routes change the CMF message but do not change what the client receives.
-See the [host integration guide](host-integration-guide.md) for the full contract.
+redactions on `tool:` routes reach the client. Praxis does not yet build
+response-side `Resource` or `PromptResult` parts or re-serialize those
+responses. Content-based rules on `resource:` and `prompt:` routes therefore
+have no response content to inspect, redact, or deny. The adapter work is
+tracked in [praxis#1583](https://github.com/praxis-proxy/praxis/pull/1583).
+A host that supplies these parts can use PPE's projection and write-back
+support, as described in the host integration guide. On `llm:` routes,
+Praxis forwards the original inference body; `result:` pipelines and `**`
+redactions on those routes change the CMF message but do not change what
+the client receives. See the [host integration guide](host-integration-guide.md)
+for the full contract.
 
 ## Message structure
 
