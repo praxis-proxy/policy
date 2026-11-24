@@ -599,10 +599,12 @@ fn snapshot_referenced_values(
     let mut snapshot: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (key, value) in bag.iter() {
         let head = key.split('.').next().unwrap_or(key);
-        if !referenced_set.contains(head) {
+        if !(referenced_set.contains(head)
+            || head == "metadata" && referenced_set.contains(".metadata"))
+        {
             continue;
         }
-        if head == "metadata" {
+        if matches!(head, "metadata" | ".metadata") {
             snapshot.insert(format!("metadata={}", TypeLabel::Map));
             continue;
         }
@@ -629,7 +631,7 @@ fn snapshot_referenced_values(
     {
         snapshot.insert(format!("llm.request={}", TypeLabel::of_json(document)));
     }
-    if referenced_set.contains("metadata") {
+    if referenced_set.contains("metadata") || referenced_set.contains(".metadata") {
         snapshot.insert(format!("metadata={}", TypeLabel::Map));
     }
     snapshot.into_iter().collect()
@@ -639,7 +641,7 @@ fn snapshot_referenced_values(
 /// structured input? Classifies referenced variables in eval-error causes.
 fn variable_present(bag: &AttributeBag, structured: &StructuredInput, name: &str) -> bool {
     match name {
-        "metadata" => return true,
+        "metadata" | ".metadata" => return true,
         "args" if structured.args().is_some() => return true,
         "llm" if structured.llm_request().is_some() => return true,
         _ => {},
@@ -1408,6 +1410,7 @@ mod tests {
         );
         for expr in [
             "metadata.account.nested.secret == 'other'",
+            ".metadata.account.nested.secret == 'other'",
             "metadata.account['$error_code'] == 'metadata.other'",
             "subject.id == 'alice' && metadata.account.nested.secret == 'other'",
         ] {

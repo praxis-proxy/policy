@@ -1106,6 +1106,52 @@ deny contains "suspended" if { values := [x | x := input]; values[0].metadata.ac
     }
 
     #[test]
+    fn parent_document_query_includes_indexed_metadata_rules() {
+        let indexed = resolver(
+            &[r#"package authz
+default decision["allow"] := false
+decision["allow"] := true if input.metadata.account.active"#],
+            OnError::Deny,
+        );
+        let exact = resolver(
+            &[r#"package authz
+default decision := {"allow": false}
+decision := {"allow": true} if input.metadata.account.active"#],
+            OnError::Deny,
+        );
+
+        assert!(
+            indexed.requires_metadata(&call("data.authz.decision", None)),
+            "a document query must include indexed child rules"
+        );
+        assert!(
+            exact.requires_metadata(&call("data.authz.decision", None)),
+            "an exact complete-document rule remains covered"
+        );
+    }
+
+    #[test]
+    fn dependency_paths_preserve_literal_dot_components() {
+        let resolver = resolver(
+            &[
+                r#"package graph["a.b"]
+allow if input.metadata.account.active"#,
+                "package graph.a.b\nallow := true",
+            ],
+            OnError::Deny,
+        );
+
+        assert!(
+            !resolver.requires_metadata(&call("data.graph.a.b.allow", None)),
+            "a dotted package must not alias a literal-dot package component"
+        );
+        assert!(
+            resolver.requires_metadata(&call("data.graph[\"a.b\"].allow", None)),
+            "an unsupported query spelling must retain the conservative grant"
+        );
+    }
+
+    #[test]
     fn inline_policy_dependency_reports_metadata_usage() {
         let resolver = resolver(&[], OnError::Deny);
         let dotted = call(

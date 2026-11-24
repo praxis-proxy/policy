@@ -6,10 +6,12 @@ use std::collections::{HashMap, HashSet};
 use regorus::Engine;
 use regorus::unstable::{Expr, Literal, Module, Query, Rule, RuleHead};
 
+type RulePath = Vec<String>;
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct MetadataDependencies {
-    direct: HashSet<String>,
-    edges: HashMap<String, HashSet<String>>,
+    direct: HashSet<RulePath>,
+    edges: HashMap<RulePath, HashSet<RulePath>>,
 }
 
 impl MetadataDependencies {
@@ -35,7 +37,12 @@ impl MetadataDependencies {
         let Some(root) = normalize_query_path(query) else {
             return true;
         };
-        let mut pending = vec![root];
+        let mut pending = self
+            .edges
+            .keys()
+            .filter(|rule| rule.starts_with(&root))
+            .cloned()
+            .collect::<Vec<_>>();
         let mut seen = HashSet::new();
         while let Some(rule) = pending.pop() {
             if !seen.insert(rule.clone()) {
@@ -51,7 +58,7 @@ impl MetadataDependencies {
         false
     }
 
-    fn add_module(&mut self, module: &Module, known: &HashSet<String>) {
+    fn add_module(&mut self, module: &Module, known: &HashSet<RulePath>) {
         let package = expression_path(&module.package.refr).unwrap_or_default();
         let input_aliases = module_input_aliases(module);
         let import_aliases = module_import_aliases(module);
@@ -65,15 +72,14 @@ impl MetadataDependencies {
             let mut references = HashSet::new();
             collect_rule_references(rule, &package, &import_aliases, &mut references);
             if references.iter().any(|reference| {
-                reference == "input.metadata" || reference.starts_with("input.metadata.")
+                matches!(reference.as_slice(), [input, metadata, ..] if input == "input" && metadata == "metadata")
             }) {
                 self.direct.insert(name.clone());
             }
             let dependencies = references.into_iter().flat_map(|candidate| {
-                let descendant = format!("{candidate}.");
                 known
                     .iter()
-                    .filter(move |rule| **rule == candidate || rule.starts_with(&descendant))
+                    .filter(move |rule| rule.starts_with(&candidate))
                     .cloned()
             });
             self.edges.entry(name).or_default().extend(dependencies);
@@ -81,16 +87,16 @@ impl MetadataDependencies {
     }
 }
 
-fn normalize_query_path(query: &str) -> Option<String> {
+fn normalize_query_path(query: &str) -> Option<RulePath> {
     let query = query.trim();
     (query.starts_with("data.")
         && query.split('.').all(|part| {
             !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         }))
-    .then(|| query.to_owned())
+    .then(|| query.split('.').map(str::to_owned).collect())
 }
 
-fn rule_name(rule: &Rule, package: &[String]) -> Option<String> {
+fn rule_name(rule: &Rule, package: &[String]) -> Option<RulePath> {
     let head = match rule {
         Rule::Spec { head, .. } => match head {
             RuleHead::Compr { refr, .. }
@@ -102,7 +108,7 @@ fn rule_name(rule: &Rule, package: &[String]) -> Option<String> {
     let mut path = vec!["data".to_owned()];
     path.extend(package.iter().cloned());
     path.extend(expression_path(head)?);
-    Some(path.join("."))
+    Some(path)
 }
 
 fn rule_references_metadata(rule: &Rule, aliases: &HashSet<String>) -> bool {
@@ -420,7 +426,7 @@ fn collect_rule_references(
     rule: &Rule,
     package: &[String],
     imports: &HashMap<String, Vec<String>>,
-    out: &mut HashSet<String>,
+    out: &mut HashSet<RulePath>,
 ) {
     match rule {
         Rule::Spec { head, bodies, .. } => {
@@ -453,7 +459,7 @@ fn collect_query_references(
     query: &Query,
     package: &[String],
     imports: &HashMap<String, Vec<String>>,
-    out: &mut HashSet<String>,
+    out: &mut HashSet<RulePath>,
 ) {
     for statement in &query.stmts {
         match &statement.literal {
@@ -489,7 +495,7 @@ fn collect_expression_references(
     expression: &Expr,
     package: &[String],
     imports: &HashMap<String, Vec<String>>,
-    out: &mut HashSet<String>,
+    out: &mut HashSet<RulePath>,
 ) {
     if let Some(path) = expression_path(expression) {
         let resolved = if path.first().is_some_and(|part| part == "data") {
@@ -511,7 +517,7 @@ fn collect_expression_references(
         };
         if let Some(mut resolved) = resolved {
             while resolved.len() > 1 {
-                out.insert(resolved.join("."));
+                out.insert(resolved.clone());
                 resolved.pop();
             }
         }
