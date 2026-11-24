@@ -10,6 +10,8 @@ jwks KID AUTHORITY (--pem PATH | --scalar HEX)
 ndjson
     Read the pretty records an example prints on stdin and write one
     compact record per line, skipping the `//` comment lines.
+unsigned
+    Remove signatures from each NDJSON record without changing its fingerprint.
 """
 
 import argparse
@@ -46,6 +48,16 @@ def ndjson(_: argparse.Namespace) -> None:
         print(json.dumps(record, separators=(",", ":"), ensure_ascii=False))
 
 
+def unsigned(_: argparse.Namespace) -> None:
+    for line in sys.stdin:
+        record = json.loads(line)
+        for attestation in record.get("attestation_list", []):
+            attestation.pop("signatures", None)
+        for field in ("signature_b64", "signature_key_id"):
+            record.get("unmapped", {}).pop(field, None)
+        print(json.dumps(record, separators=(",", ":"), ensure_ascii=False))
+
+
 parser = argparse.ArgumentParser()
 sub = parser.add_subparsers(required=True)
 p = sub.add_parser("jwks")
@@ -56,5 +68,6 @@ src.add_argument("--pem")
 src.add_argument("--scalar")
 p.set_defaults(run=jwks)
 sub.add_parser("ndjson").set_defaults(run=ndjson)
+sub.add_parser("unsigned").set_defaults(run=unsigned)
 args = parser.parse_args()
 args.run(args)
