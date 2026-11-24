@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// Load-time envelope validation for resource and prompt routes.
-//
-// These functions validate `args:` / `result:` field paths and stages
-// against the fixed envelopes a resource or prompt route projects.
-// Extracted from `visitor.rs` so the 3k-line visitor stays focused on
-// config walking and handler installation.
+// Missing fields and read-only rewrites would otherwise load successfully
+// and silently leave policy intent unenforced on fixed envelopes.
 
 use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_PROMPT, ENTITY_RESOURCE};
 use praxis_policy_core::visitor::VisitorError;
@@ -27,17 +23,13 @@ use crate::message_projection::{
 /// The field-path segment that matches at any depth (`**.ssn`).
 const RECURSIVE_SEGMENT: &str = "**";
 
-/// Refuse an `args:` or `result:` block declared at a scope that reaches only
-/// a payload with no fields. Today that is the `http:` selector: an HTTP
-/// exchange reaches a policy through its extensions, and `HttpPayload` has
-/// nothing for a field path to address, so such a stage would read nothing and
-/// rewrite nothing.
+/// Reject field blocks on HTTP routes, whose payload exposes no fields.
 ///
-/// `scope` is the label the refusal names, already spelled the way its caller
-/// names the declaration. Called for each scope whose reach is one entity type,
-/// which is what gives it a payload to check: a route's own block and
-/// `global.defaults.<entity>`. A bundle is shared by routes of several entity
-/// types, and `global:` accepts neither block at all.
+/// `scope` identifies the configuration declaration in the diagnostic.
+///
+/// # Errors
+///
+/// Returns a configuration error for an unsupported field block.
 pub(crate) fn reject_field_stages_without_fields(
     entity_type: &str,
     scope: &str,
@@ -61,20 +53,14 @@ pub(crate) fn reject_field_stages_without_fields(
     .into())
 }
 
-/// Refuse an `args:` or `result:` pipeline, or a rule's field operation
-/// (`do: result.uri | redact`), that would change a read-only envelope field:
-/// `uri` and `resource_type` on a resource route, `icons` on a
-/// fetched resource, and `prompt_name` and `is_error` on a rendered prompt.
+/// Reject field operations that change fixed envelope identity fields.
 ///
-/// These identify what was authorized, so write-back keeps the original
-/// whatever a pipeline does; refusing at load keeps that from being a silent
-/// no-op. A stage that only checks or labels the value (`str`, `regex(...)`,
-/// `taint(...)`, a detecting scan) is accepted, as are rules that read the
-/// field. Called for the same scopes as [`reject_field_stages_without_fields`].
+/// Checks and labels remain permitted. Recursive paths that can address a
+/// read-only root field are also refused.
 ///
-/// Leading recursive segments can each match zero levels, so the first
-/// non-recursive segment can address a root field. Names are compared without
-/// case because redaction also matches `**.URI` against `uri`.
+/// # Errors
+///
+/// Returns a configuration error naming the scope and protected field.
 pub(crate) fn reject_writes_to_read_only_fields(
     entity_type: &str,
     scope: &str,
@@ -105,27 +91,15 @@ pub(crate) fn reject_writes_to_read_only_fields(
     Ok(())
 }
 
-/// Refuse an `args:` or `result:` path, or a rule's field operation path
-/// (`do: result.ssn | redact`), that cannot resolve on a resource or prompt
-/// envelope, which has a fixed set of fields: a name the envelope does
-/// not have, or a path that continues inside a field holding a single value
-/// (`content.ssn`; `content` is an opaque string). A path inside `annotations`
-/// is accepted, since it is an open map.
+/// Reject paths that cannot resolve within a fixed resource or prompt envelope.
 ///
-/// A recursive path (`**.ssn`) is judged by the segment after `**`. On an
-/// envelope with an open map, any name may sit inside that map, so the path is
-/// accepted. On an envelope without one, every key is a root field, so the
-/// complete remaining path must resolve within that fixed shape. Leading
-/// recursive segments can match zero levels; trailing recursive segments can
-/// match the field itself, but cannot introduce named children of a scalar.
+/// Content is opaque; annotation descendants remain addressable. Redaction
+/// paths match names without case, while other stages require exact names.
+/// Dynamic tool and prompt argument maps are outside this fixed-field check.
 ///
-/// Names are compared the way the runtime will match them: without case when
-/// the path's stages include `redact` (so `CONTENT: redact` is accepted), and
-/// with exact spelling otherwise (so `CONTENT: str` is refused).
+/// # Errors
 ///
-/// Tool `args` / `result` and prompt `args` take their keys from the host's
-/// arguments map, so they have no fixed set and are not checked. Called for
-/// the same scopes as [`reject_field_stages_without_fields`].
+/// Returns a configuration error for an unknown field or a scalar descendant.
 pub(crate) fn reject_unknown_field_paths(
     entity_type: &str,
     scope: &str,
@@ -176,8 +150,7 @@ pub(crate) fn reject_unknown_field_paths(
     Ok(())
 }
 
-/// The field uses of `layer` that address a fixed envelope on an
-/// `entity_type` route, grouped by envelope with that envelope's fields.
+/// Return the fixed envelopes addressed by a route's field operations.
 fn fixed_envelopes<'a>(entity_type: &str, layer: &'a CompiledRoute) -> Vec<FixedEnvelope<'a>> {
     let envelope = |block, rules, fields, read_only| FixedEnvelope {
         block,
@@ -205,11 +178,7 @@ fn fixed_envelopes<'a>(entity_type: &str, layer: &'a CompiledRoute) -> Vec<Fixed
     }
 }
 
-/// Every field path under `block` in `layer`: the `block:` field rules, and the
-/// rule effects (`do: result.ssn | redact`) in `pre_invocation:` and
-/// `post_invocation:`, including effects nested in `when`, sequential,
-/// parallel and PDP reaction lists. Both forms write the same envelope, so a
-/// check that only read the block would let the rule form through.
+/// Return field paths from a block and its invocation-rule effects.
 fn field_uses<'a>(
     layer: &'a CompiledRoute,
     block: &'static str,
@@ -252,17 +221,14 @@ struct FixedEnvelope<'a> {
     uses: Vec<FieldUse<'a>>,
 }
 
-/// Whether the runtime matches this path's keys without case. Redaction does
-/// (`expand_for_pipeline` in `praxis-policy-apl-core`); every other stage
-/// matches keys exactly.
+/// Whether the path contains a stage that matches keys without case.
 fn matches_without_case(stages: &[Stage]) -> bool {
     stages
         .iter()
         .any(|stage| matches!(stage, Stage::Redact { .. }))
 }
 
-/// The envelope field `name` resolves to, compared the way the runtime does:
-/// by `to_lowercase` when `ignore_case`, exactly otherwise.
+/// Resolve an envelope name using the stage's case-matching contract.
 fn envelope_field(
     fields: &'static [&'static str],
     name: &str,

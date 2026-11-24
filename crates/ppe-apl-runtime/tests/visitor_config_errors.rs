@@ -1,16 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// What the APL visitor does with wiring config it cannot honour.
-//
-// `global.pdp` and `global.session_store` name a factory by `kind`. If
-// the kind is missing, the block is the wrong shape, or no factory is registered
-// for it, the load has to fail and say which. The alternative is a gateway that
-// starts with no decision point and allows everything a `pdp(...)` step was
-// meant to gate, or with the in-memory session store silently standing in for
-// the shared one, which loses taint between requests.
-//
-// Every case here is reachable from operator-written YAML.
+// Invalid wiring must fail at load so a missing dependency cannot silently
+// disable policy enforcement or discard session state.
 
 #![allow(
     missing_docs,
@@ -24,44 +16,18 @@
 use std::sync::Arc;
 
 use praxis_policy_apl_runtime::{AplOptions, register_apl};
+
 use praxis_policy_core::engine::PolicyEngine;
 
-/// The blocks below are all policy-mode keys, so every case declares the mode.
-/// Prefixing it here keeps each literal about the one mistake it encodes.
-fn in_policy_mode(yaml: &str) -> String {
-    format!("engine_settings:\n  dispatch: policy\n{yaml}")
-}
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
-/// Load with the APL visitor installed and no factories registered, and return
-/// the error text. Registering none is the point for most cases here: it is what
-/// an operator hits when they name a `kind` the host never wired up.
-fn load_err(yaml: &str) -> String {
-    let mgr = Arc::new(PolicyEngine::default());
-    register_apl(&mgr, AplOptions::in_process());
-    match mgr.load_config_yaml(&in_policy_mode(yaml)) {
-        Ok(()) => panic!("this config must not load"),
-        Err(e) => format!("{e}"),
-    }
-}
-
-fn loads(yaml: &str) {
-    let mgr = Arc::new(PolicyEngine::default());
-    register_apl(&mgr, AplOptions::in_process());
-    mgr.load_config_yaml(&in_policy_mode(yaml))
-        .expect("this config must load");
-}
-
-/// The control. Everything below differs from this by one deliberate mistake, so
-/// without it a rejection could be attributable to something else in the block.
 #[test]
 fn a_config_with_no_wiring_block_loads() {
     loads("");
 }
 
-// ---- global.pdp ----------------------------------------------------
-
-/// A mapping where a list was required used to be skipped, which left the
-/// previous load's resolvers in place. A typo then keeps answering.
 #[test]
 fn a_pdp_value_that_is_not_a_list_is_rejected() {
     let e = load_err("global:\n  pdp:\n    kind: opa\n");
@@ -92,9 +58,6 @@ fn a_pdp_entry_with_no_kind_is_rejected() {
     );
 }
 
-/// The case an operator hits most: a `kind` the host never registered. The
-/// message has to say what to call, because otherwise the only symptom is a
-/// `pdp(...)` step that never resolves.
 #[test]
 fn a_pdp_kind_with_no_registered_factory_is_rejected_and_says_what_to_call() {
     let e = load_err("global:\n  pdp:\n    - kind: nonexistent\n");
@@ -108,8 +71,6 @@ fn a_pdp_kind_with_no_registered_factory_is_rejected_and_says_what_to_call() {
     );
 }
 
-/// The index is not decoration: with several entries it is the only way to tell
-/// which one is wrong.
 #[test]
 fn the_reported_index_identifies_which_pdp_entry_failed() {
     let e = load_err("global:\n  pdp:\n    - kind: cel\n    - kind: alsobad\n");
@@ -118,8 +79,6 @@ fn the_reported_index_identifies_which_pdp_entry_failed() {
         "an index must appear: {e}"
     );
 }
-
-// ---- global.session_store ------------------------------------------
 
 #[test]
 fn a_session_store_that_is_not_a_mapping_is_rejected() {
@@ -135,9 +94,6 @@ fn a_session_store_with_no_kind_is_rejected() {
     assert!(e.contains("`kind:`"), "{e}");
 }
 
-/// Falling back to the in-process store here would be the dangerous outcome: a
-/// multi-node deployment would appear to work while losing accumulated taint
-/// between requests that land on different nodes.
 #[test]
 fn a_session_store_kind_with_no_registered_factory_is_rejected() {
     let e = load_err("global:\n  session_store:\n    kind: valkey\n");
@@ -148,12 +104,6 @@ fn a_session_store_kind_with_no_registered_factory_is_rejected() {
     );
 }
 
-// ---- removed and misplaced keys ----------------------------------------
-
-/// `identity:` was replaced by `authentication:`, and a stale one is rejected
-/// rather than ignored. An unknown field is dropped silently, which would leave
-/// its authentication steps unrun: a fail-open. Checked at each scope that reads
-/// the block, since one arm per scope means one arm that can be missed.
 #[test]
 fn the_removed_identity_key_is_rejected_at_every_scope_that_reads_it() {
     for yaml in [
@@ -169,8 +119,6 @@ fn the_removed_identity_key_is_rejected_at_every_scope_that_reads_it() {
     }
 }
 
-/// The scope is named, because with several blocks the message is the only thing
-/// pointing at which one to edit.
 #[test]
 fn the_removed_key_error_names_the_scope() {
     let e = load_err("global:\n  defaults:\n    tool:\n      identity:\n        - kind: jwt\n");
@@ -180,8 +128,6 @@ fn the_removed_key_error_names_the_scope() {
     );
 }
 
-/// Errors carry the visitor's name so an operator with several orchestrators
-/// registered knows which one refused the config.
 #[test]
 fn a_visitor_error_is_attributed_to_the_visitor() {
     let e = load_err("global:\n  pdp:\n    - kind: nonexistent\n");
@@ -191,15 +137,6 @@ fn a_visitor_error_is_attributed_to_the_visitor() {
     );
 }
 
-// ---- global.attribute_files ----------------------------------------
-
-/// `attribute_files` supplies the static `data.*` tree a policy reads. Every way
-/// of getting it wrong has to fail the load.
-///
-/// A silently ignored bad path is the failure that matters: every `data.*`
-/// predicate would then read from an empty tree, so a rule like
-/// `data.allowed_tools contains name` matches nothing and the route it guards
-/// either opens or closes wholesale, with no error anywhere to explain it.
 #[test]
 fn a_malformed_attribute_files_block_is_rejected() {
     let e = load_err("global:\n  attribute_files: attrs.yaml\n");
@@ -219,7 +156,6 @@ fn an_attribute_files_entry_that_is_not_a_path_is_rejected_with_its_index() {
     );
 }
 
-/// A path that does not exist is a load failure, not an empty tree.
 #[test]
 fn an_attribute_file_that_does_not_exist_is_rejected() {
     let e = load_err("global:\n  attribute_files:\n    - /nonexistent/praxis-attrs.yaml\n");
@@ -229,14 +165,11 @@ fn an_attribute_file_that_does_not_exist_is_rejected() {
     );
 }
 
-/// An empty list is not an error: it means the same as omitting the key. Without
-/// this, the rejections above could be coming from the key being present at all.
 #[test]
 fn an_empty_attribute_files_list_loads() {
     loads("global:\n  attribute_files: []\n");
 }
 
-/// Cross-layer elicitations in one phase are rejected after route stacking.
 #[test]
 fn a_global_and_route_elicit_in_one_phase_is_rejected() {
     let e = load_err(
@@ -257,7 +190,6 @@ routes:
     );
 }
 
-/// Elicitations in separate phases remain valid.
 #[test]
 fn a_global_pre_elicit_and_route_post_elicit_load() {
     loads(
@@ -273,8 +205,6 @@ routes:
 "#,
     );
 }
-
-// ---- writes to read-only envelope fields ------------------------------------
 
 #[test]
 fn an_args_block_writing_uri_on_a_resource_route_is_refused_as_read_only() {
@@ -457,8 +387,6 @@ fn a_recursive_path_naming_a_read_only_field_in_another_case_is_refused() {
 
 #[test]
 fn a_recursive_path_through_a_non_root_field_is_not_refused() {
-    // `**.annotations.uri` addresses `uri` inside `annotations`, not the
-    // read-only root `uri`.  The segment after `**` is `annotations`.
     loads(
         r#"routes:
   - resource: hr://employees/*
@@ -503,8 +431,6 @@ fn a_nested_rule_writing_prompt_name_is_refused_as_read_only() {
         "a field operation inside a do list must be checked too: {e}"
     );
 }
-
-// ---- unknown field paths on fixed envelopes ---------------------------------
 
 #[test]
 fn an_unknown_args_field_on_a_resource_route_is_refused_with_the_valid_fields() {
@@ -695,8 +621,6 @@ fn a_recursive_path_loads_on_a_resource_route() {
 
 #[test]
 fn a_recursive_path_naming_an_unknown_field_on_a_prompt_result_is_refused() {
-    // A prompt result has no open map, so every key is a root field and a
-    // misspelled name after `**` would never match.
     let e = load_err(
         r#"routes:
   - prompt: summarize-*
@@ -712,8 +636,6 @@ fn a_recursive_path_naming_an_unknown_field_on_a_prompt_result_is_refused() {
 
 #[test]
 fn a_redacted_field_in_another_case_loads() {
-    // Redaction matches keys without case at runtime, so the load check must
-    // accept the same spellings, including a path into `annotations`.
     loads(
         r#"routes:
   - resource: hr://employees/*
@@ -733,8 +655,6 @@ fn a_redacted_field_in_another_case_loads() {
 
 #[test]
 fn a_non_redacting_field_in_another_case_is_refused() {
-    // Other stages match keys exactly at runtime, so `CONTENT` would never
-    // reach `content`; the misspelling must still be refused.
     let e = load_err(
         r#"routes:
   - resource: hr://employees/*
@@ -813,4 +733,28 @@ fn valid_recursive_paths_and_redaction_case_variants_load() {
     loads(
         "routes:\n  - resource: hr://employees/*\n    result:\n      \"**.annotations.uri\": redact\n      \"**.ssn\": redact\n      CONTENT: redact\n      ANNOTATIONS.ssn: redact\n  - prompt: summarize-*\n    result:\n      \"**.Content\": redact\n      \"**.**.Content\": redact\n      \"content.**\": redact\n",
     );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+fn in_policy_mode(yaml: &str) -> String {
+    format!("engine_settings:\n  dispatch: policy\n{yaml}")
+}
+
+fn load_err(yaml: &str) -> String {
+    let mgr = Arc::new(PolicyEngine::default());
+    register_apl(&mgr, AplOptions::in_process());
+    match mgr.load_config_yaml(&in_policy_mode(yaml)) {
+        Ok(()) => panic!("this config must not load"),
+        Err(e) => format!("{e}"),
+    }
+}
+
+fn loads(yaml: &str) {
+    let mgr = Arc::new(PolicyEngine::default());
+    register_apl(&mgr, AplOptions::in_process());
+    mgr.load_config_yaml(&in_policy_mode(yaml))
+        .expect("this config must load");
 }

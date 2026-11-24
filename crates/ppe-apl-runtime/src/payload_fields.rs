@@ -1,36 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// `PayloadFields` — what an `args:` / `result:` pipeline can address on a
-// hook payload.
-//
-// A field stage hands a plugin the whole payload, not the field, so the
-// invoker has to read the field back out afterwards to learn whether the
-// plugin rewrote it. That readback is payload-shaped: a CMF message
-// projects its arguments or its result, and a payload with no content
-// projects nothing.
-//
-// # Why the method is not on `PluginPayload`
-//
-// The signature needs `DispatchPhase`, which lives in
-// `praxis-policy-apl-core`, and `praxis-policy-core` is a leaf crate that
-// depends on no APL crate. Putting it there would either move an APL
-// concept into the leaf or duplicate it, and it would oblige the identity,
-// delegation, and elicitation payloads to answer a question about args and
-// result projection that means nothing to them. The trait is local
-// instead, which is also what makes implementing it for those payloads
-// allowed if one ever needs it.
-//
-// # Why the default body returns nothing
-//
-// A blanket `impl<T: PluginPayload>` is not available: it collides with
-// `MessagePayload`'s real implementation under E0119, and specialization
-// is unstable. A default body gives the same ergonomics. The direction it
-// defaults to is the safe one: a payload that wrongly claims no fields
-// loses a pipeline stage it never had, where the reverse would hand a
-// plugin a field that does not exist. A new payload still has to name the
-// trait to be carried by the invoker at all, so the default is
-// low-friction rather than silent.
+// Dispatch phases belong to APL, so payload field projection stays in the
+// runtime instead of adding an APL dependency to the leaf core crate.
 
 use praxis_policy_core::cmf::MessagePayload;
 use praxis_policy_core::hooks::payload::PluginPayload;
@@ -41,14 +13,6 @@ use praxis_policy_apl_core::step::DispatchPhase;
 use crate::message_projection::{EnvelopeReplaced, Projection, ResultIdentity};
 
 /// Reads one pipeline field off a hook payload.
-///
-/// The invoker is bound to a payload implementing this trait, and calls it
-/// twice per field-stage dispatch: once before the plugin runs, for the
-/// baseline, and once after, to see whether the plugin's mutation touched
-/// this field.
-///
-/// `Clone` is a supertrait because the invoker keeps the request's payload
-/// under interior mutability and clones it for each dispatch.
 ///
 /// # Examples
 ///
@@ -79,8 +43,6 @@ pub trait PayloadFields: PluginPayload + Clone {
     ///
     /// `field` is relative to the args or result root, never prefixed with
     /// `args.` / `result.`. Pre addresses args, Post addresses result.
-    ///
-    /// Defaults to `None` for a payload that carries no fields.
     fn field_value(&self, _field: &str, _phase: DispatchPhase) -> Option<serde_json::Value> {
         None
     }
@@ -89,6 +51,8 @@ pub trait PayloadFields: PluginPayload + Clone {
     ///
     /// The default delegates to [`Self::field_value`] so existing host
     /// implementations keep their field behavior without a signature change.
+    ///
+    /// [`Self::field_value`]: Self::field_value
     fn field_value_with_projection(
         &self,
         field: &str,
@@ -114,12 +78,10 @@ impl PayloadFields for MessagePayload {
     }
 }
 
-/// The HTTP payload carries no fields, so the default body is the whole
-/// implementation. Everything a handler reads about an HTTP exchange is on
-/// the `Extensions` it is passed, and a body is not a payload field.
+/// HTTP exchanges expose attributes through extensions rather than payload fields.
 impl PayloadFields for HttpPayload {}
 
-/// Capture the request's resource selection without copying its body.
+/// Identify the resource selected in the request payload.
 pub(crate) fn resource_identity<P: PayloadFields>(payload: &P) -> ResultIdentity {
     payload
         .as_any()
@@ -129,7 +91,13 @@ pub(crate) fn resource_identity<P: PayloadFields>(payload: &P) -> ResultIdentity
         })
 }
 
-/// Read a field from the selected resource throughout one route invocation.
+/// Return the field associated with the route's selected resource.
+///
+/// Other projections use the payload's projection-aware field contract.
+///
+/// # Errors
+///
+/// Refuses a removed or ambiguous resource target.
 pub(crate) fn field_value_for_identity<P: PayloadFields>(
     payload: &P,
     field: &str,
@@ -149,21 +117,7 @@ pub(crate) fn field_value_for_identity<P: PayloadFields>(
     Ok(payload.field_value_with_projection(field, phase, projection))
 }
 
-/// Read the value of one pipeline field out of a message.
-///
-/// The projection matches what APL evaluated against: Pre addresses args,
-/// Post addresses result. `field` is relative to that root.
-///
-/// Two shapes:
-///   * object projection (a tool call's arguments, a structured tool
-///     result) → look up `field` in it, `None` when absent.
-///   * scalar projection (a text-only message, whose whole content is
-///     the field) → the projection itself.
-///
-/// The caller compares the result against the value the pipeline is
-/// holding: equal, or `None` here, both mean "this plugin didn't change
-/// this field". The plugin's payload mutation is recorded separately, so
-/// reporting no field change never drops it.
+/// Return the argument or result field addressed by the dispatch phase.
 fn field_value_from_message(
     message: &praxis_policy_core::cmf::Message,
     field: &str,
@@ -194,8 +148,14 @@ fn field_value_from_message(
 )]
 mod tests {
     use super::*;
+
     use praxis_policy_core::cmf::enums::Role;
+
     use praxis_policy_core::cmf::{ContentPart, Message, ToolCall};
+
+    // -----------------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------------
 
     #[test]
     fn projection_aware_readback_delegates_to_the_existing_host_method() {
@@ -217,24 +177,6 @@ mod tests {
             Some(serde_json::json!("Boston")),
             "existing message callers must still read their tool arguments",
         );
-    }
-
-    fn tool_call_payload() -> MessagePayload {
-        MessagePayload {
-            message: Message::with_content(
-                Role::User,
-                vec![ContentPart::ToolCall {
-                    content: ToolCall {
-                        tool_call_id: "tc_001".to_owned(),
-                        name: "get_weather".to_owned(),
-                        arguments: [("city".to_owned(), serde_json::json!("Boston"))]
-                            .into_iter()
-                            .collect(),
-                        namespace: None,
-                    },
-                }],
-            ),
-        }
     }
 
     #[test]
@@ -259,47 +201,6 @@ mod tests {
             payload.field_value_with_projection("anything", DispatchPhase::Pre, Projection::Tool),
             Some(serde_json::json!("hello")),
         );
-    }
-
-    fn resource_payload() -> MessagePayload {
-        use praxis_policy_core::cmf::Resource;
-        use praxis_policy_core::cmf::enums::ResourceType;
-        MessagePayload {
-            message: Message::with_content(
-                Role::Tool,
-                vec![ContentPart::Resource {
-                    content: Resource {
-                        resource_request_id: "rr_001".to_owned(),
-                        uri: "hr://employees/42".to_owned(),
-                        content: Some("SSN 123-45-6789".to_owned()),
-                        mime_type: Some("text/plain".to_owned()),
-                        size_bytes: Some(15),
-                        resource_type: ResourceType::Uri,
-                        ..Resource::default()
-                    },
-                }],
-            ),
-        }
-    }
-
-    fn prompt_result_payload() -> MessagePayload {
-        use praxis_policy_core::cmf::PromptResult;
-        MessagePayload {
-            message: Message::with_content(
-                Role::Assistant,
-                vec![ContentPart::PromptResult {
-                    content: PromptResult {
-                        prompt_request_id: "pr_001".to_owned(),
-                        prompt_name: "summarize".to_owned(),
-                        description: Some("Summary prompt".to_owned()),
-                        messages: vec![],
-                        content: Some("The summary text".to_owned()),
-                        is_error: false,
-                        error_message: None,
-                    },
-                }],
-            ),
-        }
     }
 
     #[test]
@@ -354,9 +255,6 @@ mod tests {
 
     #[test]
     fn the_http_payload_has_no_fields_in_either_phase() {
-        // The default body is the whole implementation, so this is what an
-        // `args:` / `result:` stage would read if one could reach an HTTP
-        // route. The load-time refusal is what keeps it unreachable.
         let payload = HttpPayload;
         assert_eq!(
             payload.field_value_with_projection("city", DispatchPhase::Pre, Projection::Tool),
@@ -367,12 +265,73 @@ mod tests {
             None
         );
     }
+
     // -----------------------------------------------------------------------------
     // Test Utilities
     // -----------------------------------------------------------------------------
 
+    fn tool_call_payload() -> MessagePayload {
+        MessagePayload {
+            message: Message::with_content(
+                Role::User,
+                vec![ContentPart::ToolCall {
+                    content: ToolCall {
+                        tool_call_id: "tc_001".to_owned(),
+                        name: "get_weather".to_owned(),
+                        arguments: [("city".to_owned(), serde_json::json!("Boston"))]
+                            .into_iter()
+                            .collect(),
+                        namespace: None,
+                    },
+                }],
+            ),
+        }
+    }
+
+    fn resource_payload() -> MessagePayload {
+        use praxis_policy_core::cmf::Resource;
+        use praxis_policy_core::cmf::enums::ResourceType;
+        MessagePayload {
+            message: Message::with_content(
+                Role::Tool,
+                vec![ContentPart::Resource {
+                    content: Resource {
+                        resource_request_id: "rr_001".to_owned(),
+                        uri: "hr://employees/42".to_owned(),
+                        content: Some("SSN 123-45-6789".to_owned()),
+                        mime_type: Some("text/plain".to_owned()),
+                        size_bytes: Some(15),
+                        resource_type: ResourceType::Uri,
+                        ..Resource::default()
+                    },
+                }],
+            ),
+        }
+    }
+
+    fn prompt_result_payload() -> MessagePayload {
+        use praxis_policy_core::cmf::PromptResult;
+        MessagePayload {
+            message: Message::with_content(
+                Role::Assistant,
+                vec![ContentPart::PromptResult {
+                    content: PromptResult {
+                        prompt_request_id: "pr_001".to_owned(),
+                        prompt_name: "summarize".to_owned(),
+                        description: Some("Summary prompt".to_owned()),
+                        messages: vec![],
+                        content: Some("The summary text".to_owned()),
+                        is_error: false,
+                        error_message: None,
+                    },
+                }],
+            ),
+        }
+    }
+
     #[derive(Clone)]
     struct LegacyPayload;
+
     praxis_policy_core::impl_plugin_payload!(LegacyPayload);
 
     impl PayloadFields for LegacyPayload {

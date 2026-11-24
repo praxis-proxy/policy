@@ -1,61 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// Projections between a CMF `Message` and the flat JSON APL evaluates
-// against (`RoutePayload.args` / `RoutePayload.result`), plus their
-// inverses.
-//
-// APL reasons about `args.<field>` and `result.<field>`; CMF carries
-// typed content parts. These functions are the only translation between
-// the two, and both consumers depend on them agreeing:
-//
-//   * `AplRouteHandler` projects before evaluation and writes back
-//     after, so pipeline edits reach the host's body re-serializer.
-//   * `CmfPluginInvoker` projects a plugin-mutated message to read back
-//     the field a pipeline stage was focused on.
-//
-// The route's entity type picks the row ([`Projection`]), so a part of another
-// kind in the same message is never read in its place: a `Resource` embedded
-// in a tool response does not stand in for the `ToolResult`. Phase decides
-// the side: Pre projects args, Post projects result. Each
-// `write_*` is the inverse of the matching `extract_*`, so
-// extract → write round-trips a message unchanged.
-//
-// The six entity/phase envelopes:
-//
-//   Entity    Phase  Part           APL binding
-//   tool      pre    ToolCall       args.<key>   (the arguments map)
-//   tool      post   ToolResult     result / result.<key>  (any JSON value)
-//   prompt    pre    PromptRequest  args.<key>   (the arguments map)
-//   prompt    post   PromptResult   result.{prompt_name, description, content,
-//                                     is_error, error_message}
-//   resource  pre    ResourceRef    args.{uri, name, resource_type, range_start,
-//                                     range_end, selector}
-//   resource  post   Resource       result.{uri, name, title, description,
-//                                     resource_type, content, mime_type,
-//                                     size_bytes, version, annotations, icons}
-//
-// Any other message falls back to its concatenated text as a JSON string. That
-// fallback is the only bare-string projection.
-//
-// Every structured projection is an object. A field path never resolves on a
-// bare string, so a text-like part (such as `text` or `thinking`) that gains a
-// structured projection is projected as `{"text": ...}`, keeping a `text` path
-// working the same way on every kind of part. The fixed envelopes always carry
-// every key, with `null` for an unset field, so the shape does not depend on
-// the content.
-//
-// In the fixed envelopes, `uri`, `resource_type`, `prompt_name`, `is_error`
-// and `icons` are read-only: write-back keeps their original values, so a
-// pipeline cannot change what was authorized. `content` is the body as an
-// opaque string and is never parsed.
-//
-// The projections are lossy by design: they surface the one part APL
-// addresses (a tool call's arguments, a tool result's content, the first
-// resource or prompt result) and ignore the rest. That makes them unfit for
-// answering "did anything change?" about a whole message — a mutation to any
-// part they don't read is invisible. Callers needing that answer read the
-// mutation signal the executor reports instead.
+// Policy edits must return to the same typed content part that was inspected.
+// Resource and prompt projections use fixed object envelopes; tool results
+// retain their JSON shape, and text-only messages retain the string fallback.
+// These projections omit other parts, so payload mutation tracking must use
+// the executor's mutation signal instead of comparing projected values.
 
 use std::collections::HashMap;
 
@@ -73,6 +23,8 @@ use praxis_policy_apl_core::get_dotted;
 pub(crate) const ENVELOPE_REPLACED_CODE: &str = "policy.envelope_replaced";
 
 /// Every field of the [`ResourceReference`] `args` envelope.
+///
+/// [`ResourceReference`]: ResourceReference
 pub(crate) const RESOURCE_REF_FIELDS: &[&str] = &[
     "uri",
     "name",
@@ -83,6 +35,8 @@ pub(crate) const RESOURCE_REF_FIELDS: &[&str] = &[
 ];
 
 /// Every field of the [`Resource`] `result` envelope.
+///
+/// [`Resource`]: Resource
 pub(crate) const RESOURCE_FIELDS: &[&str] = &[
     "uri",
     "name",
@@ -98,6 +52,8 @@ pub(crate) const RESOURCE_FIELDS: &[&str] = &[
 ];
 
 /// Every field of the [`PromptResult`] `result` envelope.
+///
+/// [`PromptResult`]: PromptResult
 pub(crate) const PROMPT_RESULT_FIELDS: &[&str] = &[
     "prompt_name",
     "description",
@@ -111,41 +67,45 @@ pub(crate) const PROMPT_RESULT_FIELDS: &[&str] = &[
 pub(crate) const OPEN_MAP_FIELDS: &[&str] = &["annotations"];
 
 /// Envelope fields of a [`ResourceReference`] that write-back never changes.
+///
+/// [`ResourceReference`]: ResourceReference
 pub(crate) const RESOURCE_REF_READ_ONLY: &[&str] = &["uri", "resource_type"];
 
 /// Envelope fields of a [`Resource`] that write-back never changes.
+///
+/// [`Resource`]: Resource
 pub(crate) const RESOURCE_READ_ONLY: &[&str] = &["uri", "resource_type", "icons"];
 
 /// Envelope fields of a [`PromptResult`] that write-back never changes.
+///
+/// [`PromptResult`]: PromptResult
 pub(crate) const PROMPT_RESULT_READ_ONLY: &[&str] = &["prompt_name", "is_error"];
 
 // -----------------------------------------------------------------------------
 // Projection
 // -----------------------------------------------------------------------------
 
-/// Which content parts a route's `args.*` and `result.*` read, chosen by the
-/// route's entity type.
+/// Selects the content parts addressed by a route's field pipelines.
 ///
-/// Picking by route rather than by the first structured part keeps one route's
-/// fields from landing on another kind of part: a tool response that carries an
-/// embedded `Resource` ahead of its `ToolResult` still projects the
-/// `ToolResult` on a `tool:` route.
+/// Prompt routes prefer prompt requests, tool routes prefer tool calls, and
+/// resource routes address resource parts. Missing structured parts fall back
+/// to the message's concatenated text.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Projection {
-    /// A `prompt:` route: args from the first `ToolCall` or `PromptRequest`,
-    /// result from the first `PromptResult`.
+    /// Prompt arguments and rendered results; tool-call arguments are a fallback.
     Prompt,
     /// A `resource:` route: args from the first `ResourceRef`, result from the
     /// first `Resource`.
     Resource,
-    /// A `tool:` or `llm:` route, and any other: args from the first
-    /// `ToolCall` or `PromptRequest`, result from the first `ToolResult`.
+    /// Tool arguments and results; prompt-request arguments are a fallback.
     #[default]
     Tool,
 }
 
 impl Projection {
-    /// The projection for a route of `entity_type`.
+    /// Select the projection for an entity type.
+    ///
+    /// Unrecognized entity types use the tool projection.
     pub fn for_entity(entity_type: &str) -> Self {
         match entity_type {
             praxis_policy_core::cmf::constants::ENTITY_PROMPT => Self::Prompt,
@@ -155,9 +115,7 @@ impl Projection {
     }
 }
 
-/// Rewrite the first text part of `msg` with `new_text`. If there is no
-/// text part, append one. Mirrors what `MessagePayload`'s normal
-/// modify-path does for single-view v0.
+/// Replace the first text part, or append one when the message has no text part.
 pub(crate) fn rewrite_message_text(msg: &mut Message, new_text: &str) {
     for part in &mut msg.content {
         if let ContentPart::Text { text } = part {
@@ -170,22 +128,12 @@ pub(crate) fn rewrite_message_text(msg: &mut Message, new_text: &str) {
     });
 }
 
-/// Extract `RoutePayload.args` from a CMF message. By `projection`:
-///   * [`Projection::Tool`] → the first `ToolCall`; falls back to
-///     `PromptRequest` only when no `ToolCall` exists
-///   * [`Projection::Prompt`] → the first `PromptRequest`; falls back
-///     to `ToolCall` only when no `PromptRequest` exists
-///   * [`Projection::Resource`] → the first `ResourceRef`, through
-///     [`project_resource_ref_args`] (Object)
-///   * Else (text / no matching part) → JSON String of text content
+/// Return the arguments addressed by `projection`.
 ///
-/// Each projection prefers its own part kind so that a mixed message
-/// (e.g. a `ToolCall` before a `PromptRequest`) applies policy to the
-/// right arguments regardless of part order.
-///
-/// `args.<field>` APL paths target tool / prompt arguments directly.
-/// For text-only messages we fall back to the v0 "args = whole text"
-/// shape so `args.text` predicates keep working.
+/// Tool and prompt routes prefer their own request kind and use the other kind
+/// only when their preferred part is absent. Resource routes return the fixed
+/// resource-reference envelope. A message without a matching request returns
+/// its concatenated text.
 pub(crate) fn extract_args_from_message(msg: &Message, projection: Projection) -> Value {
     match projection {
         Projection::Tool => {
@@ -209,11 +157,8 @@ pub(crate) fn extract_args_from_message(msg: &Message, projection: Projection) -
     Value::String(msg.get_text_content())
 }
 
-/// Search message parts for arguments. When `TOOL_FIRST` is true the
-/// preferred part is `ToolCall` with `PromptRequest` as fallback; when
-/// false the preference is reversed.
+/// Return arguments from the preferred request kind, using the other kind as fallback.
 fn find_args<const TOOL_FIRST: bool>(msg: &Message) -> Option<Value> {
-    // Borrow while scanning; only the returned map is cloned.
     let mut fallback: Option<&HashMap<String, Value>> = None;
     for part in &msg.content {
         let (arguments, preferred) = match part {
@@ -238,10 +183,9 @@ fn clone_arguments(arguments: &HashMap<String, Value>) -> Value {
     )
 }
 
-/// Project a resource reference into the fixed `args` envelope:
-/// `{uri, name, resource_type, range_start, range_end, selector}`.
+/// Return the fixed resource-reference argument envelope.
 ///
-/// Every key is always present; an unset field projects as `null`.
+/// Every field is present; unset optional fields are `null`.
 pub(crate) fn project_resource_ref_args(resource_ref: &ResourceReference) -> Value {
     json!({
         "uri": resource_ref.uri,
@@ -253,12 +197,10 @@ pub(crate) fn project_resource_ref_args(resource_ref: &ResourceReference) -> Val
     })
 }
 
-/// Project a fetched resource into the fixed `result` envelope:
-/// `{uri, name, title, description, resource_type, content, mime_type,
-/// size_bytes, version, annotations, icons}`.
+/// Return the fixed fetched-resource result envelope.
 ///
-/// `content` is the body as an opaque string, never parsed. `blob` is not
-/// projected. Every key is always present; an unset field projects as `null`.
+/// Content is an opaque string or `null`. Blob data is excluded, and every
+/// projected field is present even when unset.
 pub(crate) fn project_resource_result(resource: &Resource) -> Value {
     json!({
         "uri": resource.uri,
@@ -275,11 +217,10 @@ pub(crate) fn project_resource_result(resource: &Resource) -> Value {
     })
 }
 
-/// Project a rendered prompt into the fixed `result` envelope:
-/// `{prompt_name, description, content, is_error, error_message}`.
+/// Return the fixed rendered-prompt result envelope.
 ///
-/// `messages` is not projected; policy reads the flat `content`. Every key is
-/// always present; an unset field projects as `null`.
+/// Policy addresses flat content rather than the message list. Every projected
+/// field is present; unset optional fields are `null`.
 pub(crate) fn project_prompt_result(prompt: &PromptResult) -> Value {
     json!({
         "prompt_name": prompt.prompt_name,
@@ -323,15 +264,10 @@ impl std::fmt::Display for ReplacedPart {
     }
 }
 
-/// Write-back cannot apply a pipeline's result to a fixed resource or prompt
-/// envelope: the pipeline replaced the envelope as a whole with a value that
-/// is not an object, or the part the route projected is no longer in the
-/// message (see [`EnvelopeError`]).
+/// A selected envelope cannot accept a result edit.
 ///
-/// Keeping the original part instead would send content the pipeline meant
-/// to change, such as an unredacted body, so the caller fails the request
-/// closed. Returned by [`write_resource_ref`], [`write_resource`],
-/// [`write_prompt_result`] and [`write_result_back_to_message`].
+/// Callers must deny the request when its envelope was replaced with a
+/// non-object or its resource target is missing or ambiguous.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct EnvelopeReplaced {
     /// The content part whose envelope could not be written.
@@ -342,6 +278,8 @@ pub(crate) struct EnvelopeReplaced {
 
 /// Why an [`EnvelopeReplaced`] write-back failed. The caller denies the
 /// request either way; the error only picks the denial's wording.
+///
+/// [`EnvelopeReplaced`]: EnvelopeReplaced
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EnvelopeError {
     /// The pipeline replaced the envelope as a whole with a non-object value.
@@ -390,6 +328,11 @@ impl EnvelopeReplaced {
 /// [`EnvelopeReplaced`] and the part is left untouched, for a `ToolCall` and
 /// `PromptRequest` as for a `ResourceRef`. Forwarding the original instead
 /// would send the arguments the pipeline meant to hide.
+///
+/// [`Projection::Tool`]: Projection::Tool
+/// [`Projection::Prompt`]: Projection::Prompt
+/// [`extract_args_from_message`]: extract_args_from_message
+/// [`EnvelopeReplaced`]: EnvelopeReplaced
 pub(crate) fn write_args_back_to_message(
     msg: &mut Message,
     args: &Value,
@@ -414,7 +357,6 @@ pub(crate) fn write_args_back_to_message(
             }
         },
     }
-    // Fall through: no structured entity part — treat as text.
     if let Some(text) = args.as_str() {
         rewrite_message_text(msg, text);
     }
@@ -479,10 +421,9 @@ fn write_arguments_at(
     Ok(())
 }
 
-/// The selected resource's URI, with the ambiguity of its original message.
+/// The selected resource URI and whether its original message was ambiguous.
 ///
-/// A URI identifies a target only when exactly one resource carries it.
-/// Duplicate URIs fail closed until issue 76 provides per-part addressing.
+/// The selected URI must remain unique before and after plugin execution.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ResultIdentity {
     ambiguous: bool,
@@ -490,7 +431,7 @@ pub(crate) struct ResultIdentity {
 }
 
 impl ResultIdentity {
-    /// Capture the first resource without projecting or copying its body.
+    /// Identify the first resource and record whether its URI is unique.
     pub(crate) fn from_resource_message(msg: &Message) -> Self {
         let Some(resource) = msg.content.iter().find_map(|part| match part {
             ContentPart::Resource { content } => Some(content),
@@ -510,7 +451,11 @@ impl ResultIdentity {
         }
     }
 
-    /// Borrow the originally selected resource, refusing removed or ambiguous targets.
+    /// Return the selected resource, or `None` when no resource was selected.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a removed target or a URI that was or became ambiguous.
     pub(crate) fn resource<'a>(
         &self,
         msg: &'a Message,
@@ -557,19 +502,10 @@ impl ResultIdentity {
     }
 }
 
-/// Extract `RoutePayload.result` from a CMF message, together with an
-/// identity that [`write_result_back_to_message`] uses to find the same
-/// part after plugins may have reordered the content list.
+/// Return the result addressed by `projection` and its resource identity.
 ///
-/// By `projection`:
-///   * [`Projection::Tool`] → the first `ToolResult`'s `content` JSON value
-///   * [`Projection::Resource`] → the first `Resource`, through
-///     [`project_resource_result`] (Object)
-///   * [`Projection::Prompt`] → the first `PromptResult`, through
-///     [`project_prompt_result`] (Object)
-///   * Else (text / no matching part) → JSON String of text
-///
-/// `result.<field>` APL paths target the structured result directly.
+/// Tool results retain their JSON value. Resource and prompt results use fixed
+/// object envelopes. Missing structured results return concatenated text.
 pub(crate) fn extract_result_from_message(
     msg: &Message,
     projection: Projection,
@@ -595,15 +531,10 @@ pub(crate) fn extract_result_from_message(
     )
 }
 
-/// Read one `result` field the way [`extract_result_from_message`] followed by
-/// a dotted lookup would, without building the whole envelope first.
+/// Return a field from the result addressed by `projection`.
 ///
-/// Selects the same part (first match for `projection`) and clones only the
-/// requested value, so reading `result.uri` does not copy the resource body.
-/// `field` is relative to the result root. Paths inside `annotations`
-/// (`annotations.reviewer.name`) are followed as dotted lookups. A projection
-/// that is not an object (a scalar tool result, or a text-only message) is
-/// itself the field, as in [`extract_result_from_message`].
+/// Resource annotation paths support dotted descendants. A scalar tool result
+/// or a text-only message returns the scalar value itself.
 pub(crate) fn extract_result_field(
     msg: &Message,
     projection: Projection,
@@ -632,7 +563,7 @@ pub(crate) fn extract_result_field(
     Some(Value::String(msg.get_text_content()))
 }
 
-/// Read a resource field or annotation descendant without copying other fields.
+/// Return a resource field or a dotted annotation descendant.
 pub(crate) fn resource_field_value(resource: &Resource, field: &str) -> Option<Value> {
     let (head, rest) = match field.split_once('.') {
         Some((head, rest)) => (head, Some(rest)),
@@ -658,6 +589,8 @@ pub(crate) fn resource_field_value(resource: &Resource, field: &str) -> Option<V
 
 /// One top-level field of the [`project_resource_result`] envelope, or `None`
 /// for a name the envelope does not have.
+///
+/// [`project_resource_result`]: project_resource_result
 fn resource_field(resource: &Resource, name: &str) -> Option<Value> {
     Some(match name {
         "uri" => json!(resource.uri),
@@ -677,6 +610,8 @@ fn resource_field(resource: &Resource, name: &str) -> Option<Value> {
 
 /// One top-level field of the [`project_prompt_result`] envelope, or `None`
 /// for a name the envelope does not have.
+///
+/// [`project_prompt_result`]: project_prompt_result
 fn prompt_result_field(prompt: &PromptResult, name: &str) -> Option<Value> {
     Some(match name {
         "prompt_name" => json!(prompt.prompt_name),
@@ -688,10 +623,13 @@ fn prompt_result_field(prompt: &PromptResult, name: &str) -> Option<Value> {
     })
 }
 
-/// Like [`extract_result_from_message`], but matches the part identified by
-/// `identity` instead of taking the first one. For a `Resource` projection
-/// this finds the `Resource` whose `uri` matches the one originally
-/// extracted; for other projections it falls back to first-match.
+/// Return the originally selected resource result.
+///
+/// Other projections use the result selected by `projection`.
+///
+/// # Errors
+///
+/// Refuses a removed or ambiguous resource target.
 pub(crate) fn extract_result_by_identity(
     msg: &Message,
     projection: Projection,
@@ -703,21 +641,14 @@ pub(crate) fn extract_result_by_identity(
     Ok(extract_result_from_message(msg, projection).0)
 }
 
-/// Inverse of [`extract_result_from_message`]: write a mutated `result` back
-/// into the part that was originally projected. For a `Resource` projection,
-/// the `identity` carries the `uri` of the part that was extracted, and
-/// write-back finds the `Resource` with that `uri` rather than taking the
-/// first one — a plugin between extraction and write-back may have reordered
-/// parts. If no `Resource` with the original `uri` exists (the plugin
-/// removed it), or that URI is ambiguous, the write fails with
-/// [`EnvelopeReplaced`] so the request
-/// is denied rather than silently writing to the wrong part.
+/// Apply a result edit to the selected content part.
 ///
-/// For `Tool` and `Prompt` projections the identity is unused; they match
-/// the first `ToolResult` / `PromptResult` as before.
+/// Resource edits require the originally selected URI to remain unique.
+/// Tool and prompt projections address their first matching result part.
 ///
-/// A `Resource` / `PromptResult` envelope replaced as a whole is refused with
-/// [`EnvelopeReplaced`].
+/// # Errors
+///
+/// Refuses a non-object fixed envelope or a removed or ambiguous resource target.
 pub(crate) fn write_result_back_to_message(
     msg: &mut Message,
     result: &Value,
@@ -754,13 +685,13 @@ pub(crate) fn write_result_back_to_message(
     Ok(())
 }
 
-/// Inverse of [`project_resource_ref_args`]: write a merged `args` envelope
-/// back into `resource_ref` in place.
+/// Apply a complete resource-reference argument envelope.
 ///
-/// `uri` and `resource_type` are read-only and always keep their original
-/// values: the fetch target cannot change after the route matched and the PDP
-/// decided on it. A non-object envelope leaves the part untouched and returns
-/// [`EnvelopeReplaced`].
+/// URI and resource type remain fixed. Missing optional fields are cleared.
+///
+/// # Errors
+///
+/// Refuses a non-object envelope without changing the resource reference.
 pub(crate) fn write_resource_ref(
     resource_ref: &mut ResourceReference,
     args: &Value,
@@ -786,13 +717,14 @@ pub(crate) fn write_resource_ref(
     Ok(())
 }
 
-/// Inverse of [`project_resource_result`]: write a merged `result` envelope
-/// back into `resource` in place.
+/// Apply a complete fetched-resource result envelope.
 ///
-/// `uri`, `resource_type` and `icons` are read-only and always keep their
-/// original values, as do the unprojected `resource_request_id` and `blob`. A
-/// non-object envelope leaves the part untouched and returns
-/// [`EnvelopeReplaced`].
+/// URI, resource type, icons, request ID and blob data remain fixed.
+/// Missing optional fields are cleared.
+///
+/// # Errors
+///
+/// Refuses a non-object envelope without changing the resource.
 pub(crate) fn write_resource(
     resource: &mut Resource,
     result: &Value,
@@ -818,13 +750,14 @@ pub(crate) fn write_resource(
     Ok(())
 }
 
-/// Inverse of [`project_prompt_result`]: write a merged `result` envelope back
-/// into `prompt` in place.
+/// Apply a complete rendered-prompt result envelope.
 ///
-/// `prompt_name` and `is_error` are read-only and always keep their original
-/// values, as do the unprojected `prompt_request_id` and `messages`. A
-/// non-object envelope leaves the part untouched and returns
-/// [`EnvelopeReplaced`].
+/// Prompt identity, error status and the message list remain fixed.
+/// Missing optional fields are cleared.
+///
+/// # Errors
+///
+/// Refuses a non-object envelope without changing the prompt result.
 pub(crate) fn write_prompt_result(
     prompt: &mut PromptResult,
     result: &Value,
@@ -841,53 +774,20 @@ pub(crate) fn write_prompt_result(
     Ok(())
 }
 
-/// Apply to `base` only what changed between `pre` and `post`.
+/// Apply the differences between `pre` and `post` to `base`.
 ///
-/// `pre` and `post` bracket one editor's work (an APL pipeline: the
-/// projection it started from, and the projection it produced). `base`
-/// is the same projection taken from a payload a *different* editor (a
-/// plugin) has since rewritten. Copying `post` over `base` wholesale
-/// would discard the plugin's edits to keys the pipeline never touched,
-/// so instead each differing leaf, added key, and removed key is applied
-/// individually.
-///
-/// When nothing else edited the payload, `base` equals `pre` and the
-/// result is exactly `post`.
-///
-/// Objects merge key by key; arrays and scalars are single values, so a
-/// change to one replaces it whole. That matches how APL writes fields:
-/// its dotted paths only traverse objects.
-///
-/// # Precedence when both editors touched the same path
-///
-/// **The pipeline wins.** If a plugin rewrote a key and the pipeline
-/// rewrote it too, the pipeline's value lands; if the plugin *removed* a
-/// key the pipeline then rewrote, the key comes back with the pipeline's
-/// value; if the pipeline *omitted* a key the plugin had rewritten, the
-/// key goes and the plugin's edit with it. Every case logs a warning
-/// naming the key, because the losing edit is usually also a redaction
-/// and a silent tie-break in this path is exactly the class of bug this
-/// function exists to prevent.
-///
-/// The rule is config-author-wins: an `args:` / `result:` pipeline is
-/// written by the operator deploying the policy, so it outranks a
-/// plugin's own view when the two genuinely conflict. Neither ordering
-/// leaks plaintext (both editors write redacted values), but a coarse
-/// pipeline stage can beat a finer plugin redaction, which is why the
-/// conflict is logged rather than resolved silently.
+/// Unchanged paths retain independent edits already present in `base`.
+/// Objects merge by key; arrays and scalars are replaced as whole values.
+/// Keys removed from `post` are removed from `base`.
 pub(crate) fn apply_changed_paths(base: &mut Value, pre: &Value, post: &Value) {
     let (Some(pre_map), Some(post_map)) = (pre.as_object(), post.as_object()) else {
-        // Not a keyed shape at this level, so there's nothing to merge
-        // per-key: the value either changed or it didn't.
         if pre != post {
             *base = post.clone();
         }
         return;
     };
     let Some(base_map) = base.as_object_mut() else {
-        // The other editor replaced the keyed shape with something else
-        // entirely. There's no key to merge into, so take this editor's
-        // view rather than invent a reconciliation.
+        // A scalar replacement has no safe per-key reconciliation.
         tracing::warn!(
             "payload projection changed shape under a field pipeline; \
              applying the pipeline's view and discarding the other edit"
@@ -898,8 +798,6 @@ pub(crate) fn apply_changed_paths(base: &mut Value, pre: &Value, post: &Value) {
 
     for (key, pre_value) in pre_map {
         if !post_map.contains_key(key) {
-            // Silent when the plugin left the key alone, which is the
-            // common case for an `omit`.
             if base_map
                 .get(key)
                 .is_some_and(|base_value| base_value != pre_value)
@@ -915,8 +813,6 @@ pub(crate) fn apply_changed_paths(base: &mut Value, pre: &Value, post: &Value) {
 
     for (key, post_value) in post_map {
         match pre_map.get(key) {
-            // Untouched by this editor — leave whatever `base` holds,
-            // which is the whole point.
             Some(pre_value) if pre_value == post_value => {},
             Some(pre_value) => {
                 let nested = base_map
@@ -931,8 +827,6 @@ pub(crate) fn apply_changed_paths(base: &mut Value, pre: &Value, post: &Value) {
                 }
             },
             None => {
-                // Both editors added the same key. Same precedence, same
-                // reason to say so out loud.
                 if base_map.contains_key(key) {
                     tracing::warn!(
                         field = %key,
@@ -1030,13 +924,15 @@ fn write_annotations(target: &mut HashMap<String, Value>, value: Option<&Value>)
 )]
 mod tests {
     use super::*;
+
     use praxis_policy_core::cmf::enums::{ResourceType, Role};
+
     use praxis_policy_core::cmf::{ToolCall, ToolResult};
 
-    /// The projection a route of the kind `msg` belongs to would use. Most
-    /// tests here exercise one part kind at a time, so they go through the
-    /// wrappers below; the tests that check route-kind selection itself call
-    /// the module's functions with an explicit [`Projection`].
+    // -----------------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------------
+
     #[test]
     fn mixed_argument_parts_use_route_preference_in_both_orders() {
         for prompt_first in [false, true] {
@@ -1164,81 +1060,6 @@ mod tests {
         );
     }
 
-    fn projection_for(msg: &Message) -> Projection {
-        let has = |pred: fn(&ContentPart) -> bool| msg.content.iter().any(pred);
-        if has(|p| {
-            matches!(
-                p,
-                ContentPart::ResourceRef { .. } | ContentPart::Resource { .. }
-            )
-        }) {
-            Projection::Resource
-        } else if has(|p| matches!(p, ContentPart::PromptResult { .. })) {
-            Projection::Prompt
-        } else {
-            Projection::Tool
-        }
-    }
-
-    fn extract_args_from_message(msg: &Message) -> Value {
-        super::extract_args_from_message(msg, projection_for(msg))
-    }
-
-    fn extract_result_from_message(msg: &Message) -> Value {
-        super::extract_result_from_message(msg, projection_for(msg)).0
-    }
-
-    fn extract_result_with_identity(msg: &Message) -> (Value, super::ResultIdentity) {
-        super::extract_result_from_message(msg, projection_for(msg))
-    }
-
-    fn write_args_back_to_message(msg: &mut Message, args: &Value) -> Result<(), EnvelopeReplaced> {
-        let projection = projection_for(msg);
-        super::write_args_back_to_message(msg, args, projection)
-    }
-
-    fn write_result_back_to_message(
-        msg: &mut Message,
-        result: &Value,
-    ) -> Result<(), EnvelopeReplaced> {
-        let projection = projection_for(msg);
-        let identity = super::extract_result_from_message(msg, projection).1;
-        super::write_result_back_to_message(msg, result, projection, &identity)
-    }
-
-    fn tool_call_message() -> Message {
-        Message::with_content(
-            Role::User,
-            vec![ContentPart::ToolCall {
-                content: ToolCall {
-                    tool_call_id: "tc_001".to_owned(),
-                    name: "get_weather".to_owned(),
-                    arguments: [
-                        ("city".to_owned(), serde_json::json!("London")),
-                        ("units".to_owned(), serde_json::json!("metric")),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    namespace: None,
-                },
-            }],
-        )
-    }
-
-    fn tool_result_message() -> Message {
-        Message::with_content(
-            Role::Tool,
-            vec![ContentPart::ToolResult {
-                content: ToolResult {
-                    tool_call_id: "tc_001".to_owned(),
-                    tool_name: "get_weather".to_owned(),
-                    content: serde_json::json!({"temp": 12, "sky": "grey"}),
-                    is_error: false,
-                },
-            }],
-        )
-    }
-
     #[test]
     fn args_round_trip_leaves_a_tool_call_unchanged() {
         let mut msg = tool_call_message();
@@ -1270,8 +1091,6 @@ mod tests {
 
     #[test]
     fn changed_paths_apply_over_an_untouched_base() {
-        // Nobody else edited the payload, so base == pre and applying
-        // the changes must land exactly on post.
         let pre = serde_json::json!({"city": "London", "units": "metric"});
         let post = serde_json::json!({"city": "[REDACTED]", "units": "metric"});
         let mut base = pre.clone();
@@ -1282,9 +1101,7 @@ mod tests {
     #[test]
     fn changed_paths_preserve_another_editors_keys() {
         let pre = serde_json::json!({"city": "London", "token": "sk-secret"});
-        // The pipeline rewrote `city` only.
         let post = serde_json::json!({"city": "[REDACTED]", "token": "sk-secret"});
-        // Meanwhile a plugin rewrote `token`.
         let mut base = serde_json::json!({"city": "London", "token": "[SCRUBBED]"});
         apply_changed_paths(&mut base, &pre, &post);
         assert_eq!(
@@ -1303,10 +1120,6 @@ mod tests {
         assert_eq!(base, serde_json::json!({"city": "Paris"}));
     }
 
-    /// The removal counterpart of the same-key conflict: a pipeline `omit`
-    /// of a key the plugin had just rewritten still drops the key, and the
-    /// plugin's edit with it. Safe in either ordering (the key is gone
-    /// whoever wins), so this pins the outcome rather than a leak.
     #[test]
     fn changed_paths_omit_a_key_the_plugin_rewrote() {
         let pre = serde_json::json!({"city": "London", "ssn": "123-45-6789"});
@@ -1333,21 +1146,15 @@ mod tests {
         );
     }
 
-    /// Documented precedence: when both editors rewrote the same key, the
-    /// pipeline's value lands. Pinned so a future change to the rule is
-    /// deliberate rather than incidental.
     #[test]
     fn changed_paths_let_the_pipeline_win_a_same_key_conflict() {
         let pre = serde_json::json!({"ssn": "123-45-6789"});
         let post = serde_json::json!({"ssn": "***-**-6789"});
-        // The plugin redacted the same key more aggressively.
         let mut base = serde_json::json!({"ssn": "[REDACTED]"});
         apply_changed_paths(&mut base, &pre, &post);
         assert_eq!(base, serde_json::json!({"ssn": "***-**-6789"}));
     }
 
-    /// A key the plugin removed comes back when the pipeline rewrote it,
-    /// carrying the pipeline's (redacted) value.
     #[test]
     fn changed_paths_reinstate_a_key_the_plugin_removed() {
         let pre = serde_json::json!({"ssn": "123-45-6789", "name": "Ada"});
@@ -1396,31 +1203,6 @@ mod tests {
         assert_eq!(extract_args_from_message(&msg), before);
     }
 
-    // ---- the prompt-request half of the projection -----------------------
-
-    fn prompt_request_message() -> Message {
-        Message::with_content(
-            Role::User,
-            vec![ContentPart::PromptRequest {
-                content: praxis_policy_core::cmf::content::PromptRequest {
-                    prompt_request_id: "pr_1".into(),
-                    name: "summarize".into(),
-                    arguments: [
-                        ("tone".to_owned(), serde_json::json!("terse")),
-                        ("length".to_owned(), serde_json::json!(200)),
-                    ]
-                    .into(),
-                    server_id: None,
-                },
-            }],
-        )
-    }
-
-    /// A prompt request projects its arguments the same way a tool call does.
-    /// The two are separate match arms over separate types, and only the tool
-    /// call had a test, so a prompt request could have projected as the "whole
-    /// text" fallback instead. An `args.tone` predicate would then see nothing
-    /// and every rule scoped to a prompt argument would quietly stop matching.
     #[test]
     fn a_prompt_request_projects_its_arguments_not_its_text() {
         let args = extract_args_from_message(&prompt_request_message());
@@ -1431,10 +1213,6 @@ mod tests {
         );
     }
 
-    /// The write-back is the inverse, so a pipeline that rewrites an argument
-    /// has to survive a round trip. Without this, a `set` on a prompt argument
-    /// could be dropped and the upstream would receive the original request
-    /// while the policy reported success.
     #[test]
     fn a_rewritten_prompt_argument_survives_the_round_trip() {
         let mut msg = prompt_request_message();
@@ -1447,9 +1225,6 @@ mod tests {
         );
     }
 
-    /// Handing a prompt request the wrong args shape is a documented no-op: the
-    /// upstream sees the original content rather than a malformed rewrite. The
-    /// tool-call arm has this test; this is the prompt arm of the same guard.
     #[test]
     fn a_whole_value_write_to_prompt_request_args_is_refused_and_leaves_them_unchanged() {
         let mut msg = prompt_request_message();
@@ -1465,11 +1240,6 @@ mod tests {
         assert_eq!(extract_args_from_message(&msg), before);
     }
 
-    // ---- the result projection -------------------------------------------
-
-    /// Redaction in the Post phase is a write-back, so what the pipeline
-    /// produced has to be what the next read returns. If it were dropped, the
-    /// policy would report a redaction that never reached the response.
     #[test]
     fn a_redacted_result_survives_the_round_trip() {
         let mut msg = tool_result_message();
@@ -1482,9 +1252,6 @@ mod tests {
         );
     }
 
-    /// With no structured result part, both directions fall back to the text
-    /// content. This is the path a plain text response takes, and it is the one
-    /// a `result contains` rule relies on.
     #[test]
     fn a_text_only_message_projects_and_accepts_text_as_its_result() {
         let mut msg = Message::text(Role::Assistant, "salary is 100000");
@@ -1501,9 +1268,6 @@ mod tests {
         );
     }
 
-    /// A non-string result for a text-only message is a no-op rather than a
-    /// stringified object appearing in the reply. Paired with the case above so
-    /// it cannot pass by the write-back being broken outright.
     #[test]
     fn a_non_string_result_leaves_a_text_only_message_untouched() {
         let mut msg = Message::text(Role::Assistant, "unchanged");
@@ -1515,10 +1279,6 @@ mod tests {
         );
     }
 
-    /// Rewriting text on a message that carries no text part appends one rather
-    /// than dropping the rewrite. A tool-result message redacted to a string
-    /// takes this path, and silently discarding it would leave the original
-    /// value in the reply.
     #[test]
     fn rewriting_text_on_a_message_with_no_text_part_appends_one() {
         let mut msg = Message::with_content(Role::User, vec![]);
@@ -1529,71 +1289,12 @@ mod tests {
             Value::String("added".to_owned())
         );
 
-        // And a second rewrite replaces rather than appends again.
         rewrite_message_text(&mut msg, "replaced");
         assert_eq!(msg.content.len(), 1, "the existing part must be reused");
         assert_eq!(
             extract_result_from_message(&msg),
             Value::String("replaced".to_owned())
         );
-    }
-
-    fn resource_ref_message() -> Message {
-        Message::with_content(
-            Role::User,
-            vec![ContentPart::ResourceRef {
-                content: ResourceReference {
-                    resource_request_id: "rr_001".to_owned(),
-                    uri: "hr://employees/42".to_owned(),
-                    name: Some("employee 42".to_owned()),
-                    resource_type: ResourceType::Uri,
-                    range_start: Some(10),
-                    range_end: Some(20),
-                    selector: Some("$.salary".to_owned()),
-                },
-            }],
-        )
-    }
-
-    fn resource_message() -> Message {
-        Message::with_content(
-            Role::Tool,
-            vec![ContentPart::Resource {
-                content: Resource {
-                    resource_request_id: "rr_001".to_owned(),
-                    uri: "hr://employees/42".to_owned(),
-                    name: Some("employee 42".to_owned()),
-                    title: Some("Employee Record".to_owned()),
-                    description: Some("HR employee record".to_owned()),
-                    content: Some("SSN 123-45-6789".to_owned()),
-                    mime_type: Some("text/plain".to_owned()),
-                    size_bytes: Some(15),
-                    version: Some("v3".to_owned()),
-                    resource_type: ResourceType::Uri,
-                    annotations: [("tier".to_owned(), serde_json::json!("gold"))]
-                        .into_iter()
-                        .collect(),
-                    ..Resource::default()
-                },
-            }],
-        )
-    }
-
-    fn prompt_result_message() -> Message {
-        Message::with_content(
-            Role::Assistant,
-            vec![ContentPart::PromptResult {
-                content: PromptResult {
-                    prompt_request_id: "pr_001".to_owned(),
-                    prompt_name: "summarize".to_owned(),
-                    description: Some("Summary prompt".to_owned()),
-                    messages: vec![],
-                    content: Some("Summarize this: SSN 123-45-6789".to_owned()),
-                    is_error: false,
-                    error_message: Some("partial result".to_owned()),
-                },
-            }],
-        )
     }
 
     #[test]
@@ -2017,7 +1718,6 @@ mod tests {
 
     #[test]
     fn extract_result_field_matches_a_lookup_on_the_full_envelope() {
-        // The old readback: project the whole envelope, then look up the field.
         fn via_envelope(msg: &Message, projection: Projection, field: &str) -> Option<Value> {
             let projected = super::extract_result_from_message(msg, projection).0;
             if projected.is_object() {
@@ -2161,65 +1861,6 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------------------
-    // Test Utilities
-    // -------------------------------------------------------------------------
-
-    /// Assert `written_back` equals `original` with only `edit` applied: the
-    /// whole message, not just the edited field, with no part appended and no
-    /// `Text` part introduced.
-    fn assert_differs_only_in(
-        original: &Message,
-        written_back: &Message,
-        edit: impl FnOnce(&mut Message),
-    ) {
-        let mut expected = original.clone();
-        edit(&mut expected);
-        assert_eq!(
-            serde_json::to_value(written_back).expect("serialize"),
-            serde_json::to_value(&expected).expect("serialize"),
-            "the message must differ from the original in the edited field and nowhere else"
-        );
-        assert_eq!(
-            written_back.content.len(),
-            original.content.len(),
-            "write-back must not add or remove content parts"
-        );
-        let is_text = |p: &ContentPart| matches!(p, ContentPart::Text { .. });
-        assert!(
-            original.content.iter().any(is_text) || !written_back.content.iter().any(is_text),
-            "write-back must not introduce a Text part"
-        );
-    }
-
-    fn resource_ref_mut(msg: &mut Message) -> &mut ResourceReference {
-        let Some(ContentPart::ResourceRef { content }) = msg.content.first_mut() else {
-            panic!("fixture must hold a ResourceRef part");
-        };
-        content
-    }
-
-    fn resource_mut(msg: &mut Message) -> &mut Resource {
-        let Some(ContentPart::Resource { content }) = msg.content.first_mut() else {
-            panic!("fixture must hold a Resource part");
-        };
-        content
-    }
-
-    fn prompt_result_mut(msg: &mut Message) -> &mut PromptResult {
-        let Some(ContentPart::PromptResult { content }) = msg.content.first_mut() else {
-            panic!("fixture must hold a PromptResult part");
-        };
-        content
-    }
-
-    /// A tool response carrying an embedded resource ahead of its result.
-    fn resource_then_tool_result() -> Message {
-        let mut msg = resource_message();
-        msg.content.extend(tool_result_message().content);
-        msg
-    }
-
     #[test]
     fn projection_follows_the_route_entity_type() {
         assert_eq!(Projection::for_entity("resource"), Projection::Resource);
@@ -2285,5 +1926,211 @@ mod tests {
                 .is_string(),
             "a tool route must not project a resource envelope"
         );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    fn projection_for(msg: &Message) -> Projection {
+        let has = |pred: fn(&ContentPart) -> bool| msg.content.iter().any(pred);
+        if has(|p| {
+            matches!(
+                p,
+                ContentPart::ResourceRef { .. } | ContentPart::Resource { .. }
+            )
+        }) {
+            Projection::Resource
+        } else if has(|p| matches!(p, ContentPart::PromptResult { .. })) {
+            Projection::Prompt
+        } else {
+            Projection::Tool
+        }
+    }
+
+    fn extract_args_from_message(msg: &Message) -> Value {
+        super::extract_args_from_message(msg, projection_for(msg))
+    }
+
+    fn extract_result_from_message(msg: &Message) -> Value {
+        super::extract_result_from_message(msg, projection_for(msg)).0
+    }
+
+    fn extract_result_with_identity(msg: &Message) -> (Value, super::ResultIdentity) {
+        super::extract_result_from_message(msg, projection_for(msg))
+    }
+
+    fn write_args_back_to_message(msg: &mut Message, args: &Value) -> Result<(), EnvelopeReplaced> {
+        let projection = projection_for(msg);
+        super::write_args_back_to_message(msg, args, projection)
+    }
+
+    fn write_result_back_to_message(
+        msg: &mut Message,
+        result: &Value,
+    ) -> Result<(), EnvelopeReplaced> {
+        let projection = projection_for(msg);
+        let identity = super::extract_result_from_message(msg, projection).1;
+        super::write_result_back_to_message(msg, result, projection, &identity)
+    }
+
+    fn tool_call_message() -> Message {
+        Message::with_content(
+            Role::User,
+            vec![ContentPart::ToolCall {
+                content: ToolCall {
+                    tool_call_id: "tc_001".to_owned(),
+                    name: "get_weather".to_owned(),
+                    arguments: [
+                        ("city".to_owned(), serde_json::json!("London")),
+                        ("units".to_owned(), serde_json::json!("metric")),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    namespace: None,
+                },
+            }],
+        )
+    }
+
+    fn tool_result_message() -> Message {
+        Message::with_content(
+            Role::Tool,
+            vec![ContentPart::ToolResult {
+                content: ToolResult {
+                    tool_call_id: "tc_001".to_owned(),
+                    tool_name: "get_weather".to_owned(),
+                    content: serde_json::json!({"temp": 12, "sky": "grey"}),
+                    is_error: false,
+                },
+            }],
+        )
+    }
+
+    fn prompt_request_message() -> Message {
+        Message::with_content(
+            Role::User,
+            vec![ContentPart::PromptRequest {
+                content: praxis_policy_core::cmf::content::PromptRequest {
+                    prompt_request_id: "pr_1".into(),
+                    name: "summarize".into(),
+                    arguments: [
+                        ("tone".to_owned(), serde_json::json!("terse")),
+                        ("length".to_owned(), serde_json::json!(200)),
+                    ]
+                    .into(),
+                    server_id: None,
+                },
+            }],
+        )
+    }
+
+    fn resource_ref_message() -> Message {
+        Message::with_content(
+            Role::User,
+            vec![ContentPart::ResourceRef {
+                content: ResourceReference {
+                    resource_request_id: "rr_001".to_owned(),
+                    uri: "hr://employees/42".to_owned(),
+                    name: Some("employee 42".to_owned()),
+                    resource_type: ResourceType::Uri,
+                    range_start: Some(10),
+                    range_end: Some(20),
+                    selector: Some("$.salary".to_owned()),
+                },
+            }],
+        )
+    }
+
+    fn resource_message() -> Message {
+        Message::with_content(
+            Role::Tool,
+            vec![ContentPart::Resource {
+                content: Resource {
+                    resource_request_id: "rr_001".to_owned(),
+                    uri: "hr://employees/42".to_owned(),
+                    name: Some("employee 42".to_owned()),
+                    title: Some("Employee Record".to_owned()),
+                    description: Some("HR employee record".to_owned()),
+                    content: Some("SSN 123-45-6789".to_owned()),
+                    mime_type: Some("text/plain".to_owned()),
+                    size_bytes: Some(15),
+                    version: Some("v3".to_owned()),
+                    resource_type: ResourceType::Uri,
+                    annotations: [("tier".to_owned(), serde_json::json!("gold"))]
+                        .into_iter()
+                        .collect(),
+                    ..Resource::default()
+                },
+            }],
+        )
+    }
+
+    fn prompt_result_message() -> Message {
+        Message::with_content(
+            Role::Assistant,
+            vec![ContentPart::PromptResult {
+                content: PromptResult {
+                    prompt_request_id: "pr_001".to_owned(),
+                    prompt_name: "summarize".to_owned(),
+                    description: Some("Summary prompt".to_owned()),
+                    messages: vec![],
+                    content: Some("Summarize this: SSN 123-45-6789".to_owned()),
+                    is_error: false,
+                    error_message: Some("partial result".to_owned()),
+                },
+            }],
+        )
+    }
+
+    fn assert_differs_only_in(
+        original: &Message,
+        written_back: &Message,
+        edit: impl FnOnce(&mut Message),
+    ) {
+        let mut expected = original.clone();
+        edit(&mut expected);
+        assert_eq!(
+            serde_json::to_value(written_back).expect("serialize"),
+            serde_json::to_value(&expected).expect("serialize"),
+            "the message must differ from the original in the edited field and nowhere else"
+        );
+        assert_eq!(
+            written_back.content.len(),
+            original.content.len(),
+            "write-back must not add or remove content parts"
+        );
+        let is_text = |p: &ContentPart| matches!(p, ContentPart::Text { .. });
+        assert!(
+            original.content.iter().any(is_text) || !written_back.content.iter().any(is_text),
+            "write-back must not introduce a Text part"
+        );
+    }
+
+    fn resource_ref_mut(msg: &mut Message) -> &mut ResourceReference {
+        let Some(ContentPart::ResourceRef { content }) = msg.content.first_mut() else {
+            panic!("fixture must hold a ResourceRef part");
+        };
+        content
+    }
+
+    fn resource_mut(msg: &mut Message) -> &mut Resource {
+        let Some(ContentPart::Resource { content }) = msg.content.first_mut() else {
+            panic!("fixture must hold a Resource part");
+        };
+        content
+    }
+
+    fn prompt_result_mut(msg: &mut Message) -> &mut PromptResult {
+        let Some(ContentPart::PromptResult { content }) = msg.content.first_mut() else {
+            panic!("fixture must hold a PromptResult part");
+        };
+        content
+    }
+
+    fn resource_then_tool_result() -> Message {
+        let mut msg = resource_message();
+        msg.content.extend(tool_result_message().content);
+        msg
     }
 }

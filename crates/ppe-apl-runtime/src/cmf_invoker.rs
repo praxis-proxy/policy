@@ -226,9 +226,7 @@ where
         })
     }
 
-    /// Read field-stage readbacks from the content parts `projection` names.
-    /// The route handler passes the route's projection. Defaults to
-    /// [`Projection::Tool`].
+    /// Select the content-part projection used by field-stage readback.
     #[must_use]
     pub fn with_projection(mut self, projection: Projection) -> Self {
         self.projection = projection;

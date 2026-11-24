@@ -251,6 +251,8 @@ impl AplRouteHandler {
     /// Read `args.*` / `result.*` from the content parts `projection` names.
     /// The visitor sets it from the route's entity type. Defaults to
     /// [`Projection::Tool`].
+    ///
+    /// [`Projection::Tool`]: Projection::Tool
     pub fn with_projection(mut self, projection: Projection) -> Self {
         self.projection = projection;
         self
@@ -662,10 +664,7 @@ impl AplRouteHandler {
             Phase::Pre => message.map(|m| extract_args_from_message(m, self.projection)),
             Phase::Post => None,
         };
-        // Result extraction is deferred to the `result_modified` branch —
-        // only runs when the pipeline actually changed a result field.
-        // Set when a pipeline replaced a whole resource or prompt envelope,
-        // which write-back cannot apply; the request then fails closed below.
+        // The baseline must precede plugin edits so only policy changes are merged.
         let mut envelope_replaced: Option<(&'static str, EnvelopeReplaced)> = None;
         // Which of the three sources changed the payload, in precedence
         // order. Each condition is a signal from the code that performed
