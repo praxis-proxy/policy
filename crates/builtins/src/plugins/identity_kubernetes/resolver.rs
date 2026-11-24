@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// The `identity.resolve` handler: the shared lookup resolver with the API
-// server behind it.
-
 use std::sync::Arc;
 
 use praxis_policy_core::context::PluginContext;
@@ -44,7 +41,7 @@ const CACHE_HASH: HashLabels = HashLabels {
     op: "kubernetes_token_review_cache",
 };
 
-/// What is this plugin's own: its denial codes and cache labels.
+/// Plugin-specific denial codes and cache labels.
 const PROFILE: LookupProfile = LookupProfile {
     cache_hash: CACHE_HASH,
     expired_code: codes::TOKEN_EXPIRED,

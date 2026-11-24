@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// The config block an operator writes, and what it rejects at load.
-
 use std::path::PathBuf;
 
 use praxis_policy_core::extensions::raw_credentials::{Credential, TokenRole};
@@ -42,8 +40,8 @@ pub struct TokenReviewResolverConfig {
     #[serde(default)]
     pub audiences: Vec<String>,
 
-    /// Reuse the API server's answers. **`ttl_secs` is the revocation window**,
-    /// capped by a JWT's own `exp`.
+    /// Cache answers for up to `ttl_secs`, capped by a JWT's own `exp`.
+    /// This adds to the API server's own revocation delay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<CacheConfig>,
 
@@ -116,7 +114,7 @@ impl TokenReviewResolverConfig {
         CredentialLocation::new(self.credential.clone(), self.prefix.clone())
     }
 
-    /// Reject what cannot work, and return the mapper the checking produced.
+    /// Validate the settings and compile the identity mapping.
     ///
     /// # Errors
     ///
@@ -185,9 +183,9 @@ fn validate_api_server_url(raw: &str) -> Result<(), String> {
 mod tests {
     use super::validate_api_server_url;
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // Tests
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     #[test]
     fn an_https_base_url_with_a_host_is_accepted() {

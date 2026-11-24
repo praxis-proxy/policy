@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// PPE's own token for the API server. A file is re-read once `refresh_secs` has
-// passed, as client-go does, so a projected token rotates. A failed re-read
-// keeps the last token: denying every request on a read error turns a blip
-// into an outage.
-//
-// One refresh runs at a time. Two overlapping reads can see different token
-// generations and finish in either order, and the older one landing last would
-// put a superseded credential back. A request that arrives during a refresh
-// uses the token in hand rather than waiting for the read.
+// Serialized refreshes prevent an older read from replacing a newer token.
+// Keeping the last token after a failed read avoids an auth outage.
 
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -148,9 +141,9 @@ mod tests {
 
     use super::*;
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // Tests
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_refreshes_never_overlap_so_a_token_cannot_roll_back() {
@@ -205,9 +198,9 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // Test Utilities
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     /// Counts reads, how many run at once, and answers `gen<n>` slowly.
     #[derive(Default)]

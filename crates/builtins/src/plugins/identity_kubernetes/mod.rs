@@ -3,13 +3,10 @@
 
 //! Resolves a bearer token to an identity by asking the Kubernetes API server.
 //!
-//! The token is submitted to the `TokenReview` API, and the user the cluster
-//! authenticates it as becomes the identity. This serves tokens that cannot be
-//! verified locally: legacy Secret-based `ServiceAccount` tokens that never
-//! expire, bound tokens whose pod has been deleted, and anything a cluster
-//! authenticates through a webhook. For a `ServiceAccount` JWT that only needs
-//! its signature checked, `identity/jwt` against the cluster's issuer avoids a
-//! round trip per request.
+//! Use this for legacy `ServiceAccount` tokens, webhook authentication, or
+//! revocation checks that require cluster state. For `ServiceAccount` JWTs that
+//! only need signature verification, `identity/jwt` avoids a `TokenReview` call
+//! per request.
 //!
 //! `status.user` (`username`, `uid`, `groups`, `extra`) is what a
 //! [`record_map`] projects. The presented token never leaves this plugin

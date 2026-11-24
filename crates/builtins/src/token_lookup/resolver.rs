@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// The `identity.resolve` handler every lookup resolver runs.
-//
-// Read the credential, resolve it to a record, project the record onto the
-// identity slots. The presented credential is never written back: it does not
-// reach `raw_credentials`, so nothing downstream can forward the caller's own
-// credential to an upstream that never authenticated it.
+// Presented tokens must not reach `raw_credentials`, where downstream plugins
+// could forward them to an upstream that never authenticated the caller.
 
 use std::sync::Arc;
 
@@ -27,11 +23,8 @@ use crate::token_lookup::directory::{KeyDirectory, PresentedKey};
 
 /// Denial codes every lookup resolver shares.
 ///
-/// Extraction codes match the JWT resolver's, so an operator's runbook for
-/// `auth.missing_credential` applies to every resolver. `DIRECTORY_UNAVAILABLE`
-/// stays apart from each plugin's unknown-credential code: both deny, and an
-/// operator watching a spike cannot act until they know whether the
-/// credentials are bad or the directory is down.
+/// `DIRECTORY_UNAVAILABLE` distinguishes backend outages from unrecognized
+/// credentials. Extraction codes match the JWT resolver's.
 pub(crate) mod codes {
     /// Nothing was supplied at the configured location.
     pub const MISSING_CREDENTIAL: &str = "auth.missing_credential";
@@ -139,9 +132,7 @@ impl LookupResolver {
             },
         };
 
-        // `Extensions` is the request's carrier of host services, already
-        // capability filtered by the executor, so a backend that needs egress
-        // reaches it through the same value every hook receives.
+        // The invocation's filtered services keep directory egress under its grants.
         let record = match self.directory.lookup(&presented, ext).await {
             Ok(Some(record)) => record,
             Ok(None) => {
@@ -187,9 +178,7 @@ impl LookupResolver {
                 Some(workload) => updated.caller_workload = Some(workload),
                 None => return mapping_failed("workload"),
             },
-            // `TokenRole` is `#[non_exhaustive]`, and each plugin's validation
-            // refuses a role with no section. Surfacing as misconfigured rather
-            // than silently authenticating nobody.
+            // Unsupported roles must fail instead of authenticating without an identity.
             other => {
                 return PluginResult::deny(PluginViolation::new(
                     "auth.misconfigured",
@@ -249,12 +238,11 @@ pub(crate) fn check_location_capability(
 
 /// Put a cache in front of `directory` when one is configured.
 ///
-/// The cache wraps whatever backend was built, so what it holds is answers
-/// rather than anything one directory knows about.
-///
 /// # Errors
 ///
 /// `PluginError::Config` for whatever [`CacheConfig::validate`] rejects.
+///
+/// [`CacheConfig::validate`]: crate::token_lookup::cache::CacheConfig::validate
 pub(crate) fn with_cache(
     config: &PluginConfig,
     directory: Arc<dyn KeyDirectory>,

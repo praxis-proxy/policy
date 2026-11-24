@@ -5,8 +5,7 @@
 //! block and a scripted API server through to a populated identity slot.
 //!
 //! Response bodies in `fixtures/` were captured from a real API server,
-//! including the part that is easy to get wrong: `authenticated` is omitted,
-//! not `false`, when the API server refuses the token.
+//! which omits `authenticated` when it refuses a token.
 
 #![allow(
     missing_docs,

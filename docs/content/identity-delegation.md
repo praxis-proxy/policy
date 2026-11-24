@@ -1087,8 +1087,10 @@ and that identity needs `create` on `tokenreviews`. The built-in
 restart. Outside the cluster, use `kind: env` with a variable `name`, holding a
 long-lived token for a dedicated reviewer ServiceAccount.
 
-**Trust.** The cluster CA is configured on the host's HTTP transport, not here.
-The URL must be `https://`, because the reviewer token travels on it.
+**Trust.** The bundled `HyperTransport` trusts public CA roots and has no
+custom-CA setting. A private cluster CA requires a host-installed
+`HttpTransport` configured to trust that CA. The URL must be `https://`,
+because the reviewer token travels on it.
 
 **Audiences.** With `audiences` set, the API server authenticates the token
 only for one of them, and the answer must name one in `status.audiences`.
@@ -1124,6 +1126,8 @@ that an answer for a JWT never outlives the token's own `exp`. The API server
 caches its own answers too: a token it authenticated recently keeps passing
 for about 10 seconds after its Secret is deleted. The revocation window for a
 legacy token is therefore `cache.ttl_secs` plus that, so keep the TTL short.
+Negative caching can also delay recovery from an authenticator failure by
+`negative_ttl_secs`.
 
 Tested: end to end through Praxis against Kubernetes 1.35 (kind), with
 projected and legacy ServiceAccount tokens. A team-a token reached the

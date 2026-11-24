@@ -83,6 +83,8 @@ impl Drop for TokenFile {
 
 /// A config block reviewing against [`API_SERVER`] with the reviewer token at
 /// `token_path`, mapping `username` and `groups` onto the subject.
+///
+/// [`API_SERVER`]: API_SERVER
 pub fn config(token_path: &str) -> serde_json::Value {
     serde_json::json!({
         "credential": { "kind": "header", "name": "Authorization" },

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// An endpoint PPE sends a credential to must be HTTPS with a real host.
-
 /// Parse `raw` as an `https` URL with a host, for the setting named `field`.
 ///
 /// Plain HTTP would hand whatever travels on the connection to anything on the
@@ -36,9 +34,9 @@ pub(crate) fn require_https_url(field: &str, raw: &str) -> Result<url::Url, Stri
 mod tests {
     use super::require_https_url;
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // Tests
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     #[test]
     fn an_https_url_with_a_host_is_accepted() {
@@ -66,9 +64,9 @@ mod tests {
         }
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // RFC 9110 Section 4.2.2: an https URI with an empty host is invalid
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     /// [RFC 9110 Section 4.2.2] makes an `https` URI with an empty host
     /// invalid.

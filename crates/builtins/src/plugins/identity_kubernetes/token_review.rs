@@ -74,8 +74,7 @@ impl TokenReviewDirectory {
         })
     }
 
-    /// The `TokenReview` object for a token, serialized from borrowed fields
-    /// so the caller's token is not copied on the way.
+    /// Serialize the `TokenReview` request for a presented token.
     fn body(&self, token: &str) -> Result<Vec<u8>, DirectoryError> {
         let review = ReviewRequest {
             api_version: "authentication.k8s.io/v1",
@@ -231,13 +230,11 @@ fn jwt_expiry(token: &str) -> Option<DateTime<Utc>> {
     numeric_date(claims.get("exp")?)
 }
 
-/// An RFC 7519 `NumericDate`, which may carry a fraction.
+/// A `NumericDate` per [RFC 7519 Section 2], rounded down to whole seconds.
 ///
-/// A fraction is floored, so the bound can only come earlier. The float goes
-/// through its decimal text because a float-to-integer cast can truncate
-/// silently; a value too large for an `i64` is far enough out to leave
-/// unbounded.
+/// [RFC 7519 Section 2]: https://datatracker.ietf.org/doc/html/rfc7519#section-2
 fn numeric_date(value: &Value) -> Option<DateTime<Utc>> {
+    // Flooring keeps the cache bound at or before the token's expiry.
     let seconds = match value.as_i64() {
         Some(seconds) => seconds,
         None => format!("{:.0}", value.as_f64()?.floor()).parse().ok()?,

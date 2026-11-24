@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// The `identity.resolve` handler: the shared lookup resolver with the API key
-// backends behind it.
-
 use std::sync::Arc;
 
 use praxis_policy_core::context::PluginContext;
@@ -49,7 +46,7 @@ pub mod codes {
     pub const KEY_EXPIRED: &str = "auth.key_expired";
 }
 
-/// What is this plugin's own: its denial codes and cache labels.
+/// Plugin-specific denial codes and cache labels.
 const PROFILE: LookupProfile = LookupProfile {
     cache_hash: API_KEY_CACHE,
     expired_code: codes::KEY_EXPIRED,
