@@ -40,7 +40,7 @@ impl MetadataDependencies {
         let mut pending = self
             .edges
             .keys()
-            .filter(|rule| rule.starts_with(&root))
+            .filter(|rule| rule.starts_with(&root) || root.starts_with(rule))
             .cloned()
             .collect::<Vec<_>>();
         let mut seen = HashSet::new();
@@ -79,7 +79,7 @@ impl MetadataDependencies {
             let dependencies = references.into_iter().flat_map(|candidate| {
                 known
                     .iter()
-                    .filter(move |rule| rule.starts_with(&candidate))
+                    .filter(move |rule| rule.starts_with(&candidate) || candidate.starts_with(rule))
                     .cloned()
             });
             self.edges.entry(name).or_default().extend(dependencies);
@@ -407,32 +407,6 @@ fn expression_path(expression: &Expr) -> Option<Vec<String>> {
     }
 }
 
-fn expression_path_info(expression: &Expr) -> Option<(Vec<String>, bool)> {
-    match expression {
-        Expr::RefBrack { refr, index, .. } => {
-            let (path, expands) = expression_path_info(refr)?;
-            match index.as_ref() {
-                Expr::String { value, .. } | Expr::RawString { value, .. } => {
-                    let mut path = path;
-                    path.push(value.as_string().ok()?.to_string());
-                    Some((path, expands))
-                },
-                _ => Some((path, true)),
-            }
-        },
-        Expr::RefDot { refr, field, .. } => {
-            let (mut path, expands) = expression_path_info(refr)?;
-            path.push(field.1.as_string().ok()?.to_string());
-            Some((path, expands))
-        },
-        Expr::Var { value, .. } => value
-            .as_string()
-            .ok()
-            .map(|name| (vec![name.to_string()], false)),
-        _ => None,
-    }
-}
-
 fn module_import_aliases(module: &Module) -> HashMap<String, Vec<String>> {
     module
         .imports
@@ -551,7 +525,7 @@ fn collect_expression_references(
     imports: &HashMap<String, Vec<String>>,
     out: &mut HashSet<RulePath>,
 ) {
-    if let Some((path, expands)) = expression_path_info(expression) {
+    if let Some(path) = expression_path(expression) {
         let resolved = if path.first().is_some_and(|part| part == "data") {
             Some(path)
         } else if let Some(imported) = path.first().and_then(|head| imports.get(head)) {
@@ -569,16 +543,13 @@ fn collect_expression_references(
         } else {
             None
         };
-        if let Some(mut resolved) = resolved {
-            if expands {
-                while resolved.len() > 1 {
-                    out.insert(resolved.clone());
-                    resolved.pop();
-                }
-            } else {
-                out.insert(resolved);
-            }
+        if let Some(resolved) = resolved
+            && resolved.len() > 1
+        {
+            out.insert(resolved);
         }
+        collect_reference_indexes(expression, package, imports, out);
+        return;
     }
 
     match expression {
@@ -642,6 +613,22 @@ fn collect_expression_references(
         | Expr::Bool { .. }
         | Expr::Null { .. }
         | Expr::Var { .. } => {},
+    }
+}
+
+fn collect_reference_indexes(
+    expression: &Expr,
+    package: &[String],
+    imports: &HashMap<String, Vec<String>>,
+    out: &mut HashSet<RulePath>,
+) {
+    match expression {
+        Expr::RefDot { refr, .. } => collect_reference_indexes(refr, package, imports, out),
+        Expr::RefBrack { refr, index, .. } => {
+            collect_reference_indexes(refr, package, imports, out);
+            collect_expression_references(index, package, imports, out);
+        },
+        _ => {},
     }
 }
 

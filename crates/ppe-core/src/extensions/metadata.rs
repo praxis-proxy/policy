@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::de::Error as _;
+use serde::ser::{SerializeMap as _, SerializeSeq as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use thiserror::Error;
@@ -87,7 +88,7 @@ pub struct MetadataSource {
 }
 
 /// One immutable result returned by a policy information source.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct AcquiredFacts {
     cache: MetadataCacheDisposition,
     error_code: Option<String>,
@@ -101,16 +102,19 @@ pub struct AcquiredFacts {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct AcquiredFactsWire {
+#[serde(
+    bound(deserialize = "E: Deserialize<'de>, S: Deserialize<'de>, V: Deserialize<'de>"),
+    deny_unknown_fields
+)]
+struct AcquiredFactsWire<V = Value, E = String, S = MetadataSource> {
     cache: MetadataCacheDisposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    error_code: Option<String>,
+    error_code: Option<E>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fetched_at: Option<DateTime<Utc>>,
     outcome: MetadataOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    source: Option<MetadataSource>,
+    source: Option<S>,
     #[serde(default, skip_serializing_if = "is_false")]
     stale: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,14 +124,28 @@ struct AcquiredFactsWire {
         deserialize_with = "deserialize_present_value",
         skip_serializing_if = "Option::is_none"
     )]
-    value: Option<Value>,
+    value: Option<V>,
 }
 
-fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+fn deserialize_present_value<'de, D, V>(deserializer: D) -> Result<Option<V>, D::Error>
 where
     D: Deserializer<'de>,
+    V: Deserialize<'de>,
 {
-    Value::deserialize(deserializer).map(Some)
+    V::deserialize(deserializer).map(Some)
+}
+
+impl PartialEq for AcquiredFacts {
+    fn eq(&self, other: &Self) -> bool {
+        self.cache == other.cache
+            && self.error_code == other.error_code
+            && self.fetched_at == other.fetched_at
+            && self.outcome == other.outcome
+            && self.source == other.source
+            && self.stale == other.stale
+            && self.status == other.status
+            && self.value == other.value
+    }
 }
 
 impl Serialize for AcquiredFacts {
@@ -137,18 +155,15 @@ impl Serialize for AcquiredFacts {
     {
         AcquiredFactsWire {
             cache: self.cache,
-            error_code: self.error_code.clone(),
+            error_code: self.error_code.as_deref(),
             fetched_at: self.fetched_at,
             outcome: self.outcome,
-            source: self.source.clone(),
+            source: self.source.as_ref(),
             stale: self.stale,
             status: self.status,
-            value: self.value.as_ref().map(|value| {
-                if self.numbers_validated {
-                    encode_validated_numbers(value)
-                } else {
-                    value.clone()
-                }
+            value: self.value.as_ref().map(|value| SerializedMetadataValue {
+                value,
+                numbers_validated: self.numbers_validated,
             }),
         }
         .serialize(serializer)
@@ -160,7 +175,7 @@ impl<'de> Deserialize<'de> for AcquiredFacts {
     where
         D: Deserializer<'de>,
     {
-        let wire = AcquiredFactsWire::deserialize(deserializer)?;
+        let wire: AcquiredFactsWire = AcquiredFactsWire::deserialize(deserializer)?;
         let value = wire
             .value
             .map(decode_and_validate_numbers)
@@ -425,40 +440,68 @@ const EXACT_BINARY64_TAG: &str = "$praxis_exact_binary64";
 /// Preserve an already validated floating-point value across serde formats.
 /// Response keys beginning with `$` are rejected, so this representation
 /// cannot collide with source-owned metadata.
-fn encode_validated_numbers(value: &Value) -> Value {
-    match value {
-        Value::Number(number) if number.as_i64().is_none() => {
-            let Some(candidate) = number.as_f64() else {
-                return value.clone();
-            };
-            let token = if candidate == 0.0 {
-                if candidate.is_sign_negative() {
-                    "-0.0".to_owned()
-                } else {
-                    "0.0".to_owned()
-                }
-            } else {
-                let (digits, exponent) = exact_binary64_decimal(candidate);
-                let sign = if candidate.is_sign_negative() {
-                    "-"
-                } else {
-                    ""
+struct SerializedMetadataValue<'a> {
+    value: &'a Value,
+    numbers_validated: bool,
+}
+
+impl Serialize for SerializedMetadataValue<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if !self.numbers_validated {
+            return self.value.serialize(serializer);
+        }
+        match self.value {
+            Value::Number(number) if number.as_i64().is_none() => {
+                let Some(candidate) = number.as_f64() else {
+                    return number.serialize(serializer);
                 };
-                format!("{sign}{digits}e{exponent}")
-            };
-            Value::Object(serde_json::Map::from_iter([(
-                EXACT_BINARY64_TAG.to_owned(),
-                Value::String(token),
-            )]))
-        },
-        Value::Array(items) => Value::Array(items.iter().map(encode_validated_numbers).collect()),
-        Value::Object(fields) => Value::Object(
-            fields
-                .iter()
-                .map(|(key, value)| (key.clone(), encode_validated_numbers(value)))
-                .collect(),
-        ),
-        _ => value.clone(),
+                let token = if candidate == 0.0 {
+                    if candidate.is_sign_negative() {
+                        "-0.0".to_owned()
+                    } else {
+                        "0.0".to_owned()
+                    }
+                } else {
+                    let (digits, exponent) = exact_binary64_decimal(candidate);
+                    let sign = if candidate.is_sign_negative() {
+                        "-"
+                    } else {
+                        ""
+                    };
+                    format!("{sign}{digits}e{exponent}")
+                };
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry(EXACT_BINARY64_TAG, &token)?;
+                map.end()
+            },
+            Value::Array(items) => {
+                let mut sequence = serializer.serialize_seq(Some(items.len()))?;
+                for value in items {
+                    sequence.serialize_element(&Self {
+                        value,
+                        numbers_validated: true,
+                    })?;
+                }
+                sequence.end()
+            },
+            Value::Object(fields) => {
+                let mut map = serializer.serialize_map(Some(fields.len()))?;
+                for (key, value) in fields {
+                    map.serialize_entry(
+                        key,
+                        &Self {
+                            value,
+                            numbers_validated: true,
+                        },
+                    )?;
+                }
+                map.end()
+            },
+            value => value.serialize(serializer),
+        }
     }
 }
 
@@ -1180,6 +1223,30 @@ mod tests {
             .expect("account survives")
             .validate()
             .expect("exact-number validation survives serialization");
+    }
+
+    #[test]
+    fn plain_success_round_trips_with_semantic_equality() {
+        let facts = success(json!({
+            "active": true,
+            "profile": {"name": "alice", "roles": ["reader", "admin"], "missing": null},
+            "scores": [1, 0.5]
+        }));
+        let encoded = serde_json::to_string(&facts).expect("plain success serializes");
+        let decoded: AcquiredFacts = serde_json::from_str(&encoded).expect("plain success decodes");
+        assert_eq!(
+            decoded, facts,
+            "validation state must not change record equality"
+        );
+        decoded.validate().expect("decoded facts remain valid");
+
+        let encoded = serde_yaml::to_string(&facts).expect("plain success serializes to YAML");
+        let decoded: AcquiredFacts =
+            serde_yaml::from_str(&encoded).expect("plain success decodes from YAML");
+        assert_eq!(
+            decoded, facts,
+            "record equality must survive either serde format"
+        );
     }
 
     #[test]

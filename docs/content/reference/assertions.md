@@ -109,6 +109,11 @@ request or response assertion can render. Conditional fetches are allowed;
 their absence follows the entry's `on_missing` rule. A response assertion may
 reuse the request phase's record.
 
+Unmatched HTTP traffic runs only the global APL policy. Its inherited
+assertions must use a global `fetch(instance)`; a fetch declared under
+`global.defaults.http` runs only when that layer joins a named route and
+cannot satisfy the catch-all assertion contract.
+
 Targets named `Authorization`, `Proxy-Authorization`, `Cookie`, or
 `Set-Cookie`, in any casing, require `allow_credential_target: true` on that
 exact entry, whatever source kind supplies the value. Existing subject,

@@ -65,7 +65,7 @@ pub use llm::{
     LLMExtension, LLMRequest, LlmInstruction, LlmInstructionRole, LlmRequest, LlmRequestDocument,
     LlmRequestParts, ToolChoice,
 };
-pub use mcp::{MCPExtension, PromptMetadata, ResourceMetadata, ToolMetadata};
+pub use mcp::{Icon, MCPExtension, PromptMetadata, ResourceMetadata, ToolMetadata};
 pub use meta::MetaExtension;
 pub use metadata::{
     AcquiredFacts, CAP_FRAMEWORK_PUBLISH_METADATA, MetadataCacheDisposition, MetadataExtension,
