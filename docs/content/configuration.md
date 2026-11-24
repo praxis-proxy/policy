@@ -350,7 +350,7 @@ at all:
 ```yaml
 plugins:
   - name: kc-introspect
-    kind: revocation/introspection
+    kind: oauth/introspection
     hooks: [revocation.check]
     capabilities: [perform_http, read_inbound_credentials]
     config:
@@ -397,7 +397,7 @@ as `global (requests matching no route)`.
 
 [Identity](identity-delegation.md#revocation) covers where the checks run,
 which identities a checker has to cover, the denial codes, and the
-settings for `revocation/introspection`.
+settings for `oauth/introspection`.
 
 ## Requests with no entity
 

@@ -13,8 +13,7 @@
 //! - `elicitation_ciba` (`elicitation-ciba`) — kind `elicitation/ciba`
 //! - `quota` (`experimental-quota`) — kind `quota/limitador`
 //! - `ratelimit` (`experimental-ratelimit`): kind `ratelimit/limitador`
-//! - `revocation_introspection` (`revocation-introspection`): kind
-//!   `revocation/introspection`
+//! - `oauth_introspection` (`oauth-introspection`): kind `oauth/introspection`
 
 #[cfg(feature = "_jwt")]
 pub mod identity_jwt;
@@ -37,5 +36,5 @@ pub mod quota;
 #[cfg(feature = "experimental-ratelimit")]
 pub mod ratelimit;
 
-#[cfg(feature = "revocation-introspection")]
-pub mod revocation_introspection;
+#[cfg(feature = "oauth-introspection")]
+pub mod oauth_introspection;

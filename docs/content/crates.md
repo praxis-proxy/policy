@@ -36,7 +36,7 @@ than named directly. See [Builtins](builtins.md).
 | `api-key` | `plugins::identity_api_key` | `identity/api-key` |
 | `oauth` | `plugins::delegator_oauth` | `delegator/oauth` |
 | `elicitation-ciba` | `plugins::elicitation_ciba` | `elicitation/ciba` |
-| `revocation-introspection` | `plugins::revocation_introspection` | `revocation/introspection` |
+| `oauth-introspection` | `plugins::oauth_introspection` | `oauth/introspection` |
 | `cedar` | `pdps::cedar_direct` | `cedar-direct` |
 | `cel` | `pdps::cel` | `cel` |
 | `opa` | `pdps::opa` | `opa` |

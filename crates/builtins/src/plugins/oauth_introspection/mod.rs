@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Checks revocation by asking the issuer, through RFC 7662 token
-//! introspection.
+//! Asks an issuer about a token through RFC 7662 token introspection.
 //!
 //! Handles `revocation.check`. For each identity slot the engine asks about,
 //! the checker takes the slot's raw inbound token and, when the token names
@@ -18,12 +17,19 @@
 /// The answer cache in front of the introspection endpoint.
 mod cache;
 /// The revocation hook handler.
-pub mod checker;
+mod checker;
+/// The introspection call both hooks share.
+mod client;
 /// Plugin configuration and its validation.
 pub mod config;
-/// Constructs the checker from configuration.
+/// Constructs the plugin from configuration.
 pub mod factory;
+/// The plugin and its construction.
+mod plugin;
+/// Fixtures the test modules share.
+#[cfg(test)]
+mod test_support;
 
-pub use checker::IntrospectionChecker;
 pub use config::{ClientSecretSource, IntrospectionConfig};
 pub use factory::{IntrospectionFactory, KIND};
+pub use plugin::IntrospectionPlugin;

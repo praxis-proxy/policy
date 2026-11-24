@@ -34,7 +34,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   authenticates callers but has no checker fail the load, instead of only
   raising `revocation_partial_coverage`.
   ([#205](https://github.com/praxis-proxy/policy/issues/205))
-- **`revocation/introspection` checker.** The `revocation-introspection`
+- **`oauth/introspection` checker.** The `oauth-introspection`
   feature, part of `builtins`, asks the issuer through RFC 7662
   introspection whether a JWT from the configured `issuer` is still active.
   Answers can be cached with `cache_ttl_seconds`, which defaults to `0`, so

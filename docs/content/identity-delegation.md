@@ -1363,7 +1363,7 @@ optional. Without a `revocation:` block, nothing changes.
 ```yaml
 plugins:
   - name: kc-introspect
-    kind: revocation/introspection
+    kind: oauth/introspection
     hooks: [revocation.check]
     capabilities: [perform_http, read_inbound_credentials]
     config:
@@ -1472,7 +1472,7 @@ it through.
 
 ### The introspection checker
 
-`revocation/introspection` uses
+`oauth/introspection` uses
 [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662) token introspection to
 ask the issuer whether a token is still active. It only handles a slot
 whose raw token is a JWT with an `iss` that matches the `issuer` setting

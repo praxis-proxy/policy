@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// `PluginFactory` for the RFC 7662 revocation checker, so every host wires it
-// the same way.
+// `PluginFactory` for RFC 7662 introspection, so every host wires it the same
+// way.
 //
 // Operators declare it as:
 //
 //     plugins:
 //       - name: kc-introspect
-//         kind: revocation/introspection
+//         kind: oauth/introspection
 //         hooks: [revocation.check]
 //         capabilities: [read_inbound_credentials, perform_http]
 //         config:
@@ -17,8 +17,7 @@
 //           client_id: ppe-introspect
 //           client_secret_source: { kind: env_var, name: PPE_INTROSPECT_SECRET }
 //
-// The `kind: revocation/introspection` string is part of this crate's public
-// API.
+// The `kind: oauth/introspection` string is part of this crate's public API.
 
 use std::sync::Arc;
 
@@ -30,22 +29,22 @@ use praxis_policy_core::{
     revocation::{HOOK_REVOCATION_CHECK, RevocationHook},
 };
 
-use crate::plugins::revocation_introspection::IntrospectionChecker;
+use crate::plugins::oauth_introspection::IntrospectionPlugin;
 
 /// The plugin `kind:` string operators write in PPE YAML.
-pub const KIND: &str = "revocation/introspection";
+pub const KIND: &str = "oauth/introspection";
 
-/// Factory for `kind: revocation/introspection` plugins.
+/// Factory for `kind: oauth/introspection` plugins.
 pub struct IntrospectionFactory;
 
 impl PluginFactory for IntrospectionFactory {
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
-        let checker = Arc::new(IntrospectionChecker::new(config.clone())?);
+        let plugin = Arc::new(IntrospectionPlugin::new(config.clone())?);
         let handler = Arc::new(TypedHandlerAdapter::<RevocationHook, _>::new(Arc::clone(
-            &checker,
+            &plugin,
         )));
         Ok(PluginInstance {
-            plugin: checker,
+            plugin,
             handlers: vec![(HOOK_REVOCATION_CHECK, handler)],
         })
     }

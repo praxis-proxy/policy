@@ -69,10 +69,10 @@ oauth = [
 ]
 delegator-vault = ["_engine-core", "_plugins", "dep:sha2", "dep:moka"]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
-# RFC 7662 revocation checker. `base64` reads the token's issuer before the
-# token is sent anywhere; `moka` holds the answer cache, keyed by the Policy
-# crypto backend's SHA-256.
-revocation-introspection = ["_engine-core", "_plugins", "dep:base64", "dep:moka"]
+# RFC 7662 introspection, as an identity resolver and a revocation checker.
+# `base64` reads the token's issuer before the token is sent anywhere; `moka`
+# holds the answer cache, keyed by the Policy crypto backend's SHA-256.
+oauth-introspection = ["_engine-core", "_plugins", "dep:base64", "dep:moka"]
 # Experimental per-consumer token quota against a standalone Limitador. Calls go
 # through the host transport, so no direct HTTP dependency is needed here.
 experimental-quota = ["_engine-core", "_plugins"]
@@ -167,7 +167,7 @@ jsonwebtoken = { workspace = true, optional = true }
 # OpenSSL signature verification for `jwt-openssl-fips`.
 openssl = { workspace = true, optional = true }
 
-# --- jwt, oauth, elicitation-ciba, revocation-introspection ------------------
+# --- jwt, oauth, elicitation-ciba, oauth-introspection -----------------------
 
 # `base64` for the peek-at-iss helpers in the JWT resolver and the
 # introspection checker, the read-only `act` claim interop check in the OAuth
