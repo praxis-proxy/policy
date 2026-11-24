@@ -2492,7 +2492,7 @@ impl PolicyEngine {
     /// makes the transport reachable at all.
     fn with_host_services(&self, mut extensions: Extensions) -> Extensions {
         if let Some(t) = self.http_transport.get() {
-            extensions.http_transport = crate::host::HttpTransportSlot::installed(Arc::clone(t));
+            extensions.http_transport.install(Arc::clone(t));
         }
         extensions
     }

@@ -101,6 +101,8 @@ pub mod http_testing;
 pub mod identity;
 /// Typed metadata-source hook and request/result contract.
 pub mod metadata;
+/// Stable errors and value-free observations for metadata callouts.
+pub mod metadata_callout;
 /// The `Plugin` trait and its trusted configuration.
 pub mod plugin;
 /// Curated re-exports for plugin authors.

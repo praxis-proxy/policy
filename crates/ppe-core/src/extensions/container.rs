@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -170,6 +171,10 @@ pub struct Extensions {
 
 #[async_trait::async_trait]
 impl HostServices for Extensions {
+    fn remaining_invocation_time(&self) -> Option<Duration> {
+        self.http_transport.remaining()
+    }
+
     async fn http_request(
         &self,
         req: HttpRequest,
@@ -200,7 +205,7 @@ impl Clone for Extensions {
             meta: self.meta.clone(),
             metadata: self.metadata.clone(),
             custom: self.custom.clone(),
-            http_transport: HttpTransportSlot::default(),
+            http_transport: self.http_transport.detached(),
             effect_log: crate::effect::EffectLogSlot::default(),
             http_write_token: None,
             labels_write_token: None,
@@ -210,6 +215,16 @@ impl Clone for Extensions {
 }
 
 impl Extensions {
+    /// Attach the host's remaining request budget.
+    ///
+    /// Reapplying a budget may shorten the existing absolute deadline but
+    /// never extends it. Nested executor boundaries preserve that instant.
+    #[must_use]
+    pub fn with_invocation_deadline(mut self, remaining: Duration) -> Self {
+        self.http_transport.set_deadline(remaining);
+        self
+    }
+
     /// Clone this context for a child policy invocation without parent facts.
     ///
     /// Child invocations may acquire their own metadata, but acquired facts
@@ -733,6 +748,44 @@ mod tests {
             ext.meta.as_ref().unwrap(),
             cow.meta.as_ref().unwrap()
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clone_preserves_deadline_without_preserving_transport_authority() {
+        let extensions = Extensions {
+            http_transport: HttpTransportSlot::installed(Arc::new(
+                crate::http_testing::FakeTransport::new(),
+            )),
+            ..Extensions::default()
+        }
+        .with_invocation_deadline(Duration::from_millis(100));
+
+        let cloned = extensions.clone();
+
+        assert_eq!(
+            cloned.remaining_invocation_time(),
+            Some(Duration::from_millis(100))
+        );
+        assert!(!cloned.http_transport.is_available());
+        assert!(extensions.http_transport.is_available());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reattaching_an_invocation_budget_never_extends_the_deadline() {
+        let extensions = Extensions::default().with_invocation_deadline(Duration::from_millis(100));
+        tokio::time::advance(Duration::from_millis(20)).await;
+
+        let extensions = extensions.with_invocation_deadline(Duration::from_millis(200));
+        assert_eq!(
+            extensions.remaining_invocation_time(),
+            Some(Duration::from_millis(80))
+        );
+
+        let extensions = extensions.with_invocation_deadline(Duration::from_millis(30));
+        assert_eq!(
+            extensions.remaining_invocation_time(),
+            Some(Duration::from_millis(30))
+        );
     }
 
     #[test]

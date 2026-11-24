@@ -32,7 +32,9 @@
 // than starting an attempt it cannot finish.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
 
@@ -214,29 +216,74 @@ impl Default for RetryPolicy {
 /// are [`RetryPolicy::idempotent`]; a login is [`RetryPolicy::undelivered_only`]
 /// because a retry after a delivered login could mint a second token.
 ///
-/// Returns the first success, or the last error. Every attempt sends the
-/// identical request; nothing is mutated between tries.
+/// Returns the first success. Every attempt sends the same request content;
+/// only its timeout hints may shrink as the remaining budget decreases.
 ///
 /// # Errors
 ///
-/// Returns the final [`HttpTransportError`] once the policy stops
-/// retrying — attempts exhausted, budget spent, or the error was one
-/// this policy will not repeat. The error is the last one observed, so a
-/// caller inspecting [`HttpTransportError::may_have_reached_peer`] sees
-/// the state of the attempt that actually ran last.
+/// Returns the final [`HttpTransportError`] when attempts are exhausted or the
+/// policy will not repeat it. An exhausted attempt, retry, or invocation
+/// deadline returns [`HttpTransportError::Timeout`].
 pub async fn execute_with_retry(
     transport: &dyn HttpTransport,
     req: HttpRequest,
     policy: RetryPolicy,
 ) -> Result<HttpResponse, HttpTransportError> {
+    execute_with_retry_until(transport, req, policy, None).await
+}
+
+/// Execute with an optional absolute invocation deadline.
+///
+/// The deadline is internal carrier state rather than caller policy. Keeping
+/// it absolute prevents nested dispatch and delayed polling from resetting the
+/// request budget.
+pub(crate) async fn execute_with_retry_until(
+    transport: &dyn HttpTransport,
+    req: HttpRequest,
+    policy: RetryPolicy,
+    invocation_deadline: Option<Instant>,
+) -> Result<HttpResponse, HttpTransportError> {
     let started = Instant::now();
+    let retry_deadline = policy
+        .total_budget
+        .map(|budget| started.checked_add(budget).unwrap_or(started));
+    let deadline = match (invocation_deadline, retry_deadline) {
+        (Some(invocation), Some(retry)) => Some(invocation.min(retry)),
+        (Some(invocation), None) => Some(invocation),
+        (None, Some(retry)) => Some(retry),
+        (None, None) => None,
+    };
     let mut attempt: u32 = 0;
 
     loop {
+        let now = Instant::now();
+        let remaining = deadline.map(|limit| limit.saturating_duration_since(now));
+        if remaining.is_some_and(|remaining| remaining.is_zero()) {
+            return Err(HttpTransportError::Timeout);
+        }
+
+        let mut attempt_req = req.clone();
+        if let Some(remaining) = remaining {
+            attempt_req.timeout = attempt_req.timeout.min(remaining);
+            attempt_req.connect_timeout = attempt_req
+                .connect_timeout
+                .map(|connect| connect.min(remaining));
+        }
+
         attempt += 1;
-        let err = match transport.execute(req.clone()).await {
-            Ok(resp) => return Ok(resp),
-            Err(e) => e,
+        let now = Instant::now();
+        let attempt_deadline = now.checked_add(attempt_req.timeout).unwrap_or(now);
+        let attempt_deadline = deadline.map_or(attempt_deadline, |invocation| {
+            invocation.min(attempt_deadline)
+        });
+        let result =
+            match tokio::time::timeout_at(attempt_deadline, transport.execute(attempt_req)).await {
+                Ok(result) => result,
+                Err(_) => Err(HttpTransportError::Timeout),
+            };
+        let err = match result {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
         };
 
         if attempt >= policy.max_attempts || !policy.should_retry(&err) {
@@ -244,16 +291,10 @@ pub async fn execute_with_retry(
         }
 
         let delay = policy.backoff_after(attempt);
-
-        // Stop rather than start an attempt the budget cannot cover.
-        // Beginning one anyway would overrun the caller's deadline and
-        // report a timeout that the retry loop, not the peer, caused.
-        if let Some(budget) = policy.total_budget {
-            let spent = started.elapsed();
-            let per_attempt = req.timeout;
-            if spent + delay + per_attempt > budget {
-                return Err(err);
-            }
+        if let Some(limit) = deadline
+            && delay >= limit.saturating_duration_since(Instant::now())
+        {
+            return Err(HttpTransportError::Timeout);
         }
 
         if !delay.is_zero() {
@@ -274,6 +315,7 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicU32;
 
     /// Fails `fail_times` times, then succeeds. Counts every attempt.
@@ -436,47 +478,129 @@ mod tests {
     struct SlowFailingTransport {
         attempts: Arc<AtomicU32>,
         delay: Duration,
+        observed_bounds: Arc<Mutex<Vec<(Duration, Option<Duration>)>>>,
     }
 
     #[async_trait]
     impl HttpTransport for SlowFailingTransport {
-        async fn execute(&self, _req: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
+        async fn execute(&self, req: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
+            self.observed_bounds
+                .lock()
+                .expect("observed bounds lock should not be poisoned")
+                .push((req.timeout, req.connect_timeout));
             tokio::time::sleep(self.delay).await;
             Err(HttpTransportError::Connect("refused".into()))
         }
     }
 
-    #[tokio::test]
-    async fn the_budget_stops_a_loop_that_cannot_finish_in_time() {
-        // Per-attempt timeouts do not bound the loop: `max_attempts`
-        // times the timeout, plus backoff, is the real worst case, and
-        // on a request path that outlives the request that asked for it.
-        //
-        // The loop must refuse to *start* an attempt the budget cannot
-        // cover, rather than starting one and reporting a timeout the
-        // retry loop caused rather than the peer.
+    #[tokio::test(start_paused = true)]
+    async fn budget_shrinks_later_attempts_and_times_out_at_exhaustion() {
         let attempts = Arc::new(AtomicU32::new(0));
+        let observed_bounds = Arc::new(Mutex::new(Vec::new()));
         let t = SlowFailingTransport {
             attempts: Arc::clone(&attempts),
-            delay: Duration::from_millis(50),
+            delay: Duration::from_millis(40),
+            observed_bounds: Arc::clone(&observed_bounds),
         };
-        // One attempt burns 50ms of a 100ms budget; a second could take
-        // its full 60ms timeout, which would overrun.
-        let req =
-            HttpRequest::get("https://idp.example.com/jwks").timeout(Duration::from_millis(60));
-        let _ = execute_with_retry(
+        let req = HttpRequest::get("https://idp.example.com/jwks")
+            .timeout(Duration::from_millis(60))
+            .connect_timeout(Duration::from_millis(55));
+        let error = execute_with_retry(
             &t,
             req,
             fast(RetryPolicy::idempotent().with_total_budget(Duration::from_millis(100))),
         )
         .await
         .expect_err("every attempt fails");
+
+        assert_eq!(error, HttpTransportError::Timeout);
         assert_eq!(
             attempts.load(Ordering::SeqCst),
-            1,
-            "a second attempt could overrun the budget, so it must not start"
+            3,
+            "the final attempt should receive only the remaining budget"
         );
+        assert_eq!(
+            *observed_bounds
+                .lock()
+                .expect("observed bounds lock should not be poisoned"),
+            vec![
+                (Duration::from_millis(60), Some(Duration::from_millis(55))),
+                (Duration::from_millis(60), Some(Duration::from_millis(55))),
+                (Duration::from_millis(20), Some(Duration::from_millis(20))),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invocation_deadline_caps_the_first_attempt_before_dispatch() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let observed_bounds = Arc::new(Mutex::new(Vec::new()));
+        let transport = SlowFailingTransport {
+            attempts: Arc::clone(&attempts),
+            delay: Duration::from_millis(40),
+            observed_bounds: Arc::clone(&observed_bounds),
+        };
+        let request = HttpRequest::get("https://idp.example.com/jwks")
+            .timeout(Duration::from_millis(60))
+            .connect_timeout(Duration::from_millis(55));
+        let deadline = Instant::now() + Duration::from_millis(25);
+
+        let error =
+            execute_with_retry_until(&transport, request, RetryPolicy::none(), Some(deadline))
+                .await
+                .expect_err("the invocation deadline should expire first");
+
+        assert_eq!(error, HttpTransportError::Timeout);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *observed_bounds
+                .lock()
+                .expect("observed bounds lock should not be poisoned"),
+            vec![(Duration::from_millis(25), Some(Duration::from_millis(25)))]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_invocation_deadline_fails_before_transport_dispatch() {
+        let (transport, attempts) =
+            FlakyTransport::new(0, HttpTransportError::Connect("unused".into()));
+
+        let error = execute_with_retry_until(
+            transport.as_ref(),
+            HttpRequest::get("https://idp.example.com/jwks"),
+            RetryPolicy::none(),
+            Some(Instant::now()),
+        )
+        .await
+        .expect_err("an exhausted deadline must fail without dispatch");
+
+        assert_eq!(error, HttpTransportError::Timeout);
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backoff_that_would_exhaust_the_deadline_prevents_redispatch() {
+        let (transport, attempts) =
+            FlakyTransport::new(5, HttpTransportError::Connect("refused".into()));
+        let policy = RetryPolicy {
+            initial_backoff: Duration::MAX,
+            max_backoff: Duration::MAX,
+            ..RetryPolicy::idempotent()
+        };
+        let deadline = Instant::now() + Duration::from_millis(50);
+
+        let error = execute_with_retry_until(
+            transport.as_ref(),
+            HttpRequest::get("https://idp.example.com/jwks"),
+            policy,
+            Some(deadline),
+        )
+        .await
+        .expect_err("backoff cannot fit inside the invocation deadline");
+
+        assert_eq!(error, HttpTransportError::Timeout);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -487,6 +611,7 @@ mod tests {
         let t = SlowFailingTransport {
             attempts: Arc::clone(&attempts),
             delay: Duration::from_millis(10),
+            observed_bounds: Arc::new(Mutex::new(Vec::new())),
         };
         let req =
             HttpRequest::get("https://idp.example.com/jwks").timeout(Duration::from_millis(20));
