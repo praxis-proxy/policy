@@ -304,19 +304,7 @@ fn condition_fields<'a>(
     block: &'static str,
     uses: &mut Vec<FieldUse<'a>>,
 ) {
-    let mut add = |key: &'a str| {
-        if let Some(field) = key
-            .strip_prefix(block)
-            .and_then(|key| key.strip_prefix('.'))
-        {
-            uses.push(FieldUse {
-                condition: true,
-                field,
-                origin: "a condition".to_owned(),
-                stages: &[],
-            });
-        }
-    };
+    let mut add = |key: &'a str| condition_key_fields(key, block, uses);
     match expression {
         Expression::Condition(condition) => match condition {
             Condition::Comparison { key, .. }
@@ -337,6 +325,31 @@ fn condition_fields<'a>(
         },
         Expression::Not(expression) => condition_fields(expression, block, uses),
         Expression::Always => {},
+    }
+}
+
+fn condition_key_fields<'a>(key: &'a str, block: &'static str, uses: &mut Vec<FieldUse<'a>>) {
+    let mut add = |reference: &'a str| {
+        if let Some(field) = reference
+            .strip_prefix(block)
+            .and_then(|key| key.strip_prefix('.'))
+        {
+            uses.push(FieldUse {
+                condition: true,
+                field,
+                origin: "a condition".to_owned(),
+                stages: &[],
+            });
+        }
+    };
+    add(key);
+    let mut rest = key;
+    while let Some((_, after_open)) = rest.split_once('[') {
+        let Some((operand, tail)) = after_open.split_once(']') else {
+            break;
+        };
+        add(operand.trim());
+        rest = tail;
     }
 }
 

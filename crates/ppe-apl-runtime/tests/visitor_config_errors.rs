@@ -810,6 +810,25 @@ fn icon_descendants_in_conditions_are_refused_as_unavailable_attributes() {
     );
 }
 
+#[test]
+fn subscript_operands_are_validated_against_their_own_envelopes() {
+    for condition in [
+        "result.annotations[result.contnet].restricted",
+        "result.annotations[args.contnet].restricted",
+        "subject.lookup[result.contnet]",
+        "result.annotations[subject.id].by_name[result.contnet].restricted",
+    ] {
+        let yaml = format!(
+            "routes:\n  - resource: '*'\n    authorization:\n      post_invocation:\n        - \"{condition}: deny\"\n"
+        );
+        let e = load_err(&yaml);
+        assert!(e.contains("contnet"), "the operand must be checked: {e}");
+    }
+    loads(
+        "routes:\n  - resource: '*'\n    authorization:\n      post_invocation:\n        - \"result.annotations[subject.id].restricted: deny\"\n        - \"result.annotations[result.name].restricted: deny\"\n",
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
