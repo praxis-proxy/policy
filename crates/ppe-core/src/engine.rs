@@ -2068,7 +2068,9 @@ impl PolicyEngine {
 
             register_instances_into(&mut new_registry, &policy_config.plugins, &instances)?;
 
-            let installed = resolved.take().map(|reloaded| Arc::new(reloaded.publish()));
+            let installed = resolved
+                .take()
+                .map(|reloaded| Arc::new(reloaded.publish(baseline.as_deref())));
             let empty = crate::secrets::SecretStore::empty();
             let key_store = installed.as_deref().unwrap_or(&empty);
             // The length check above already accepted a named key against the
@@ -8423,6 +8425,138 @@ secrets:
     }
 
     #[tokio::test]
+    async fn reload_preserves_a_failure_recorded_during_factory_construction() {
+        let (dir, yaml) = secret_fixture("last-good\n");
+        let engine = Arc::new(engine_reading_secrets(&yaml));
+        engine.initialize().await.expect("initializes");
+        let old_store = resolved_secrets(&engine);
+        let handle = old_store.secret("upstream_key").expect("declared");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (release, released) = std::sync::mpsc::channel();
+        engine.register_factory(
+            "test/pause_reload",
+            Box::new(PausingReloadFactory {
+                entered: Arc::clone(&entered),
+                release: std::sync::Mutex::new(released),
+            }),
+        );
+        let changed = format!(
+            "{yaml}\nplugins:\n  - name: pause_reload\n    kind: test/pause_reload\n    \
+             hooks: [test_hook]\n"
+        );
+        let runtime = tokio::runtime::Handle::current();
+        let reloading = {
+            let engine = Arc::clone(&engine);
+            tokio::task::spawn_blocking(move || {
+                runtime.block_on(engine.reload_config(parse_fixture_config(&changed).unwrap()))
+            })
+        };
+        entered.notified().await;
+
+        std::fs::remove_file(dir.join("upstream.key")).expect("remove secret");
+        let failed = engine.refresh_secrets().await;
+        assert_eq!(failed.failed.len(), 1, "{failed:?}");
+        let failure = old_store.provider_health("local").expect("declared");
+        assert!(failure.failing, "the published store records the outage");
+        release.send(()).expect("release factory");
+        reloading
+            .await
+            .expect("reload completes")
+            .expect("reload publishes");
+
+        let new_store = resolved_secrets(&engine);
+        assert_eq!(
+            new_store.provider_health("local"),
+            Some(failure),
+            "a reused provider has no successful read to confirm recovery"
+        );
+        assert_eq!(handle.get().as_str(), "last-good");
+        assert_eq!(handle.generation(), 0);
+
+        std::fs::write(dir.join("upstream.key"), "recovered\n").expect("restore secret");
+        let recovered = engine.refresh_secrets().await;
+        assert_eq!(recovered.updated.len(), 1, "{recovered:?}");
+        assert!(
+            !new_store
+                .provider_health("local")
+                .expect("declared")
+                .failing
+        );
+        assert!(
+            old_store
+                .provider_health("local")
+                .expect("declared")
+                .failing
+        );
+        assert_eq!(handle.get().as_str(), "recovered");
+        std::fs::remove_dir_all(dir).expect("remove fixture");
+    }
+
+    #[tokio::test]
+    async fn cancelling_secret_resolution_keeps_the_published_store_refreshable() {
+        let yaml = "
+engine_settings:
+  dispatch: hooks
+secrets:
+  providers:
+    local: { kind: pausing, tag: first }
+  values:
+    upstream_key: { provider: local, ref: key }
+";
+        let engine = Arc::new(
+            PolicyEngine::from_config(
+                parse_fixture_config(yaml).expect("config parses"),
+                &allow_factories(),
+            )
+            .expect("engine builds"),
+        );
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let answer = Arc::new(std::sync::Mutex::new("initial".to_owned()));
+        let mut providers = crate::secrets::SecretProviderRegistry::new();
+        providers.register(Box::new(PausingSecretProviderFactory {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            answer: Arc::clone(&answer),
+            pause_from_read: 1,
+        }));
+        assert!(engine.set_secret_providers(providers));
+        release.notify_one();
+        engine.initialize().await.expect("initializes");
+        entered.notified().await;
+        let original = resolved_secrets(&engine);
+        let health = original.provider_health("local");
+        let handle = original.secret("upstream_key").expect("declared");
+        let changed = yaml.replace("tag: first", "tag: second");
+        let reloading = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .reload_config(parse_fixture_config(&changed).unwrap())
+                    .await
+            })
+        };
+        entered.notified().await;
+        reloading.abort();
+        assert!(
+            reloading
+                .await
+                .expect_err("reload cancelled")
+                .is_cancelled()
+        );
+        assert!(Arc::ptr_eq(&original, &resolved_secrets(&engine)));
+        assert_eq!(original.provider_health("local"), health);
+        assert_eq!(handle.get().as_str(), "initial");
+        assert_eq!(handle.generation(), 0);
+
+        *answer.lock().expect("not poisoned") = "refreshed".to_owned();
+        let refreshed = engine.refresh_secrets().await;
+        assert_eq!(refreshed.updated.len(), 1, "{refreshed:?}");
+        assert_eq!(handle.get().as_str(), "refreshed");
+        assert_eq!(handle.generation(), 1);
+    }
+
+    #[tokio::test]
     async fn a_secret_that_cannot_be_read_stops_initialize() {
         let (dir, yaml) = secret_fixture("hunter2\n");
         std::fs::remove_file(dir.join("upstream.key")).expect("remove");
@@ -12803,6 +12937,26 @@ routes:
     // -----------------------------------------------------------------------------
     // Test Utilities
     // -----------------------------------------------------------------------------
+
+    struct PausingReloadFactory {
+        entered: Arc<tokio::sync::Notify>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl crate::factory::PluginFactory for PausingReloadFactory {
+        fn create(
+            &self,
+            config: &PluginConfig,
+        ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
+            self.entered.notify_one();
+            self.release
+                .lock()
+                .expect("not poisoned")
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("factory released before publication");
+            AllowPluginFactory.create(config)
+        }
+    }
 
     #[cfg(feature = "fips")]
     struct StartupProbe {

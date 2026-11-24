@@ -263,6 +263,7 @@ impl RefreshReport {
 /// running document still serves if a later value failed. [`Self::publish`]
 /// is the point the reload has decided to go out.
 pub(crate) struct ReloadedSecrets {
+    reused_health: Vec<String>,
     store: SecretStore,
     /// `(name, cell, new bytes)`. The name is how a content-key check reads
     /// the length it will have after publish, without writing the cell yet.
@@ -321,8 +322,17 @@ impl ReloadedSecrets {
     ///
     /// After this, a [`SecretRef`] taken before the reload sees the new
     /// bytes. Call it only when every value resolved and the reload is about
-    /// to be published.
-    pub(crate) fn publish(mut self) -> SecretStore {
+    /// to be published, holding `previous`'s refresh lock when replacing it.
+    pub(crate) fn publish(mut self, previous: Option<&SecretStore>) -> SecretStore {
+        if let Some(previous) = previous {
+            for name in &self.reused_health {
+                if let Some(source) = previous.health.get(name)
+                    && let Some(target) = self.store.health.get(name)
+                {
+                    target.store(source.load_full());
+                }
+            }
+        }
         for (_, cell, value) in self.updates.drain(..) {
             cell.replace_if_changed(value);
         }
@@ -333,8 +343,8 @@ impl ReloadedSecrets {
 /// Serializes refresh publication.
 ///
 /// Shared by stores that share cells. The mutex is not held across a provider
-/// read. `applied` is the newest refresh that has written a value, so an older
-/// read that finishes later cannot replace it.
+/// read. `applied` is the newest refresh that has published a value or health
+/// outcome, so an older read cannot replace it or hide a later failure.
 struct RefreshGate {
     lock: Mutex<()>,
     next: AtomicU64,
@@ -397,7 +407,7 @@ impl SecretStore {
     ) -> Result<Self, SecretResolveError> {
         Ok(Self::resolve_replacing(config, registry, None)
             .await?
-            .publish())
+            .publish(None))
     }
 
     /// Resolve `config`, keeping the cell of every value whose provider and
@@ -533,36 +543,29 @@ impl SecretStore {
             );
         }
 
-        // A reused provider was not necessarily re-read, so its health is the
-        // one the previous store already had. Copying the snapshot rather than
-        // sharing the slot keeps a refresh of the store being replaced from
-        // writing health into the one about to be published. A rebuilt
-        // provider has just confirmed its credentials, which is a fresh
-        // success.
+        // Reused health is copied at publication: a refresh can complete while
+        // plugin factories are running. Separate slots keep retired stores
+        // from observing the replacement's later refreshes.
         let resolved_at = Utc::now();
         let mut health = HashMap::new();
         for name in providers.keys() {
-            let reused = reused_provider.get(name).copied().unwrap_or(false);
-            let snapshot = if reused {
-                previous
-                    .and_then(|previous| previous.health.get(name))
-                    .map(|slot| ProviderHealth::clone(&slot.load()))
-            } else {
-                None
-            };
             health.insert(
                 name.clone(),
-                ArcSwap::from_pointee(snapshot.unwrap_or(ProviderHealth {
+                ArcSwap::from_pointee(ProviderHealth {
                     last_success: Some(resolved_at),
                     last_failure: None,
                     failing: false,
-                })),
+                }),
             );
         }
 
         let gate = previous.map_or_else(RefreshGate::new, |previous| Arc::clone(&previous.gate));
 
         Ok(ReloadedSecrets {
+            reused_health: reused_provider
+                .into_iter()
+                .filter_map(|(name, reused)| reused.then_some(name))
+                .collect(),
             store: Self {
                 declared: config.clone(),
                 values,
@@ -754,6 +757,7 @@ impl SecretStore {
             {
                 return RefreshReport::default();
             }
+            self.gate.applied.store(ticket, AtomicOrdering::Release);
             self.record_refresh(provider_name, failure);
         }
         report
@@ -968,7 +972,7 @@ values:
         )
         .await
         .expect("the provider is rebuilt")
-        .publish();
+        .publish(Some(&first));
 
         first.retire();
         provider.set("stale-from-old-refresh");
@@ -1187,6 +1191,42 @@ values:
         );
     }
 
+    #[tokio::test]
+    async fn an_older_success_cannot_clear_a_newer_refresh_failure() {
+        let provider = Arc::new(PausingAnswer {
+            answer: std::sync::Mutex::new(Ok("older".to_owned())),
+            entered: tokio::sync::Notify::new(),
+            reads: AtomicU64::new(0),
+            release: tokio::sync::Notify::new(),
+        });
+        let mut store = store_over_value(Scripted::new("base"), "base");
+        store.values.get_mut("api_key").expect("declared").provider = provider.clone();
+        let store = Arc::new(store);
+        let handle = store.secret("api_key").expect("declared");
+        let older = {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move { store.refresh().await })
+        };
+        provider.entered.notified().await;
+
+        *provider.answer.lock().expect("not poisoned") =
+            Err(SecretError::backend("backend outage"));
+        let newer = store.refresh().await;
+        assert_eq!(newer.failed.len(), 1, "{newer:?}");
+        let failure = store.provider_health("scripted").expect("declared");
+        assert!(failure.failing, "the newer refresh records the outage");
+
+        provider.release.notify_one();
+        let older = older.await.expect("older refresh completes");
+        assert!(older.updated.is_empty(), "superseded refresh: {older:?}");
+        let health = store.provider_health("scripted").expect("declared");
+        assert!(health.failing, "an older read cannot confirm recovery");
+        assert_eq!(health.last_success, failure.last_success);
+        assert_eq!(health.last_failure, failure.last_failure);
+        assert_eq!(handle.get().as_str(), "base");
+        assert_eq!(handle.generation(), 0);
+    }
+
     /// Refresh while a consumer reads. Every value the scripted provider
     /// returns names the generation it produces, so a snapshot pairing bytes
     /// with a generation from either side of a refresh fails the invariant.
@@ -1311,7 +1351,7 @@ values:
         )
         .await
         .expect("the added value resolves")
-        .publish();
+        .publish(Some(&first));
 
         provider.set("rotated");
         let report = replaced.refresh().await;
@@ -1343,7 +1383,7 @@ values:
         )
         .await
         .expect("the new reference resolves")
-        .publish();
+        .publish(Some(&first));
 
         assert_eq!(
             handle.get().as_str(),
@@ -1389,5 +1429,29 @@ values:
         .expect_err("the added value cannot be read");
         assert_eq!(err.secret, "second_key");
         assert_eq!(handle.get().as_str(), "hunter2");
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    struct PausingAnswer {
+        answer: std::sync::Mutex<Result<String, SecretError>>,
+        entered: tokio::sync::Notify,
+        reads: AtomicU64,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl SecretProvider for PausingAnswer {
+        async fn get_secret(&self, _reference: &str) -> Result<Zeroizing<String>, SecretError> {
+            let read = self.reads.fetch_add(1, Ordering::Relaxed);
+            let answer = self.answer.lock().expect("not poisoned").clone();
+            if read == 0 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            answer.map(Zeroizing::new)
+        }
     }
 }
