@@ -22,7 +22,8 @@ use async_trait::async_trait;
 use praxis_policy_core::cmf::enums::{ResourceType, Role};
 
 use praxis_policy_core::cmf::{
-    CmfHook, ContentPart, Message, MessagePayload, Resource, ToolCall, ToolResult,
+    CmfHook, ContentPart, Message, MessagePayload, PromptResult, Resource, ResourceReference,
+    ToolCall, ToolResult,
 };
 
 use praxis_policy_core::context::PluginContext;
@@ -852,6 +853,20 @@ async fn resource_field_readback_survives_reordering() {
         result.continue_processing,
         "reordering unique resources must allow"
     );
+    let names: Vec<_> = forwarded(&result)
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Resource { content } => content.name.as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["other", "original"],
+        "the reordered parts must reach the host"
+    );
     assert_eq!(
         resource_content(&result, "original"),
         Some("SSN 123-45-6789"),
@@ -895,16 +910,12 @@ async fn ambiguous_resource_field_plugins_are_denied_before_dispatch() {
         "str | run(resource-editor)",
         "",
         true,
-        Target::ReorderResources,
+        Target::DenyIfDispatched,
     )
     .await;
     assert!(
         !result.continue_processing,
         "an ambiguous baseline must fail closed"
-    );
-    assert!(
-        !result.payload_modified,
-        "a plugin must not run against an ambiguous field target"
     );
     let violation = result.violation.expect("ambiguity carries a violation");
     assert!(
@@ -988,6 +999,221 @@ async fn a_resource_removed_during_field_readback_is_denied() {
     );
 }
 
+#[tokio::test]
+async fn resource_reference_edits_follow_the_original_after_reordering() {
+    let result = projection_edit_result(
+        ("resource", "cmf.resource_pre_fetch", "args"),
+        "selector",
+        "redact",
+        "    authorization:\n      pre_invocation:\n        - \"run(projection-editor)\"",
+        vec![reference_part("original"), reference_part("other")],
+        Target::ReorderResources,
+    )
+    .await;
+    assert!(
+        result.continue_processing,
+        "unique references can be reordered"
+    );
+    let references: Vec<_> = forwarded(&result)
+        .message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::ResourceRef { content } => {
+                Some((content.uri.as_str(), content.selector.as_deref()))
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        references,
+        [("other", Some("other")), ("original", Some("[REDACTED]"))]
+    );
+}
+
+#[tokio::test]
+async fn missing_or_duplicate_references_deny_edits_and_field_readback() {
+    for pipeline in ["redact", "run(projection-editor)"] {
+        for target in [Target::RemoveReferences, Target::DuplicateReference] {
+            let result = projection_edit_result(
+                ("resource", "cmf.resource_pre_fetch", "args"),
+                "selector",
+                pipeline,
+                "    authorization:\n      pre_invocation:\n        - \"run(projection-editor)\"",
+                vec![reference_part("original")],
+                target,
+            )
+            .await;
+            assert!(
+                !result.continue_processing,
+                "a reference edit requires a unique surviving target"
+            );
+            let violation = result.violation.expect("target denial");
+            assert!(
+                violation.reason.contains("unique") || violation.reason.contains("no longer"),
+                "{}",
+                violation.reason
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn prompt_edits_and_field_readback_follow_the_original_after_reordering() {
+    for pipeline in ["redact", "run(projection-editor) | str"] {
+        let result = projection_edit_result(
+            ("prompt", "cmf.prompt_post_invoke", "result"),
+            "content",
+            pipeline,
+            "    authorization:\n      post_invocation:\n        - \"run(projection-editor)\"",
+            vec![prompt_part("original"), prompt_part("other")],
+            Target::ReorderResources,
+        )
+        .await;
+        assert!(
+            result.continue_processing,
+            "unique prompts can be reordered"
+        );
+        let prompts: Vec<_> = forwarded(&result)
+            .message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::PromptResult { content } => {
+                    Some((content.prompt_name.as_str(), content.content.as_deref()))
+                },
+                _ => None,
+            })
+            .collect();
+        let original = if pipeline == "redact" {
+            "[REDACTED]"
+        } else {
+            "original"
+        };
+        let order = if pipeline == "redact" {
+            vec![("other", Some("other")), ("original", Some(original))]
+        } else {
+            vec![("original", Some(original)), ("other", Some("other"))]
+        };
+        assert_eq!(
+            prompts, order,
+            "only the inspected prompt can receive a policy edit"
+        );
+    }
+}
+
+#[tokio::test]
+async fn missing_or_duplicate_prompts_deny_edits_and_field_readback() {
+    for pipeline in ["redact", "run(projection-editor) | str"] {
+        for target in [Target::RemovePrompts, Target::DuplicatePrompt] {
+            let result = projection_edit_result(
+                ("prompt", "cmf.prompt_post_invoke", "result"),
+                "content",
+                pipeline,
+                "    authorization:\n      post_invocation:\n        - \"run(projection-editor)\"",
+                vec![prompt_part("original")],
+                target,
+            )
+            .await;
+            assert!(
+                !result.continue_processing,
+                "a prompt edit requires a unique surviving target"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_idempotent_policy_redaction_overrides_a_later_plugin_edit() {
+    for (pipeline, authorization) in [
+        (
+            "redact",
+            "    authorization:\n      post_invocation:\n        - \"run(projection-editor)\"",
+        ),
+        (
+            "str",
+            "    authorization:\n      post_invocation:\n        - when: \"result.content == '[REDACTED]'\"\n          do: \"result.content | redact\"\n        - \"run(projection-editor)\"",
+        ),
+    ] {
+        let part = ContentPart::Resource {
+            content: Resource {
+                uri: "original".to_owned(),
+                content: Some("[REDACTED]".to_owned()),
+                ..Resource::default()
+            },
+        };
+        let result = projection_edit_result(
+            ("resource", "cmf.resource_post_fetch", "result"),
+            "content",
+            pipeline,
+            authorization,
+            vec![part],
+            Target::RewriteResourceContent,
+        )
+        .await;
+        assert!(result.continue_processing, "redaction should allow");
+        let ContentPart::Resource { content } = &forwarded(&result).message.content[0] else {
+            panic!("resource result")
+        };
+        assert_eq!(
+            content.content.as_deref(),
+            Some("[REDACTED]"),
+            "a policy write wins even when its input was already redacted"
+        );
+    }
+}
+
+#[tokio::test]
+async fn annotation_plugin_readback_uses_expanded_array_and_dotted_key_paths() {
+    for (field, pipeline, annotations) in [
+        (
+            "annotations.rows.ssn",
+            "run(projection-editor) | str",
+            serde_json::json!({"rows": [{"ssn": 123}, {"ssn": 456}]}),
+        ),
+        (
+            "**.ssn",
+            "run(projection-editor) | str | redact",
+            serde_json::json!({"case.file": {"ssn": 123}}),
+        ),
+    ] {
+        let part = ContentPart::Resource {
+            content: Resource {
+                uri: "original".to_owned(),
+                annotations: serde_json::from_value(annotations).expect("annotation map"),
+                ..Resource::default()
+            },
+        };
+        let result = projection_edit_result(
+            ("resource", "cmf.resource_post_fetch", "result"),
+            field,
+            pipeline,
+            "",
+            vec![part],
+            Target::RewriteResourceAnnotations,
+        )
+        .await;
+        assert!(
+            result.continue_processing,
+            "plugin readback must return the concrete string for {field}"
+        );
+        let ContentPart::Resource { content } = &forwarded(&result).message.content[0] else {
+            panic!("resource result")
+        };
+        if field == "**.ssn" {
+            assert_eq!(
+                content.annotations["case.file"]["ssn"],
+                serde_json::json!("[REDACTED]")
+            );
+        } else {
+            assert_eq!(
+                content.annotations["rows"],
+                serde_json::json!([{"ssn": "[REDACTED]"}, {"ssn": "[REDACTED]"}])
+            );
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -1004,6 +1230,13 @@ enum Target {
     RemoveResources,
     ReorderResources,
     DuplicateResource,
+    DuplicatePrompt,
+    DuplicateReference,
+    RemovePrompts,
+    RemoveReferences,
+    RewriteResourceContent,
+    RewriteResourceAnnotations,
+    DenyIfDispatched,
 }
 
 struct RewritePlugin {
@@ -1025,6 +1258,12 @@ impl HookHandler<CmfHook> for RewritePlugin {
         _extensions: &Extensions,
         _ctx: &mut PluginContext,
     ) -> PluginResult<MessagePayload> {
+        if matches!(self.target, Target::DenyIfDispatched) {
+            return PluginResult::deny(praxis_policy_core::error::PluginViolation::new(
+                "fixture.dispatched",
+                "the plugin was dispatched",
+            ));
+        }
         let mut content: Vec<ContentPart> = payload
             .message
             .content
@@ -1033,6 +1272,8 @@ impl HookHandler<CmfHook> for RewritePlugin {
                 !matches!(
                     (self.target, part),
                     (Target::RemoveResources, ContentPart::Resource { .. })
+                        | (Target::RemoveReferences, ContentPart::ResourceRef { .. })
+                        | (Target::RemovePrompts, ContentPart::PromptResult { .. })
                 )
             })
             .map(|part| match (self.target, part) {
@@ -1083,6 +1324,16 @@ impl HookHandler<CmfHook> for RewritePlugin {
                 (Target::Text, ContentPart::Text { .. }) => ContentPart::Text {
                     text: "[REDACTED]".to_owned(),
                 },
+                (Target::RewriteResourceContent, ContentPart::Resource { content }) => {
+                    let mut next = content.clone();
+                    next.content = Some("plugin-secret".to_owned());
+                    ContentPart::Resource { content: next }
+                },
+                (Target::RewriteResourceAnnotations, ContentPart::Resource { content }) => {
+                    let mut next = content.clone();
+                    next.annotations.values_mut().any(rewrite_ssn);
+                    ContentPart::Resource { content: next }
+                },
                 (_, other) => other.clone(),
             })
             .collect();
@@ -1097,6 +1348,19 @@ impl HookHandler<CmfHook> for RewritePlugin {
                 .cloned()
         {
             content.push(resource);
+        }
+        if let Some(part) = content
+            .iter()
+            .find(|part| {
+                matches!(
+                    (self.target, part),
+                    (Target::DuplicatePrompt, ContentPart::PromptResult { .. })
+                        | (Target::DuplicateReference, ContentPart::ResourceRef { .. })
+                )
+            })
+            .cloned()
+        {
+            content.push(part);
         }
 
         PluginResult::modify_payload(MessagePayload {
@@ -1426,4 +1690,89 @@ fn resource_content<'a>(
             },
             _ => None,
         })
+}
+
+fn rewrite_ssn(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if key == "ssn" && !value.is_string() {
+                    *value = serde_json::json!("[REDACTED]");
+                    return true;
+                } else if rewrite_ssn(value) {
+                    return true;
+                }
+            }
+        },
+        serde_json::Value::Array(items) => return items.iter_mut().any(rewrite_ssn),
+        _ => {},
+    }
+    false
+}
+
+fn reference_part(uri: &str) -> ContentPart {
+    ContentPart::ResourceRef {
+        content: ResourceReference {
+            resource_request_id: "shared-request".to_owned(),
+            uri: uri.to_owned(),
+            selector: Some(uri.to_owned()),
+            name: None,
+            resource_type: ResourceType::Uri,
+            range_start: None,
+            range_end: None,
+        },
+    }
+}
+
+fn prompt_part(name: &str) -> ContentPart {
+    ContentPart::PromptResult {
+        content: PromptResult {
+            prompt_request_id: "shared-request".to_owned(),
+            prompt_name: name.to_owned(),
+            content: Some(name.to_owned()),
+            description: None,
+            messages: vec![],
+            is_error: false,
+            error_message: None,
+        },
+    }
+}
+
+async fn projection_edit_result(
+    context: (&str, &str, &str),
+    field: &str,
+    pipeline: &str,
+    authorization: &str,
+    parts: Vec<ContentPart>,
+    target: Target,
+) -> praxis_policy_core::executor::PipelineResult {
+    let (entity, hook, block) = context;
+    let yaml = format!(
+        "engine_settings:\n  dispatch: policy\nplugins:\n  - name: projection-editor\n    kind: projection-editor\n    hooks: [{hook}]\nroutes:\n  - {entity}: '*'\n    {block}:\n      '{field}': '{pipeline}'\n{authorization}\n"
+    );
+    let mgr = manager_with_yaml(
+        "projection-editor",
+        Box::new(RewriteFactory {
+            target,
+            hook: match hook {
+                "cmf.resource_pre_fetch" => "cmf.resource_pre_fetch",
+                "cmf.resource_post_fetch" => "cmf.resource_post_fetch",
+                _ => "cmf.prompt_post_invoke",
+            },
+        }),
+        &yaml,
+    )
+    .await;
+    let extensions = Extensions {
+        meta: Some(Arc::new(praxis_policy_core::extensions::MetaExtension {
+            entity_type: Some(entity.to_owned()),
+            entity_name: Some("original".to_owned()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let (result, _background) = mgr
+        .invoke_named::<CmfHook>(hook, payload_of(Role::Tool, parts), extensions, None)
+        .await;
+    result
 }

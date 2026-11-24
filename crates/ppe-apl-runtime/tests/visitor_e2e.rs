@@ -1947,6 +1947,61 @@ async fn host_guide_prompt_example_denies_and_redacts() {
     );
 }
 
+#[tokio::test]
+async fn host_prompt_serialization_preserves_message_roles_and_boundaries() {
+    let mgr = build_manager_with_visitor(host_guide_example("host-prompt-projection")).await;
+    let messages = vec![
+        Message::text(Role::User, "first secret"),
+        Message::text(Role::Assistant, "second secret"),
+    ];
+    let mut rebuilt = messages.clone();
+    for (index, message) in messages.iter().enumerate() {
+        let part = ContentPart::PromptResult {
+            content: PromptResult {
+                prompt_request_id: "pr_001".to_owned(),
+                prompt_name: "summarize-report".to_owned(),
+                description: None,
+                content: Some(message.get_text_content()),
+                messages: messages.clone(),
+                is_error: false,
+                error_message: None,
+            },
+        };
+        let result = invoke_entity(
+            &mgr,
+            "cmf.prompt_post_invoke",
+            ("prompt", "summarize-report"),
+            part,
+        )
+        .await;
+        assert!(
+            result.continue_processing,
+            "each message must pass policy before serialization"
+        );
+        let ContentPart::PromptResult { content } = &forwarded(&result).message.content[0] else {
+            panic!("prompt result")
+        };
+        let text = content.content.as_deref().expect("inspected content");
+        rebuilt[index] = Message::text(message.role, text);
+    }
+    let wire = serde_json::to_value(&rebuilt).expect("serialize inspected messages");
+    assert_eq!(wire[0]["role"], serde_json::json!("user"));
+    assert_eq!(wire[1]["role"], serde_json::json!("assistant"));
+    assert_eq!(
+        wire[0]["content"][0]["text"],
+        serde_json::json!("[REDACTED]")
+    );
+    assert_eq!(
+        wire[1]["content"][0]["text"],
+        serde_json::json!("[REDACTED]")
+    );
+    assert_eq!(
+        wire.as_array().map(Vec::len),
+        Some(2),
+        "write-back must retain both message boundaries"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

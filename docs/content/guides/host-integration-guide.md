@@ -78,6 +78,7 @@ account for entry boundaries.
 Result edits and plugin field readback use the URI selected before plugins
 run. That URI must identify one resource in both the original and current
 message. A removed target or duplicate URI denies the request.
+Resource argument edits apply the same rule to the selected `ResourceRef`.
 Write-back reports `policy.envelope_replaced`; a plugin readback denial is
 attributed to its field pipeline. Request correlation IDs do not distinguish
 parts of one response. Emit one resource per message when URIs can repeat.
@@ -99,6 +100,8 @@ to content rules.
 Treat the returned `content` as authoritative when writing the response.
 Map its edited text back into the response sent to the client; reusing the
 original rendered messages bypasses redaction.
+PPE ties edits to the inspected request ID and prompt name, and denies if
+that pair no longer identifies a unique result.
 
 Retain each message's role and text boundaries separately from the joined
 string. Apply edits only when they can be mapped back without changing those

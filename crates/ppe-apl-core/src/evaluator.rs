@@ -1528,17 +1528,21 @@ async fn dispatch_field_op(
         };
         // Plugins receive a root-relative field name; deny messages use the
         // prefixed path to identify the args or result side.
-        let eval = evaluate_pipeline(&pipeline, &current, bag, plugins, subpath, phase).await;
+        let eval =
+            evaluate_pipeline_at(&pipeline, &current, bag, plugins, subpath, phase, &concrete)
+                .await;
         taints.extend(eval.taints);
         match eval.outcome {
             FieldOutcome::Pass => {},
             FieldOutcome::Replace(new_val) => {
                 if set_concrete(root, &concrete, new_val) {
+                    plugins.record_field_write(&concrete, phase).await;
                     mark_modified(side, args_modified, result_modified);
                 }
             },
             FieldOutcome::Omit => {
                 if remove_concrete(root, &concrete) {
+                    plugins.record_field_write(&concrete, phase).await;
                     mark_modified(side, args_modified, result_modified);
                 }
             },
@@ -1613,6 +1617,20 @@ pub async fn evaluate_pipeline(
     plugins: &Arc<dyn PluginInvoker>,
     field_name: &str,
     phase: crate::step::DispatchPhase,
+) -> PipelineEvaluation {
+    let path: Vec<String> = field_name.split('.').map(str::to_owned).collect();
+    evaluate_pipeline_at(pipeline, value, bag, plugins, field_name, phase, &path).await
+}
+
+/// Evaluate one expanded field without splitting keys that contain dots.
+pub(crate) async fn evaluate_pipeline_at(
+    pipeline: &Pipeline,
+    value: &serde_json::Value,
+    bag: &AttributeBag,
+    plugins: &Arc<dyn PluginInvoker>,
+    field_name: &str,
+    phase: crate::step::DispatchPhase,
+    path: &[String],
 ) -> PipelineEvaluation {
     let mut current = value.clone();
     let mut replaced = false;
@@ -1835,7 +1853,7 @@ pub async fn evaluate_pipeline(
                     value: &current,
                     phase,
                 };
-                match plugins.invoke(name, bag, invocation).await {
+                match plugins.invoke_field_at(name, bag, invocation, path).await {
                     Ok(outcome) => {
                         // Plugins can emit taints regardless of decision.
                         taints.extend(outcome.taints);

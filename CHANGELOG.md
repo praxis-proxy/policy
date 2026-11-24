@@ -21,7 +21,7 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **Resource and prompt payload projection.** APL fields can read resource
   references, fetched resources and rendered prompt content. Edits are
-  written back to the selected content part; missing or ambiguous resource
+  written back to the selected content part; missing or ambiguous
   targets deny the request. Fixed-envelope paths and read-only fields are
   validated at load, including recursive paths. The host integration guide
   includes tested deny and redaction examples and documents the remaining

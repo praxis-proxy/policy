@@ -735,6 +735,30 @@ fn valid_recursive_paths_and_redaction_case_variants_load() {
     );
 }
 
+#[test]
+fn recursive_icon_descendant_writes_are_refused() {
+    for path in [
+        "**.src",
+        "**.MIME_TYPE",
+        "**.sizes",
+        "**.0.src",
+        "**.3.src",
+        "**.sizes.3",
+        "**.**.src",
+    ] {
+        let e = load_err(&format!(
+            "routes:\n  - resource: hr://employees/*\n    result:\n      \"{path}\": redact\n"
+        ));
+        assert!(
+            e.contains("read-only"),
+            "{path} must not rewrite icons: {e}"
+        );
+    }
+    loads(
+        "routes:\n  - resource: hr://employees/*\n    result:\n      annotations.src: redact\n      \"**.annotations.src\": redact\n",
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

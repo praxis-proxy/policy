@@ -56,7 +56,7 @@ pub(crate) fn reject_field_stages_without_fields(
 /// Reject field operations that change fixed envelope identity fields.
 ///
 /// Checks and labels remain permitted. Recursive paths that can address a
-/// read-only root field are also refused.
+/// read-only field or its descendants are also refused.
 ///
 /// # Errors
 ///
@@ -74,7 +74,8 @@ pub(crate) fn reject_writes_to_read_only_fields(
                 .find(|segment| *segment != RECURSIVE_SEGMENT)
                 .unwrap_or_default()
                 .to_lowercase();
-            if envelope.read_only.contains(&addressed.as_str())
+            if (envelope.read_only.contains(&addressed.as_str())
+                || reaches_read_only_descendant(&envelope, field_use))
                 && field_use.stages.iter().any(stage_writes)
             {
                 return Err(format!(
@@ -148,6 +149,46 @@ pub(crate) fn reject_unknown_field_paths(
         }
     }
     Ok(())
+}
+
+/// Whether a path can reach the read-only icon subtree.
+fn reaches_read_only_descendant(envelope: &FixedEnvelope<'_>, field: &FieldUse<'_>) -> bool {
+    fn matches(pattern: &[&str], path: &[&str]) -> bool {
+        let Some((segment, rest)) = pattern.split_first() else {
+            return path.is_empty();
+        };
+        if *segment == RECURSIVE_SEGMENT {
+            return matches(rest, path)
+                || path
+                    .split_first()
+                    .is_some_and(|(_, tail)| matches(pattern, tail));
+        }
+        let Some((key, tail)) = path.split_first() else {
+            return false;
+        };
+        let same = *segment == *key || (*key == "0" && segment.parse::<usize>().is_ok());
+        (same && matches(rest, tail)) || (*key == "0" && matches(pattern, tail))
+    }
+    if !envelope.read_only.contains(&"icons") {
+        return false;
+    }
+    let name = if matches_without_case(field.stages) {
+        field.field.to_lowercase()
+    } else {
+        field.field.to_owned()
+    };
+    let pattern: Vec<&str> = name.split('.').collect();
+    if pattern.iter().all(|segment| *segment == RECURSIVE_SEGMENT) {
+        return false;
+    }
+    [
+        &["icons", "0", "src"][..],
+        &["icons", "0", "mime_type"][..],
+        &["icons", "0", "sizes"][..],
+        &["icons", "0", "sizes", "0"][..],
+    ]
+    .iter()
+    .any(|path| matches(&pattern, path))
 }
 
 /// Return the fixed envelopes addressed by a route's field operations.

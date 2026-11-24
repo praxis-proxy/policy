@@ -81,39 +81,87 @@ impl PayloadFields for MessagePayload {
 /// HTTP exchanges expose attributes through extensions rather than payload fields.
 impl PayloadFields for HttpPayload {}
 
-/// Identify the resource selected in the request payload.
-pub(crate) fn resource_identity<P: PayloadFields>(payload: &P) -> ResultIdentity {
+/// Identify the reference, resource and prompt selected before plugins run.
+pub(crate) fn payload_identities<P: PayloadFields>(payload: &P) -> [ResultIdentity; 4] {
     payload
         .as_any()
         .downcast_ref::<MessagePayload>()
-        .map_or_else(ResultIdentity::default, |message| {
-            ResultIdentity::from_resource_message(&message.message)
-        })
+        .map_or_else(
+            || std::array::from_fn(|_| ResultIdentity::default()),
+            |message| {
+                [
+                    ResultIdentity::from_reference_message(&message.message),
+                    ResultIdentity::from_resource_message(&message.message),
+                    ResultIdentity::from_prompt_message(&message.message),
+                    ResultIdentity::default(),
+                ]
+            },
+        )
 }
 
-/// Return the field associated with the route's selected resource.
+/// Return the field associated with the route's selected part and expanded path.
 ///
 /// Other projections use the payload's projection-aware field contract.
 ///
 /// # Errors
 ///
-/// Refuses a removed or ambiguous resource target.
+/// Refuses a removed or ambiguous structured target.
 pub(crate) fn field_value_for_identity<P: PayloadFields>(
     payload: &P,
     field: &str,
     phase: DispatchPhase,
     projection: Projection,
     identity: &ResultIdentity,
+    path: Option<&[String]>,
 ) -> Result<Option<serde_json::Value>, EnvelopeReplaced> {
-    if phase == DispatchPhase::Post
-        && projection == Projection::Resource
-        && let Some(message) = payload.as_any().downcast_ref::<MessagePayload>()
-        && let Some(resource) = identity.resource(&message.message)?
-    {
-        return Ok(crate::message_projection::resource_field_value(
-            resource, field,
-        ));
+    if let Some(message) = payload.as_any().downcast_ref::<MessagePayload>() {
+        let segments;
+        let path = if let Some(path) = path {
+            path
+        } else {
+            segments = field.split('.').map(str::to_owned).collect::<Vec<_>>();
+            &segments
+        };
+        if phase == DispatchPhase::Post
+            && projection == Projection::Resource
+            && let Some(resource) = identity.resource(&message.message)?
+        {
+            return Ok(crate::message_projection::resource_field_value_at(
+                resource, path,
+            ));
+        }
+        let projected = match (phase, projection) {
+            (DispatchPhase::Pre, Projection::Resource) => {
+                Some(crate::message_projection::extract_args_by_identity(
+                    &message.message,
+                    projection,
+                    identity,
+                )?)
+            },
+            (DispatchPhase::Post, Projection::Prompt) => {
+                Some(crate::message_projection::extract_result_by_identity(
+                    &message.message,
+                    projection,
+                    identity,
+                )?)
+            },
+            _ => None,
+        };
+        if let Some(projected) = projected {
+            return Ok(if projected.is_object() {
+                crate::message_projection::value_at(&projected, path).cloned()
+            } else {
+                Some(projected)
+            });
+        }
     }
+    let concrete;
+    let field = if let Some(path) = path {
+        concrete = path.join(".");
+        &concrete
+    } else {
+        field
+    };
     Ok(payload.field_value_with_projection(field, phase, projection))
 }
 

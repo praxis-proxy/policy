@@ -776,6 +776,24 @@ pub trait PluginInvoker: Send + Sync {
         invocation: PluginInvocation<'_>,
     ) -> Result<PluginOutcome, PluginError>;
 
+    /// Invoke a field stage at its expanded path. Segments retain object-key
+    /// boundaries and include array indexes. The default uses [`Self::invoke`].
+    ///
+    /// [`Self::invoke`]: Self::invoke
+    async fn invoke_field_at(
+        &self,
+        name: &str,
+        bag: &crate::attributes::AttributeBag,
+        invocation: PluginInvocation<'_>,
+        _path: &[String],
+    ) -> Result<PluginOutcome, PluginError> {
+        self.invoke(name, bag, invocation).await
+    }
+
+    /// Record a successful policy write, including one that leaves the value
+    /// equal to its input. Hosts use this to reconcile independent plugin edits.
+    async fn record_field_write(&self, _path: &[String], _phase: DispatchPhase) {}
+
     /// Acquire one named metadata record and return its APL projection.
     async fn fetch_metadata(
         &self,

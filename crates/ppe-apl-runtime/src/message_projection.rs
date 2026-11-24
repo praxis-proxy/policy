@@ -287,7 +287,7 @@ pub(crate) enum EnvelopeError {
     /// The part the route projected is no longer in the message, for
     /// example because a plugin removed it.
     Removed,
-    /// Several resource parts share the selected URI.
+    /// Several parts share the selected identity.
     Ambiguous,
 }
 
@@ -310,7 +310,7 @@ impl EnvelopeReplaced {
             ),
             EnvelopeError::Ambiguous => format!(
                 "the `{block}:` pipeline cannot identify a unique `{part}` because several \
-                 parts share its URI; emit one resource per message or use unique URIs"
+                 parts share its identity; emit one part per message or use unique identities"
             ),
         }
     }
@@ -361,6 +361,43 @@ pub(crate) fn write_args_back_to_message(
         rewrite_message_text(msg, text);
     }
     Ok(())
+}
+
+/// Read arguments from the originally selected reference.
+pub(crate) fn extract_args_by_identity(
+    msg: &Message,
+    projection: Projection,
+    identity: &ResultIdentity,
+) -> Result<Value, EnvelopeReplaced> {
+    if let Some(ContentPart::ResourceRef { content }) = identity.part(msg)? {
+        return Ok(project_resource_ref_args(content));
+    }
+    Ok(if projection == Projection::Resource {
+        Value::String(msg.get_text_content())
+    } else {
+        extract_args_from_message(msg, projection)
+    })
+}
+
+/// Write arguments to the originally selected reference.
+pub(crate) fn write_args_by_identity(
+    msg: &mut Message,
+    args: &Value,
+    projection: Projection,
+    identity: &ResultIdentity,
+) -> Result<(), EnvelopeReplaced> {
+    if let Some(index) = identity.index(msg)?
+        && let Some(ContentPart::ResourceRef { content }) = msg.content.get_mut(index)
+    {
+        return write_resource_ref(content, args);
+    }
+    if projection == Projection::Resource {
+        if let Some(text) = args.as_str() {
+            rewrite_message_text(msg, text);
+        }
+        return Ok(());
+    }
+    write_args_back_to_message(msg, args, projection)
 }
 
 /// Write arguments back to the preferred part kind. When `TOOL_FIRST` is
@@ -421,34 +458,43 @@ fn write_arguments_at(
     Ok(())
 }
 
-/// The selected resource URI and whether its original message was ambiguous.
-///
-/// The selected URI must remain unique before and after plugin execution.
+/// The selected part must remain unique before and after plugin execution.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ResultIdentity {
     ambiguous: bool,
-    pub(crate) resource_uri: Option<String>,
+    key: Option<PartKey>,
 }
 
 impl ResultIdentity {
     /// Identify the first resource and record whether its URI is unique.
     pub(crate) fn from_resource_message(msg: &Message) -> Self {
-        let Some(resource) = msg.content.iter().find_map(|part| match part {
-            ContentPart::Resource { content } => Some(content),
-            _ => None,
-        }) else {
-            return Self::default();
-        };
-        let ambiguous = msg
+        Self::select(msg, ReplacedPart::Resource)
+    }
+
+    /// Identify the first resource reference by URI.
+    pub(crate) fn from_reference_message(msg: &Message) -> Self {
+        Self::select(msg, ReplacedPart::ResourceRef)
+    }
+
+    /// Identify the first prompt result by request ID and prompt name.
+    pub(crate) fn from_prompt_message(msg: &Message) -> Self {
+        Self::select(msg, ReplacedPart::PromptResult)
+    }
+
+    fn select(msg: &Message, kind: ReplacedPart) -> Self {
+        let key = msg
             .content
             .iter()
-            .filter(|part| matches!(part, ContentPart::Resource { content } if content.uri == resource.uri))
-            .take(2)
-            .count() > 1;
-        Self {
-            ambiguous,
-            resource_uri: Some(resource.uri.clone()),
-        }
+            .find_map(|part| PartKey::from_part(part, kind));
+        let ambiguous = key.as_ref().is_some_and(|key| {
+            msg.content
+                .iter()
+                .filter(|part| key.matches(part))
+                .take(2)
+                .count()
+                > 1
+        });
+        Self { ambiguous, key }
     }
 
     /// Return the selected resource, or `None` when no resource was selected.
@@ -460,7 +506,10 @@ impl ResultIdentity {
         &self,
         msg: &'a Message,
     ) -> Result<Option<&'a Resource>, EnvelopeReplaced> {
-        let Some(index) = self.resource_index(msg)? else {
+        if !matches!(self.key, Some(PartKey::Resource(_))) {
+            return Ok(None);
+        }
+        let Some(index) = self.index(msg)? else {
             return Ok(None);
         };
         match msg.content.get(index) {
@@ -472,29 +521,39 @@ impl ResultIdentity {
         }
     }
 
-    fn resource_index(&self, msg: &Message) -> Result<Option<usize>, EnvelopeReplaced> {
-        let Some(uri) = &self.resource_uri else {
+    pub(crate) fn part<'a>(
+        &self,
+        msg: &'a Message,
+    ) -> Result<Option<&'a ContentPart>, EnvelopeReplaced> {
+        self.index(msg)
+            .map(|index| index.and_then(|index| msg.content.get(index)))
+    }
+
+    fn index(&self, msg: &Message) -> Result<Option<usize>, EnvelopeReplaced> {
+        let Some(key) = &self.key else {
             return Ok(None);
         };
+        let part = key.kind();
         if self.ambiguous {
             return Err(EnvelopeReplaced {
-                part: ReplacedPart::Resource,
+                part,
                 error: EnvelopeError::Ambiguous,
             });
         }
-        let mut matches = msg.content.iter().enumerate().filter_map(|(index, part)| {
-            matches!(part, ContentPart::Resource { content } if content.uri == *uri)
-                .then_some(index)
-        });
+        let mut matches = msg
+            .content
+            .iter()
+            .enumerate()
+            .filter_map(|(index, part)| key.matches(part).then_some(index));
         let Some(index) = matches.next() else {
             return Err(EnvelopeReplaced {
-                part: ReplacedPart::Resource,
+                part,
                 error: EnvelopeError::Removed,
             });
         };
         if matches.next().is_some() {
             return Err(EnvelopeReplaced {
-                part: ReplacedPart::Resource,
+                part,
                 error: EnvelopeError::Ambiguous,
             });
         }
@@ -502,7 +561,53 @@ impl ResultIdentity {
     }
 }
 
-/// Return the result addressed by `projection` and its resource identity.
+#[derive(Clone, Debug)]
+enum PartKey {
+    Resource(String),
+    ResourceRef(String),
+    PromptResult { request_id: String, name: String },
+}
+
+impl PartKey {
+    fn from_part(part: &ContentPart, kind: ReplacedPart) -> Option<Self> {
+        match (kind, part) {
+            (ReplacedPart::Resource, ContentPart::Resource { content }) => {
+                Some(Self::Resource(content.uri.clone()))
+            },
+            (ReplacedPart::ResourceRef, ContentPart::ResourceRef { content }) => {
+                Some(Self::ResourceRef(content.uri.clone()))
+            },
+            (ReplacedPart::PromptResult, ContentPart::PromptResult { content }) => {
+                Some(Self::PromptResult {
+                    request_id: content.prompt_request_id.clone(),
+                    name: content.prompt_name.clone(),
+                })
+            },
+            _ => None,
+        }
+    }
+
+    fn kind(&self) -> ReplacedPart {
+        match self {
+            Self::Resource(_) => ReplacedPart::Resource,
+            Self::ResourceRef(_) => ReplacedPart::ResourceRef,
+            Self::PromptResult { .. } => ReplacedPart::PromptResult,
+        }
+    }
+
+    fn matches(&self, part: &ContentPart) -> bool {
+        match (self, part) {
+            (Self::Resource(uri), ContentPart::Resource { content }) => content.uri == *uri,
+            (Self::ResourceRef(uri), ContentPart::ResourceRef { content }) => content.uri == *uri,
+            (Self::PromptResult { request_id, name }, ContentPart::PromptResult { content }) => {
+                content.prompt_request_id == *request_id && content.prompt_name == *name
+            },
+            _ => false,
+        }
+    }
+}
+
+/// Return the result addressed by `projection` and its structured-part identity.
 ///
 /// Tool results retain their JSON value. Resource and prompt results use fixed
 /// object envelopes. Missing structured results return concatenated text.
@@ -520,7 +625,10 @@ pub(crate) fn extract_result_from_message(
                 return (project_resource_result(content), identity);
             },
             (Projection::Prompt, ContentPart::PromptResult { content }) => {
-                return (project_prompt_result(content), ResultIdentity::default());
+                return (
+                    project_prompt_result(content),
+                    ResultIdentity::from_prompt_message(msg),
+                );
             },
             _ => {},
         }
@@ -565,26 +673,33 @@ pub(crate) fn extract_result_field(
 
 /// Return a resource field or a dotted annotation descendant.
 pub(crate) fn resource_field_value(resource: &Resource, field: &str) -> Option<Value> {
-    let (head, rest) = match field.split_once('.') {
-        Some((head, rest)) => (head, Some(rest)),
-        None => (field, None),
-    };
+    let path: Vec<String> = field.split('.').map(str::to_owned).collect();
+    resource_field_value_at(resource, &path)
+}
+
+/// Read one resource field using expanded path segments.
+pub(crate) fn resource_field_value_at(resource: &Resource, path: &[String]) -> Option<Value> {
+    let (head, rest) = path.split_first()?;
     if head == "annotations"
-        && let Some(rest) = rest
+        && let Some((key, inner)) = rest.split_first()
     {
-        let (key, inner) = match rest.split_once('.') {
-            Some((key, inner)) => (key, Some(inner)),
-            None => (rest, None),
-        };
-        let value = resource.annotations.get(key)?;
-        return match inner {
-            Some(inner) => get_dotted(value, inner).cloned(),
-            None => Some(value.clone()),
-        };
+        return value_at(resource.annotations.get(key)?, inner).cloned();
     }
-    rest.is_none()
+    rest.is_empty()
         .then(|| resource_field(resource, head))
         .flatten()
+}
+
+/// Resolve segments without splitting object keys that contain dots.
+pub(crate) fn value_at<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
+    path.iter().try_fold(value, |value, segment| match value {
+        Value::Object(map) => map.get(segment),
+        Value::Array(items) => segment
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| items.get(index)),
+        _ => None,
+    })
 }
 
 /// One top-level field of the [`project_resource_result`] envelope, or `None`
@@ -623,46 +738,59 @@ fn prompt_result_field(prompt: &PromptResult, name: &str) -> Option<Value> {
     })
 }
 
-/// Return the originally selected resource result.
-///
-/// Other projections use the result selected by `projection`.
+/// Return the originally selected resource or prompt result.
 ///
 /// # Errors
 ///
-/// Refuses a removed or ambiguous resource target.
+/// Refuses a removed or ambiguous structured target.
 pub(crate) fn extract_result_by_identity(
     msg: &Message,
     projection: Projection,
     identity: &ResultIdentity,
 ) -> Result<Value, EnvelopeReplaced> {
-    if let Some(resource) = identity.resource(msg)? {
-        return Ok(project_resource_result(resource));
+    if let Some(part) = identity.part(msg)? {
+        return Ok(match part {
+            ContentPart::Resource { content } => project_resource_result(content),
+            ContentPart::PromptResult { content } => project_prompt_result(content),
+            _ => Value::Null,
+        });
     }
-    Ok(extract_result_from_message(msg, projection).0)
+    Ok(if projection == Projection::Tool {
+        extract_result_from_message(msg, projection).0
+    } else {
+        Value::String(msg.get_text_content())
+    })
 }
 
 /// Apply a result edit to the selected content part.
 ///
-/// Resource edits require the originally selected URI to remain unique.
-/// Tool and prompt projections address their first matching result part.
+/// Resource and prompt edits require the original identity to remain unique.
+/// Tool projections address their first matching result part.
 ///
 /// # Errors
 ///
-/// Refuses a non-object fixed envelope or a removed or ambiguous resource target.
+/// Refuses a non-object fixed envelope or a removed or ambiguous structured target.
 pub(crate) fn write_result_back_to_message(
     msg: &mut Message,
     result: &Value,
     projection: Projection,
     identity: &ResultIdentity,
 ) -> Result<(), EnvelopeReplaced> {
-    if let Some(index) = identity.resource_index(msg)? {
+    if let Some(index) = identity.index(msg)? {
         return match msg.content.get_mut(index) {
             Some(ContentPart::Resource { content }) => write_resource(content, result),
+            Some(ContentPart::PromptResult { content }) => write_prompt_result(content, result),
             _ => Err(EnvelopeReplaced {
                 part: ReplacedPart::Resource,
                 error: EnvelopeError::Removed,
             }),
         };
+    }
+    if projection != Projection::Tool {
+        if let Some(text) = result.as_str() {
+            rewrite_message_text(msg, text);
+        }
+        return Ok(());
     }
     for part in &mut msg.content {
         match (projection, part) {
@@ -772,6 +900,34 @@ pub(crate) fn write_prompt_result(
     write_opt_string(&mut prompt.content, obj.get("content"));
     write_opt_string(&mut prompt.error_message, obj.get("error_message"));
     Ok(())
+}
+
+/// Apply policy-written paths even when their final value equals the input.
+///
+/// Arrays retain whole-value merge semantics, including omitted elements.
+pub(crate) fn apply_written_paths(base: &mut Value, post: &Value, paths: &[Vec<String>]) {
+    fn apply(base: &mut Value, post: &Value, path: &[String]) {
+        let Some((key, rest)) = path.split_first() else {
+            *base = post.clone();
+            return;
+        };
+        let (Some(base_map), Some(post_map)) = (base.as_object_mut(), post.as_object()) else {
+            *base = post.clone();
+            return;
+        };
+        let Some(value) = post_map.get(key) else {
+            base_map.remove(key);
+            return;
+        };
+        apply(
+            base_map.entry(key.clone()).or_insert(Value::Null),
+            value,
+            rest,
+        );
+    }
+    for path in paths {
+        apply(base, post, path);
+    }
 }
 
 /// Apply the differences between `pre` and `post` to `base`.
@@ -1903,7 +2059,10 @@ mod tests {
         let (result, identity) = extract_result_with_identity(&msg);
         assert_eq!(result["uri"], serde_json::json!("hr://employees/42"));
         assert_eq!(
-            identity.resource_uri.as_deref(),
+            identity
+                .resource(&msg)
+                .expect("unique resource")
+                .map(|resource| resource.uri.as_str()),
             Some("hr://employees/42"),
             "identity captures the projected resource's uri"
         );

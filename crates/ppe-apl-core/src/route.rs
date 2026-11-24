@@ -25,7 +25,7 @@
 use std::sync::Arc;
 
 use crate::attributes::AttributeBag;
-use crate::evaluator::{Decision, FieldOutcome, evaluate_effects, evaluate_pipeline};
+use crate::evaluator::{Decision, FieldOutcome, evaluate_effects, evaluate_pipeline_at};
 use crate::pipeline::{Stage, TaintEvent};
 use crate::rules::CompiledRoute;
 use crate::step::{
@@ -252,13 +252,14 @@ pub async fn evaluate_pre(
             let Some(current) = get_concrete(&payload.args, &path).cloned() else {
                 continue; // missing field on this element → no pipeline to run
             };
-            let eval = evaluate_pipeline(
+            let eval = evaluate_pipeline_at(
                 &rule.pipeline,
                 &current,
                 bag,
                 plugins,
                 &rule.field,
                 DispatchPhase::Pre,
+                &path,
             )
             .await;
             taints.extend(eval.taints);
@@ -266,11 +267,13 @@ pub async fn evaluate_pre(
                 FieldOutcome::Pass => {},
                 FieldOutcome::Replace(new_val) => {
                     if set_concrete(&mut payload.args, &path, new_val) {
+                        plugins.record_field_write(&path, DispatchPhase::Pre).await;
                         args_modified = true;
                     }
                 },
                 FieldOutcome::Omit => {
                     if remove_concrete(&mut payload.args, &path) {
+                        plugins.record_field_write(&path, DispatchPhase::Pre).await;
                         args_modified = true;
                     }
                 },
@@ -361,13 +364,14 @@ pub async fn evaluate_post(
                 let Some(current) = get_concrete(result, &path).cloned() else {
                     continue;
                 };
-                let eval = evaluate_pipeline(
+                let eval = evaluate_pipeline_at(
                     &rule.pipeline,
                     &current,
                     bag,
                     plugins,
                     &rule.field,
                     DispatchPhase::Post,
+                    &path,
                 )
                 .await;
                 taints.extend(eval.taints);
@@ -375,11 +379,13 @@ pub async fn evaluate_post(
                     FieldOutcome::Pass => {},
                     FieldOutcome::Replace(new_val) => {
                         if set_concrete(result, &path, new_val) {
+                            plugins.record_field_write(&path, DispatchPhase::Post).await;
                             result_modified = true;
                         }
                     },
                     FieldOutcome::Omit => {
                         if remove_concrete(result, &path) {
+                            plugins.record_field_write(&path, DispatchPhase::Post).await;
                             result_modified = true;
                         }
                     },

@@ -69,9 +69,9 @@ use crate::delegation_invoker::DelegationPluginInvoker;
 use crate::dispatch_plan::DispatchCache;
 use crate::elicitation_invoker::ElicitationPluginInvoker;
 use crate::message_projection::{
-    ENVELOPE_REPLACED_CODE, EnvelopeReplaced, Projection, ResultIdentity, apply_changed_paths,
-    extract_args_from_message, extract_result_by_identity, extract_result_from_message,
-    write_args_back_to_message, write_result_back_to_message,
+    ENVELOPE_REPLACED_CODE, EnvelopeReplaced, Projection, apply_changed_paths, apply_written_paths,
+    extract_args_by_identity, extract_args_from_message, extract_result_by_identity,
+    extract_result_from_message, write_args_by_identity, write_result_back_to_message,
 };
 use crate::payload_fields::PayloadFields;
 use crate::pdp_router::PdpRouter;
@@ -700,11 +700,21 @@ impl AplRouteHandler {
             if let Some(pre) = pre_args.as_ref()
                 && let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>()
             {
-                let mut merged = extract_args_from_message(&target.message, self.projection);
-                apply_changed_paths(&mut merged, pre, &route_payload.args);
-                if let Err(e) =
-                    write_args_back_to_message(&mut target.message, &merged, self.projection)
-                {
+                let identity = invoker.identity(praxis_policy_apl_core::step::DispatchPhase::Pre);
+                let paths = invoker
+                    .written_paths(praxis_policy_apl_core::step::DispatchPhase::Pre)
+                    .await;
+                let write_args = extract_args_by_identity(
+                    &target.message,
+                    self.projection,
+                    identity,
+                )
+                .and_then(|mut merged| {
+                    apply_changed_paths(&mut merged, pre, &route_payload.args);
+                    apply_written_paths(&mut merged, &route_payload.args, &paths);
+                    write_args_by_identity(&mut target.message, &merged, self.projection, identity)
+                });
+                if let Err(e) = write_args {
                     envelope_replaced = Some(("args", e));
                 }
             }
@@ -725,22 +735,23 @@ impl AplRouteHandler {
             if let Some(result_value) = route_payload.result.as_ref()
                 && let Some(target) = updated.as_any_mut().downcast_mut::<MessagePayload>()
             {
-                let (pre, identity) = message.map_or_else(
-                    || (Value::Null, ResultIdentity::default()),
-                    |m| {
-                        let (v, id) = extract_result_from_message(m, self.projection);
-                        (v, id)
-                    },
-                );
+                let pre = message.map_or(Value::Null, |m| {
+                    extract_result_from_message(m, self.projection).0
+                });
+                let identity = invoker.identity(praxis_policy_apl_core::step::DispatchPhase::Post);
+                let paths = invoker
+                    .written_paths(praxis_policy_apl_core::step::DispatchPhase::Post)
+                    .await;
                 let write_result =
-                    extract_result_by_identity(&target.message, self.projection, &identity)
+                    extract_result_by_identity(&target.message, self.projection, identity)
                         .and_then(|mut merged| {
                             apply_changed_paths(&mut merged, &pre, result_value);
+                            apply_written_paths(&mut merged, result_value, &paths);
                             write_result_back_to_message(
                                 &mut target.message,
                                 &merged,
                                 self.projection,
-                                &identity,
+                                identity,
                             )
                         });
                 if let Err(error) = write_result {

@@ -91,7 +91,7 @@ use crate::dispatch_plan::RouteDispatchPlan;
 use crate::message_projection::{
     ENVELOPE_REPLACED_CODE, EnvelopeReplaced, Projection, ResultIdentity,
 };
-use crate::payload_fields::{PayloadFields, field_value_for_identity, resource_identity};
+use crate::payload_fields::{PayloadFields, field_value_for_identity, payload_identities};
 use crate::session_store::{SessionStore, SessionStoreError};
 
 /// The invoker an MCP or A2A route builds: CMF hooks, carrying the request's
@@ -159,8 +159,9 @@ where
     /// Which content parts a field stage's readback reads. Must match the
     /// route handler's, so the readback sees the part the pipeline wrote.
     projection: Projection,
-    /// The original resource selection survives every plugin dispatch.
-    resource_identity: ResultIdentity,
+    /// Original reference, resource and prompt selections.
+    identities: [ResultIdentity; 4],
+    written_fields: Mutex<Vec<(DispatchPhase, Vec<String>)>>,
 }
 
 impl<H: HookTypeDef> HookPluginInvoker<H>
@@ -210,7 +211,7 @@ where
         }
 
         let initial_labels = snapshot_labels(&extensions);
-        let resource_identity = resource_identity(&payload);
+        let identities = payload_identities(&payload);
 
         Ok(Self {
             engine,
@@ -222,7 +223,8 @@ where
             session_store,
             initial_labels,
             projection: Projection::default(),
-            resource_identity,
+            identities,
+            written_fields: Mutex::new(Vec::new()),
         })
     }
 
@@ -360,16 +362,16 @@ where
     }
 }
 
-#[async_trait]
-impl<H: HookTypeDef> PluginInvoker for HookPluginInvoker<H>
+impl<H: HookTypeDef> HookPluginInvoker<H>
 where
     H::Payload: PayloadFields,
 {
-    async fn invoke(
+    async fn invoke_at(
         &self,
         plugin_name: &str,
         _bag: &AttributeBag,
         invocation: PluginInvocation<'_>,
+        path: Option<&[String]>,
     ) -> Result<PluginOutcome, PluginError> {
         let resolved = self
             .plan
@@ -436,7 +438,8 @@ where
                     name,
                     phase,
                     self.projection,
-                    &self.resource_identity,
+                    self.identity(phase),
+                    path,
                 ) {
                     Ok(value) => value,
                     Err(error) => {
@@ -501,7 +504,8 @@ where
                             name,
                             phase,
                             self.projection,
-                            &self.resource_identity,
+                            self.identity(phase),
+                            path,
                         ) {
                             Ok(value) => {
                                 value.filter(|new_value| field_before.as_ref() != Some(new_value))
@@ -574,6 +578,57 @@ where
             taints,
             modified_value,
         })
+    }
+
+    pub(crate) fn identity(&self, phase: DispatchPhase) -> &ResultIdentity {
+        match (phase, self.projection) {
+            (DispatchPhase::Pre, Projection::Resource) => &self.identities[0],
+            (DispatchPhase::Post, Projection::Resource) => &self.identities[1],
+            (DispatchPhase::Post, Projection::Prompt) => &self.identities[2],
+            _ => &self.identities[3],
+        }
+    }
+
+    pub(crate) async fn written_paths(&self, phase: DispatchPhase) -> Vec<Vec<String>> {
+        self.written_fields
+            .lock()
+            .await
+            .iter()
+            .filter(|(written_phase, _)| *written_phase == phase)
+            .map(|(_, path)| path.clone())
+            .collect()
+    }
+}
+
+#[async_trait]
+impl<H: HookTypeDef> PluginInvoker for HookPluginInvoker<H>
+where
+    H::Payload: PayloadFields,
+{
+    async fn invoke(
+        &self,
+        name: &str,
+        bag: &AttributeBag,
+        invocation: PluginInvocation<'_>,
+    ) -> Result<PluginOutcome, PluginError> {
+        self.invoke_at(name, bag, invocation, None).await
+    }
+
+    async fn invoke_field_at(
+        &self,
+        name: &str,
+        bag: &AttributeBag,
+        invocation: PluginInvocation<'_>,
+        path: &[String],
+    ) -> Result<PluginOutcome, PluginError> {
+        self.invoke_at(name, bag, invocation, Some(path)).await
+    }
+
+    async fn record_field_write(&self, path: &[String], phase: DispatchPhase) {
+        self.written_fields
+            .lock()
+            .await
+            .push((phase, path.to_vec()));
     }
 
     /// Dispatch one resolved source and publish its validated acquired facts.
