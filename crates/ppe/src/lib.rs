@@ -113,6 +113,7 @@ pub use praxis_policy_apl_core::step::PdpFactory;
 pub use praxis_policy_apl_runtime::{
     AplOptions, DispatchCache, MemorySessionStore, SessionStore, SessionStoreFactory, register_apl,
 };
+pub use praxis_policy_core::config::ContentKeySource;
 pub use praxis_policy_core::engine::PolicyEngine;
 
 pub use praxis_policy_builtins::BundledCryptoCapability;
@@ -201,15 +202,18 @@ pub use praxis_policy_core::factory::{FactoryContext, PluginFactory, PluginInsta
 /// There is no handle here that reads every declared value. A host drives
 /// refresh with `PolicyEngine::refresh_secrets` and watches for staleness with
 /// `PolicyEngine::secrets_last_success`, neither of which yields secret
-/// material. Use [`PolicyEngine::reload_config`] to apply changes to a
-/// `secrets:` block after startup. [`PolicyEngine::load_config`] is synchronous
-/// and refuses those changes.
+/// material. Use [`PolicyEngine::reload_secrets`] to apply changes to a
+/// `secrets:` block after startup. [`PolicyEngine::reload_secrets_with_key`]
+/// selects a provenance key from the replacement block.
+/// [`PolicyEngine::load_config`] is synchronous and refuses those changes.
 ///
-/// [`PolicyEngine::reload_config`]: crate::PolicyEngine::reload_config
+/// [`PolicyEngine::reload_secrets`]: crate::PolicyEngine::reload_secrets
+/// [`PolicyEngine::reload_secrets_with_key`]: crate::PolicyEngine::reload_secrets_with_key
 /// [`PolicyEngine::load_config`]: crate::PolicyEngine::load_config
 pub use praxis_policy_core::secrets::{
     ProviderFailure, ProviderHealth, RefreshReport, SecretError, SecretProvider,
-    SecretProviderFactory, SecretProviderRegistry, SecretRef, SecretSnapshot, SecretsHealth,
+    SecretProviderFactory, SecretProviderRegistry, SecretRef, SecretSnapshot, SecretsConfig,
+    SecretsHealth,
 };
 
 /// Curated re-exports for plugin authors, so a plugin crate can depend on this

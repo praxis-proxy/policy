@@ -280,9 +280,19 @@ Every digest names its scheme and key: `hmac-sha256:<key_id>:<hex>`. The key id
 is a fingerprint of the key, stable across restarts and different after a
 rotation. Two digests are comparable only when their key ids match; a reader
 seeing different ids knows the key changed, not the content. Rotating the bytes
-behind `provenance_key` takes effect on the next `refresh_secrets`. Naming a
-different value takes a restart, because secrets are read once at startup, and a
-reload that names a value nobody resolved is refused.
+behind `provenance_key` takes effect on the next `refresh_secrets`. Each
+invocation captures one validated key for its input and output hashes; a
+rotation during that invocation affects later invocations. Weak or unavailable
+key material fails closed, without switching to plain hashing.
+
+To add and select a different value atomically, use
+`PolicyEngine::reload_secrets_with_key(replacement,
+ContentKeySource::Secret("new_key"))`. The replacement key must be declared and
+resolve to at least 32 bytes; failure preserves the current key and secret
+store. Ordinary `reload_secrets` retains the key selection. Capture mode does
+not change, and only `ContentKeySource::Unkeyed` explicitly selects plain
+hashing. Secret reload preserves audit stream counters and policy/plugin
+state. See [secrets and reload](configuration.md#secrets-and-reload).
 
 The key is deployment-wide rather than drawn per record. Within one record either
 would show whether the pipeline altered the content, but a deployment key also

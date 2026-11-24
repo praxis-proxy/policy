@@ -1111,7 +1111,7 @@ fn refuse_changed_secrets(
     };
     let message = format!(
         "the `secrets:` block changed after secret resolution: {change}. Apply the change with \
-         reload_config(), or restart the process"
+         reload_secrets(), or restart the process"
     );
     // Logged as well as returned: a host that reports a failed reload as one
     // line loses which declaration caused it.
@@ -1148,32 +1148,35 @@ fn same_published_store(
     }
 }
 
-/// Validate the content key against staged values before committing them.
-fn reload_content_key_acceptable(
-    cfg: &PolicyConfig,
+/// Prepare the selected key from the replacement's validated binding.
+fn reloaded_content_key(
+    source: Option<crate::config::ContentKeySource<'_>>,
     resolved: Option<&crate::secrets::store::ReloadedSecrets>,
-) -> Result<(), Box<PluginError>> {
+) -> Result<Option<crate::hooks::payload::ContentKey>, Box<PluginError>> {
     use crate::config::ContentKeySource;
+    use crate::hooks::payload::{ContentKey, MIN_CONTENT_KEY_BYTES};
 
-    let Some(ContentKeySource::Secret(name)) = cfg.engine_settings.content_key_source() else {
-        return Ok(());
+    let name = match source {
+        None => return Ok(None),
+        Some(ContentKeySource::Unkeyed) => return Ok(Some(ContentKey::Unkeyed)),
+        Some(ContentKeySource::Secret(name)) => name,
     };
-    let Some(resolved) = resolved else {
-        return Err(missing_reloaded_content_key(name));
-    };
-    match resolved.len_after_publish(name) {
-        None => Err(missing_reloaded_content_key(name)),
-        Some(len) if len < crate::hooks::payload::MIN_CONTENT_KEY_BYTES => {
-            Err(Box::new(PluginError::Config {
-                message: format!(
-                    "engine_settings.content_provenance_key `{name}`: the content provenance key \
-                     is {len} bytes; it needs at least {}",
-                    crate::hooks::payload::MIN_CONTENT_KEY_BYTES
-                ),
-            }))
-        },
-        Some(_) => Ok(()),
+    let resolved = resolved.ok_or_else(|| missing_reloaded_content_key(name))?;
+    let len = resolved
+        .len_after_publish(name)
+        .ok_or_else(|| missing_reloaded_content_key(name))?;
+    if len < MIN_CONTENT_KEY_BYTES {
+        return Err(config_error(format!(
+            "engine_settings.content_provenance_key `{name}`: the content provenance key \
+             is {len} bytes; it needs at least {MIN_CONTENT_KEY_BYTES}",
+        )));
     }
+    let secret = resolved
+        .secret(name)
+        .ok_or_else(|| missing_reloaded_content_key(name))?;
+    // Retained handles still expose old bytes until publication. The staged
+    // length above is the one the replacement must satisfy.
+    Ok(Some(ContentKey::Keyed(secret)))
 }
 
 fn missing_reloaded_content_key(name: &str) -> Box<PluginError> {
@@ -1213,7 +1216,7 @@ fn content_key_for(
             message: format!(
                 "engine_settings.content_provenance_key names `{name}`, which is not in the \
                  installed secret store. Declare it under `secrets.values` and call \
-                 reload_config(), or restart the process"
+                 reload_secrets(), or restart the process"
             ),
         }));
     };
@@ -1837,7 +1840,7 @@ impl PolicyEngine {
     /// Returns `PluginError::Config` when the config fails validation, when a
     /// plugin's `kind` has no registered factory, when a factory rejects the
     /// plugin's config, when initialization is in progress, when the `secrets:`
-    /// block changes after secrets have resolved (use [`Self::reload_config`];
+    /// block changes after secrets have resolved (use [`Self::reload_secrets`];
     /// this path refuses it), or
     /// when a registration conflicts with one already present. The existing
     /// snapshot is left in place, so a failed load does not disturb in-flight
@@ -1846,30 +1849,69 @@ impl PolicyEngine {
         self.load_config_with(policy_config, &crate::factory::FactoryContext::default())
     }
 
-    /// Load `policy_config` and apply changes to its `secrets:` block.
+    /// Replace the loaded document's secret declarations.
     ///
-    /// After initialization, every new or changed binding must resolve before
-    /// the configuration is installed. Use this asynchronous method when
-    /// changing secrets after startup; [`Self::load_config`] refuses those
-    /// changes.
+    /// Existing policy, plugins and their state remain installed. Bindings
+    /// whose provider and reference are unchanged retain their handles;
+    /// provider settings changes refresh those handles. Changed bindings leave
+    /// existing handles on their previous values.
     ///
-    /// Existing [`crate::secrets::SecretRef`] handles remain valid when their
-    /// provider and reference are unchanged. A provider settings change
-    /// refreshes those handles; their generation advances only if the value
-    /// changes.
-    ///
-    /// Before [`Self::initialize`], secrets are resolved during initialization.
+    /// Before the first secret resolution, reads are deferred to
+    /// [`Self::initialize`]. Afterward, every required read must succeed before
+    /// the replacement takes effect. The current provenance-key selection and
+    /// capture mode are retained.
     ///
     /// # Errors
     ///
-    /// Returns `PluginError::Config` when validation fails, when a secret
-    /// cannot be resolved, when initialization is in progress, when another
-    /// load wins while secrets are being read, or for the plugin registration
-    /// failures [`Self::load_config`] reports. A failed reload leaves the
-    /// running snapshot in place.
-    pub async fn reload_config(&self, policy_config: PolicyConfig) -> Result<(), Box<PluginError>> {
-        self.reload_config_with(policy_config, &crate::factory::FactoryContext::default())
-            .await
+    /// Returns [`PluginError::Config`] if no document is loaded, declarations
+    /// or the selected key are invalid, a read fails, initialization is in
+    /// progress, or the running configuration changes during resolution.
+    /// Failure and cancellation leave the installed bindings unchanged.
+    ///
+    /// [`PluginError::Config`]: crate::error::PluginError::Config
+    pub async fn reload_secrets(
+        &self,
+        secrets: crate::secrets::SecretsConfig,
+    ) -> Result<(), Box<PluginError>> {
+        self.reload_secrets_with(secrets, None).await
+    }
+
+    /// Replace secret declarations and select their content-provenance key.
+    ///
+    /// A named key must be declared in the replacement block and resolve to at
+    /// least 32 bytes. [`ContentKeySource::Unkeyed`] selects plain SHA-256
+    /// explicitly. The reserved name `unkeyed` cannot be selected as a secret.
+    /// Capture mode and all other configuration remain unchanged. This method
+    /// resolves the replacement before returning, even before initialization.
+    ///
+    /// ```rust
+    /// use praxis_policy_core::config::ContentKeySource;
+    /// use praxis_policy_core::engine::PolicyEngine;
+    /// use praxis_policy_core::secrets::SecretsConfig;
+    ///
+    /// # async fn rotate(engine: &PolicyEngine, replacement: SecretsConfig)
+    /// #     -> Result<(), Box<praxis_policy_core::error::PluginError>> {
+    /// engine.reload_secrets_with_key(
+    ///     replacement,
+    ///     ContentKeySource::Secret("new_key"),
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`Self::reload_secrets`], including a missing or
+    /// undersized selected key. Key selection and secret replacement take
+    /// effect together; neither changes when resolution fails or is cancelled.
+    ///
+    /// [`ContentKeySource::Unkeyed`]: crate::config::ContentKeySource::Unkeyed
+    pub async fn reload_secrets_with_key(
+        &self,
+        secrets: crate::secrets::SecretsConfig,
+        key: crate::config::ContentKeySource<'_>,
+    ) -> Result<(), Box<PluginError>> {
+        self.reload_secrets_with(secrets, Some(key)).await
     }
 
     fn load_config_with(
@@ -1980,100 +2022,102 @@ impl PolicyEngine {
         Ok(())
     }
 
-    async fn reload_config_with(
+    async fn reload_secrets_with(
         &self,
-        policy_config: PolicyConfig,
-        context: &crate::factory::FactoryContext,
+        secrets: crate::secrets::SecretsConfig,
+        key: Option<crate::config::ContentKeySource<'_>>,
     ) -> Result<(), Box<PluginError>> {
-        warn_on_inactive_settings(&policy_config);
-        let has_visitor = !self
-            .visitors
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty();
-        let policy_config = normalize_and_validate(policy_config, has_visitor)?;
+        use crate::config::{ContentKeySource, UNKEYED_CONTENT_PROVENANCE};
+
         if self.initializations_in_flight.load(Ordering::Acquire) != 0 {
             return Err(config_load_during_initialization());
         }
-        // Nothing has been resolved. `initialize` reads whatever is installed,
-        // which is also why a secrets change is still legal on this path.
-        if !self.initialized.load(Ordering::Acquire) && self.installed_secrets().is_none() {
-            return self.load_config_with(policy_config, context);
-        }
-
-        warn_on_dropped_inherited_authentication(&policy_config);
-        warn_on_assertions_findings(&policy_config);
-
         let seen_generation = self.generation.load(Ordering::Acquire);
+        let original = self.load_runtime();
         let baseline = self.installed_secrets();
-        let mut resolved = self
-            .resolve_for_reload(&policy_config, baseline.as_deref())
-            .await?;
-
-        let factories = {
-            let registry = self
-                .factories
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            resolve_factories(&policy_config.plugins, &registry)?
+        let mut policy_config = original.policy_config.clone().ok_or_else(|| {
+            config_error("cannot reload secrets before loading a configuration".to_owned())
+        })?;
+        policy_config.secrets = secrets;
+        if let Some(source) = key {
+            policy_config.engine_settings.content_provenance_key = Some(match source {
+                ContentKeySource::Unkeyed => UNKEYED_CONTENT_PROVENANCE.to_owned(),
+                ContentKeySource::Secret(UNKEYED_CONTENT_PROVENANCE) => {
+                    return Err(config_error(
+                        "`unkeyed` is reserved; select ContentKeySource::Unkeyed explicitly"
+                            .to_owned(),
+                    ));
+                },
+                ContentKeySource::Secret(name) => name.to_owned(),
+            });
+        }
+        crate::config::validate_config(&policy_config)?;
+        let defer_reads =
+            key.is_none() && !self.initialized.load(Ordering::Acquire) && baseline.is_none();
+        let mut resolved = if defer_reads {
+            None
+        } else {
+            self.resolve_for_reload(&policy_config, baseline.as_deref())
+                .await?
         };
-        let instances = create_plugin_instances(&policy_config.plugins, &factories, context)?;
-        let rate_limit_overrides =
-            create_rate_limit_overrides(&policy_config, &factories, context)?;
-
-        let refresh_guard = if let Some(baseline_store) = baseline.as_ref() {
-            Some(baseline_store.lock_refresh().await)
+        let mut replacement = (*original).clone();
+        let refresh_guard = if let Some(store) = baseline.as_ref() {
+            Some(store.lock_refresh().await)
         } else {
             None
         };
-
-        // Plugin destruction can re-enter the engine. Rejected instances must
-        // outlive the writer lock.
         let writer = self.lock_runtime_writer();
-        let current = self.runtime.load_full();
-        let mut new_registry = current.registry.clone();
-        let registered = (|| -> Result<(), Box<PluginError>> {
+        let validated = (|| {
             if self.initializations_in_flight.load(Ordering::Acquire) != 0 {
                 return Err(config_load_during_initialization());
             }
             let current_store = self.installed_secrets();
             if self.generation.load(Ordering::Acquire) != seen_generation
                 || !same_published_store(baseline.as_ref(), current_store.as_ref())
+                || (defer_reads && self.initialized.load(Ordering::Acquire))
             {
                 return Err(config_changed_during_secret_resolution());
             }
-            reload_content_key_acceptable(&policy_config, resolved.as_ref())?;
-
-            register_instances_into(&mut new_registry, &policy_config.plugins, &instances)?;
-
-            let installed = resolved
-                .take()
-                .map(|reloaded| Arc::new(reloaded.publish(baseline.as_deref())));
-            let empty = crate::secrets::SecretStore::empty();
-            let key_store = installed.as_deref().unwrap_or(&empty);
-            // Key lengths must be accepted before shared values change.
-            let content_key = content_key_for(&policy_config, Some(key_store))?;
-            if let Some(baseline_store) = baseline.as_ref() {
-                baseline_store.retire();
+            if defer_reads {
+                Ok(None)
+            } else {
+                reloaded_content_key(
+                    key.or_else(|| policy_config.engine_settings.content_key_source()),
+                    resolved.as_ref(),
+                )
             }
-            self.secrets.store(installed.clone());
-            self.runtime.store(Arc::new(snapshot_from_config(
-                new_registry,
-                policy_config,
-                Some(current.as_ref()),
-                content_key,
-                context,
-                Arc::clone(&rate_limit_overrides),
-                installed,
-            )));
-            self.generation.fetch_add(1, Ordering::Release);
-            Ok(())
         })();
-        drop(refresh_guard);
+        let prepared_key = match validated {
+            Ok(key) => key,
+            Err(error) => {
+                drop(writer);
+                drop(refresh_guard);
+                return Err(error);
+            },
+        };
+        let installed = if defer_reads {
+            None
+        } else {
+            resolved
+                .take()
+                .map(|value| Arc::new(value.publish(baseline.as_deref())))
+        };
+        if policy_config.engine_settings.capture_content_provenance
+            && let Some(key) = prepared_key
+        {
+            replacement.executor.set_content_key(key);
+        }
+        replacement.policy_config = Some(policy_config);
+        replacement.secrets = installed.clone();
+        if let Some(store) = baseline.as_ref() {
+            store.retire();
+        }
+        self.secrets.store(installed);
+        self.runtime.store(Arc::new(replacement));
+        self.generation.fetch_add(1, Ordering::Release);
         drop(writer);
-        drop(current);
-        registered?;
-
+        drop(refresh_guard);
+        drop(original);
         self.clear_routing_cache();
         Ok(())
     }
@@ -8204,7 +8248,7 @@ secrets:
             let engine = Arc::clone(&engine);
             tokio::spawn(async move {
                 engine
-                    .reload_config(parse_fixture_config(&changed).unwrap())
+                    .reload_secrets(parse_fixture_config(&changed).unwrap().secrets)
                     .await
             })
         };
@@ -8312,7 +8356,7 @@ routes:
 
         let changed = yaml.replace("ref: first.key", "ref: second.key");
         engine
-            .reload_config(parse_fixture_config(&changed).unwrap())
+            .reload_secrets(parse_fixture_config(&changed).unwrap().secrets)
             .await
             .expect("the changed reference resolves");
         assert_eq!(
@@ -8390,7 +8434,7 @@ secrets:
             let changed = changed.clone();
             tokio::spawn(async move {
                 engine
-                    .reload_config(parse_fixture_config(&changed).unwrap())
+                    .reload_secrets(parse_fixture_config(&changed).unwrap().secrets)
                     .await
             })
         };
@@ -8415,40 +8459,42 @@ secrets:
     }
 
     #[tokio::test]
-    async fn reload_preserves_a_failure_recorded_during_factory_construction() {
+    async fn reload_preserves_a_failure_recorded_during_provider_resolution() {
         let (dir, yaml) = secret_fixture("last-good\n");
-        let engine = Arc::new(engine_reading_secrets(&yaml));
+        let engine = Arc::new(
+            PolicyEngine::from_config(parse_fixture_config(&yaml).unwrap(), &allow_factories())
+                .unwrap(),
+        );
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut providers = crate::secrets::SecretProviderRegistry::with_builtin_backends();
+        providers.register(Box::new(PausingSecretProviderFactory {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            answer: Arc::new(std::sync::Mutex::new("additional-value".to_owned())),
+            pause_from_read: 1,
+        }));
+        assert!(engine.set_secret_providers(providers));
         engine.initialize().await.expect("initializes");
         let old_store = resolved_secrets(&engine);
         let handle = old_store.secret("upstream_key").expect("declared");
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let (release, released) = std::sync::mpsc::channel();
-        engine.register_factory(
-            "test/pause_reload",
-            Box::new(PausingReloadFactory {
-                entered: Arc::clone(&entered),
-                release: std::sync::Mutex::new(released),
-            }),
-        );
-        let changed = format!(
-            "{yaml}\nplugins:\n  - name: pause_reload\n    kind: test/pause_reload\n    \
-             hooks: [test_hook]\n"
-        );
-        let runtime = tokio::runtime::Handle::current();
-        let reloading = {
+        let mut replacement = parse_fixture_config(&yaml).unwrap().secrets;
+        let additional: crate::secrets::SecretsConfig = serde_yaml::from_str(
+            "providers:\n  delayed: { kind: pausing }\nvalues:\n  extra: { provider: delayed, ref: key }\n",
+        ).unwrap();
+        replacement.providers.extend(additional.providers);
+        replacement.values.extend(additional.values);
+        let mut reloading = {
             let engine = Arc::clone(&engine);
-            tokio::task::spawn_blocking(move || {
-                runtime.block_on(engine.reload_config(parse_fixture_config(&changed).unwrap()))
-            })
+            tokio::spawn(async move { engine.reload_secrets(replacement).await })
         };
-        entered.notified().await;
-
+        wait_for_secret_read(&entered, &mut reloading).await;
         std::fs::remove_file(dir.join("upstream.key")).expect("remove secret");
         let failed = engine.refresh_secrets().await;
         assert_eq!(failed.failed.len(), 1, "{failed:?}");
         let failure = old_store.provider_health("local").expect("declared");
         assert!(failure.failing, "the published store records the outage");
-        release.send(()).expect("release factory");
+        release.notify_one();
         reloading
             .await
             .expect("reload completes")
@@ -8522,7 +8568,7 @@ secrets:
             let engine = Arc::clone(&engine);
             tokio::spawn(async move {
                 engine
-                    .reload_config(parse_fixture_config(&changed).unwrap())
+                    .reload_secrets(parse_fixture_config(&changed).unwrap().secrets)
                     .await
             })
         };
@@ -8778,7 +8824,7 @@ secrets:
              second_key: { provider: local, ref: second.key }",
         );
         engine
-            .reload_config(parse_fixture_config(&added).unwrap())
+            .reload_secrets(parse_fixture_config(&added).unwrap().secrets)
             .await
             .expect("the added value resolves");
 
@@ -8825,7 +8871,7 @@ secrets:
              second_key: { provider: local, ref: missing.key }",
         );
         let err = engine
-            .reload_config(parse_fixture_config(&added).unwrap())
+            .reload_secrets(parse_fixture_config(&added).unwrap().secrets)
             .await
             .expect_err("the new value was never read");
         let msg = format!("{err}");
@@ -8862,7 +8908,7 @@ secrets:
         std::fs::write(dir2.join("upstream.key"), "from-the-new-dir\n").expect("write");
         let moved = yaml.replace(&dir.display().to_string(), &dir2.display().to_string());
         engine
-            .reload_config(parse_fixture_config(&moved).unwrap())
+            .reload_secrets(parse_fixture_config(&moved).unwrap().secrets)
             .await
             .expect("the provider is rebuilt and the value re-read");
 
@@ -8884,7 +8930,7 @@ secrets:
 
         let moved = yaml.replace("ref: upstream.key", "ref: other.key");
         engine
-            .reload_config(parse_fixture_config(&moved).unwrap())
+            .reload_secrets(parse_fixture_config(&moved).unwrap().secrets)
             .await
             .expect("the new reference resolves");
         assert_eq!(handle.get().as_str(), "hunter2");
@@ -8920,7 +8966,7 @@ secrets:
              second_key: { provider: local, ref: second.key }",
         );
         engine
-            .reload_config(parse_fixture_config(&added).unwrap())
+            .reload_secrets(parse_fixture_config(&added).unwrap().secrets)
             .await
             .expect("nothing is resolved yet, so the load is the ordinary one");
         assert!(
@@ -12913,6 +12959,393 @@ routes:
         );
     }
 
+    #[tokio::test]
+    async fn secret_reload_retains_configured_plugins_annotations_and_audit_counters() {
+        let (dir, yaml) = secret_fixture("first\n");
+        std::fs::write(dir.join("next.key"), "second\n").unwrap();
+        register_hook_metadata(
+            "reload.guard",
+            HookMetadata {
+                family: Some("reload.guard"),
+                ..HookMetadata::permissive()
+            },
+        );
+        let engine = Arc::new(PolicyEngine::default());
+        assert!(
+            engine.set_secret_providers(
+                crate::secrets::SecretProviderRegistry::with_builtin_backends()
+            )
+        );
+        let counts = Arc::new(ReloadLifecycleCounts::default());
+        engine.register_factory(
+            "test/reload-guard",
+            Box::new(ReloadGuardFactory {
+                counts: Arc::clone(&counts),
+                engine: Arc::downgrade(&engine),
+            }),
+        );
+        let yaml = format!(
+            "{yaml}\nplugins:\n  - name: gate\n    kind: test/reload-guard\n    hooks: [reload.guard]\n"
+        );
+        engine
+            .load_config(parse_fixture_config(&yaml).unwrap())
+            .unwrap();
+        let sink_cfg = make_config("audit", 1, PluginMode::Sequential);
+        engine
+            .register_handler::<TestHook, _>(
+                Arc::new(SinkPlugin {
+                    cfg: sink_cfg.clone(),
+                    seen: Arc::new(AtomicUsize::new(0)),
+                }),
+                sink_cfg,
+            )
+            .unwrap();
+        engine.initialize().await.unwrap();
+        let annotation_cfg = make_config("annotation", 0, PluginMode::Sequential);
+        engine.annotate_route(
+            "tool",
+            "guarded",
+            None,
+            "test_hook",
+            Arc::new(BoundaryPause {
+                cfg: annotation_cfg.clone(),
+                entered: Arc::new(tokio::sync::Notify::new()),
+                release: Arc::new(tokio::sync::Notify::new()),
+            }),
+            annotation_cfg,
+        );
+        let before = engine.load_runtime();
+        let gate_id = before.registry.get("gate").unwrap().id();
+        let companion_id = before.registry.get("gate_companion").unwrap().id();
+        let annotation_id = before
+            .route_annotations
+            .values()
+            .next()
+            .unwrap()
+            .plugin_ref
+            .id();
+        let (first, _) = engine
+            .invoke_by_name(
+                "reload.guard",
+                Box::new(TestPayload {
+                    value: "x".to_owned(),
+                }),
+                Extensions::default(),
+                None,
+            )
+            .await;
+        assert_eq!(first.decision_log.stream_seq(), Some(0));
+        let replacement = parse_fixture_config(&yaml.replace("ref: upstream.key", "ref: next.key"))
+            .unwrap()
+            .secrets;
+        engine.reload_secrets(replacement).await.unwrap();
+        let after = engine.load_runtime();
+        assert_eq!(after.registry.get("gate").unwrap().id(), gate_id);
+        assert_eq!(
+            after.registry.get("gate_companion").unwrap().id(),
+            companion_id
+        );
+        assert_eq!(
+            after
+                .route_annotations
+                .values()
+                .next()
+                .unwrap()
+                .plugin_ref
+                .id(),
+            annotation_id
+        );
+        assert!(Arc::ptr_eq(
+            &before.rate_limit_overrides,
+            &after.rate_limit_overrides
+        ));
+        assert_eq!(after.executor.epoch(), before.executor.epoch());
+        assert_eq!(counts.built.load(Ordering::Acquire), 1);
+        assert_eq!(counts.family_calls.load(Ordering::Acquire), 1);
+        assert_eq!(counts.inits.load(Ordering::Acquire), 1);
+        assert_eq!(counts.shutdowns.load(Ordering::Acquire), 0);
+        let (second, _) = engine
+            .invoke_by_name(
+                "reload.guard",
+                Box::new(TestPayload {
+                    value: "x".to_owned(),
+                }),
+                Extensions::default(),
+                None,
+            )
+            .await;
+        assert_eq!(
+            second.decision_log.stream_seq(),
+            Some(1),
+            "secret reload keeps the audit stream continuous"
+        );
+        assert_eq!(
+            resolved_secrets(&engine)
+                .value("upstream_key")
+                .unwrap()
+                .as_str(),
+            "second"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[tokio::test]
+    async fn secret_reload_adds_and_selects_a_provenance_key_atomically() {
+        use crate::config::ContentKeySource;
+
+        let (dir, yaml) = secret_fixture(&"a".repeat(40));
+        std::fs::write(dir.join("new.key"), "b".repeat(40)).unwrap();
+        let yaml = yaml.replace("dispatch: hooks", "dispatch: hooks\n  capture_content_provenance: true\n  content_provenance_key: upstream_key");
+        let engine = engine_reading_secrets(&yaml);
+        engine.initialize().await.unwrap();
+        let old_snapshot = engine.load_runtime();
+        let old_digest = old_snapshot
+            .executor
+            .provenance_key()
+            .unwrap()
+            .digest(b"payload");
+        let changed = yaml.replace("upstream_key: { provider: local, ref: upstream.key }", "upstream_key: { provider: local, ref: upstream.key }\n    new_key: { provider: local, ref: new.key }");
+        let incoming = parse_fixture_config(&changed).unwrap().secrets;
+        engine
+            .reload_secrets_with_key(incoming, ContentKeySource::Secret("new_key"))
+            .await
+            .unwrap();
+        let current = engine.load_runtime();
+        assert_eq!(
+            current
+                .policy_config
+                .as_ref()
+                .unwrap()
+                .engine_settings
+                .content_provenance_key
+                .as_deref(),
+            Some("new_key")
+        );
+        assert_ne!(
+            current
+                .executor
+                .provenance_key()
+                .unwrap()
+                .digest(b"payload"),
+            old_digest
+        );
+        assert_eq!(
+            old_snapshot
+                .executor
+                .provenance_key()
+                .unwrap()
+                .digest(b"payload"),
+            old_digest
+        );
+        assert!(
+            current
+                .policy_config
+                .as_ref()
+                .unwrap()
+                .engine_settings
+                .capture_content_provenance
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "crypto-rustcrypto")]
+    #[tokio::test]
+    async fn invalid_selected_keys_leave_staged_values_and_selection_unchanged() {
+        use crate::config::ContentKeySource;
+
+        let (dir, yaml) = secret_fixture(&"a".repeat(40));
+        let (replacement_dir, _) = secret_fixture(&"b".repeat(40));
+        std::fs::write(replacement_dir.join("weak.key"), "x").unwrap();
+        let yaml = yaml.replace("dispatch: hooks", "dispatch: hooks\n  capture_content_provenance: true\n  content_provenance_key: upstream_key");
+        let engine = engine_reading_secrets(&yaml);
+        engine.initialize().await.unwrap();
+        let original = resolved_secrets(&engine);
+        let handle = original.secret("upstream_key").unwrap();
+        let generation = engine.config_generation();
+        let moved = yaml.replace(&dir.display().to_string(), &replacement_dir.display().to_string()).replace("upstream_key: { provider: local, ref: upstream.key }", "upstream_key: { provider: local, ref: upstream.key }\n    weak_key: { provider: local, ref: weak.key }");
+        let incoming = parse_fixture_config(&moved).unwrap().secrets;
+        for source in [
+            ContentKeySource::Secret("missing"),
+            ContentKeySource::Secret("weak_key"),
+            ContentKeySource::Secret("unkeyed"),
+        ] {
+            let error = engine
+                .reload_secrets_with_key(incoming.clone(), source)
+                .await
+                .unwrap_err();
+            assert!(matches!(*error, PluginError::Config { .. }), "{error}");
+            assert!(Arc::ptr_eq(&resolved_secrets(&engine), &original));
+            assert_eq!(handle.get().as_str(), "a".repeat(40));
+            assert_eq!(handle.generation(), 0);
+            assert_eq!(engine.config_generation(), generation);
+            assert_eq!(
+                engine
+                    .load_runtime()
+                    .policy_config
+                    .as_ref()
+                    .unwrap()
+                    .engine_settings
+                    .content_provenance_key
+                    .as_deref(),
+                Some("upstream_key")
+            );
+        }
+        engine
+            .reload_secrets_with_key(incoming, ContentKeySource::Unkeyed)
+            .await
+            .unwrap();
+        assert_eq!(handle.get().as_str(), "b".repeat(40));
+        assert!(
+            engine
+                .load_runtime()
+                .executor
+                .provenance_key()
+                .unwrap()
+                .digest(b"payload")
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(replacement_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn secret_reload_requires_a_document_and_keeps_capture_disabled() {
+        use crate::config::ContentKeySource;
+
+        let empty = PolicyEngine::default();
+        let error = empty
+            .reload_secrets(crate::secrets::SecretsConfig::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(*error, PluginError::Config { .. }), "{error}");
+        let (dir, yaml) = secret_fixture(&"a".repeat(40));
+        let engine = engine_reading_secrets(&yaml);
+        engine.initialize().await.unwrap();
+        engine
+            .reload_secrets_with_key(
+                parse_fixture_config(&yaml).unwrap().secrets,
+                ContentKeySource::Secret("upstream_key"),
+            )
+            .await
+            .unwrap();
+        let current = engine.load_runtime();
+        assert!(
+            !current
+                .policy_config
+                .as_ref()
+                .unwrap()
+                .engine_settings
+                .capture_content_provenance
+        );
+        assert!(current.executor.provenance_key().is_none());
+        assert_eq!(
+            current
+                .policy_config
+                .as_ref()
+                .unwrap()
+                .engine_settings
+                .content_provenance_key
+                .as_deref(),
+            Some("upstream_key")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn selecting_a_key_before_initialization_validates_disabled_capture() {
+        use crate::config::ContentKeySource;
+
+        let (dir, yaml) = secret_fixture("x");
+        let engine = engine_reading_secrets(&yaml);
+        let original = engine.load_runtime();
+        let error = engine
+            .reload_secrets_with_key(
+                parse_fixture_config(&yaml).unwrap().secrets,
+                ContentKeySource::Secret("upstream_key"),
+            )
+            .await
+            .expect_err("an explicit selection must validate its bytes even with capture disabled");
+        assert!(matches!(*error, PluginError::Config { .. }), "{error}");
+        assert!(Arc::ptr_eq(&original, &engine.load_runtime()));
+        assert!(engine.installed_secrets().is_none());
+        assert!(!engine.is_initialized());
+        std::fs::write(dir.join("upstream.key"), "a".repeat(40)).unwrap();
+        engine
+            .reload_secrets_with_key(
+                parse_fixture_config(&yaml).unwrap().secrets,
+                ContentKeySource::Secret("upstream_key"),
+            )
+            .await
+            .unwrap();
+        assert!(!engine.is_initialized());
+        let current = engine.load_runtime();
+        assert!(
+            !current
+                .policy_config
+                .as_ref()
+                .unwrap()
+                .engine_settings
+                .capture_content_provenance
+        );
+        assert!(current.executor.provenance_key().is_none());
+        assert_eq!(
+            resolved_secrets(&engine)
+                .value("upstream_key")
+                .unwrap()
+                .len(),
+            40
+        );
+        engine.initialize().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn secret_reload_stages_after_a_resolved_initialization_failure() {
+        let (dir, yaml) = secret_fixture("original\n");
+        std::fs::write(dir.join("next.key"), "replacement\n").unwrap();
+        let engine = Arc::new(PolicyEngine::default());
+        assert!(
+            engine.set_secret_providers(
+                crate::secrets::SecretProviderRegistry::with_builtin_backends()
+            )
+        );
+        let counts = Arc::new(ReloadLifecycleCounts::default());
+        engine.register_factory(
+            "test/reload-guard",
+            Box::new(ReloadGuardFactory {
+                counts: Arc::clone(&counts),
+                engine: Arc::downgrade(&engine),
+            }),
+        );
+        let yaml = format!(
+            "{yaml}\nplugins:\n  - name: gate\n    kind: test/reload-guard\n    hooks: [test_hook]\n    config: {{ fail_init: true }}\n"
+        );
+        engine
+            .load_config(parse_fixture_config(&yaml).unwrap())
+            .unwrap();
+        engine
+            .initialize()
+            .await
+            .expect_err("plugin initialization fails after secret resolution");
+        assert!(!engine.is_initialized());
+        let replacement = parse_fixture_config(&yaml.replace("ref: upstream.key", "ref: next.key"))
+            .unwrap()
+            .secrets;
+        engine.reload_secrets(replacement).await.unwrap();
+        assert_eq!(
+            resolved_secrets(&engine)
+                .value("upstream_key")
+                .unwrap()
+                .as_str(),
+            "replacement"
+        );
+        assert_eq!(counts.built.load(Ordering::Acquire), 1);
+        assert_eq!(counts.inits.load(Ordering::Acquire), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[cfg(feature = "crypto-rustcrypto")]
     #[tokio::test]
     async fn content_provenance_retains_a_valid_key_across_secret_reload() {
@@ -13039,23 +13472,128 @@ routes:
     // Test Utilities
     // -----------------------------------------------------------------------------
 
-    struct PausingReloadFactory {
-        entered: Arc<tokio::sync::Notify>,
-        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    #[derive(Default)]
+    struct ReloadLifecycleCounts {
+        built: AtomicUsize,
+        family_calls: AtomicUsize,
+        inits: AtomicUsize,
+        shutdowns: AtomicUsize,
     }
 
-    impl crate::factory::PluginFactory for PausingReloadFactory {
+    struct ReloadGuardFactory {
+        counts: Arc<ReloadLifecycleCounts>,
+        engine: std::sync::Weak<PolicyEngine>,
+    }
+
+    impl crate::factory::PluginFactory for ReloadGuardFactory {
         fn create(
             &self,
             config: &PluginConfig,
         ) -> Result<crate::factory::PluginInstance, Box<PluginError>> {
-            self.entered.notify_one();
-            self.release
-                .lock()
-                .expect("not poisoned")
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .expect("factory released before publication");
-            AllowPluginFactory.create(config)
+            self.counts.built.fetch_add(1, Ordering::AcqRel);
+            let companion = make_config(
+                &format!("{}_companion", config.name),
+                1,
+                PluginMode::Sequential,
+            );
+            self.engine
+                .upgrade()
+                .unwrap()
+                .register_handler::<TestHook, _>(
+                    Arc::new(AllowPlugin {
+                        cfg: companion.clone(),
+                    }),
+                    companion,
+                )
+                .unwrap();
+            let plugin = Arc::new(ReloadGuardPlugin {
+                cfg: config.clone(),
+                counts: Arc::clone(&self.counts),
+            });
+            Ok(crate::factory::PluginInstance {
+                plugin: plugin.clone(),
+                handlers: vec![(
+                    if config.hooks.iter().any(|hook| hook == "reload.guard") {
+                        "reload.guard"
+                    } else {
+                        "test_hook"
+                    },
+                    plugin,
+                )],
+            })
+        }
+    }
+
+    struct ReloadGuardPlugin {
+        cfg: PluginConfig,
+        counts: Arc<ReloadLifecycleCounts>,
+    }
+
+    #[async_trait]
+    impl Plugin for ReloadGuardPlugin {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+        async fn initialize_with(
+            &self,
+            _extensions: &crate::host::InitExtensions,
+        ) -> Result<(), Box<PluginError>> {
+            self.counts.inits.fetch_add(1, Ordering::AcqRel);
+            if self
+                .cfg
+                .config
+                .as_ref()
+                .and_then(|config| config.get("fail_init"))
+                .is_some_and(|value| value == &serde_json::Value::Bool(true))
+            {
+                return Err(config_error("fixture initialization failure".to_owned()));
+            }
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), Box<PluginError>> {
+            self.counts.shutdowns.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AnyHookHandler for ReloadGuardPlugin {
+        async fn invoke(
+            &self,
+            _payload: &dyn PluginPayload,
+            _extensions: &Extensions,
+            _context: &mut PluginContext,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+            Ok(crate::executor::erase_result(
+                PluginResult::<TestPayload>::allow(),
+            ))
+        }
+        fn hook_type_name(&self) -> &'static str {
+            self.counts.family_calls.fetch_add(1, Ordering::AcqRel);
+            "reload.guard"
+        }
+    }
+
+    async fn wait_for_secret_read(
+        entered: &tokio::sync::Notify,
+        worker: &mut tokio::task::JoinHandle<Result<(), Box<PluginError>>>,
+    ) {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::select! {
+                () = entered.notified() => None,
+                result = &mut *worker => Some(result),
+            }
+        })
+        .await;
+        match result {
+            Ok(None) => {},
+            Ok(Some(result)) => panic!("reload exited before the provider read: {result:?}"),
+            Err(error) => {
+                worker.abort();
+                let cleanup =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), &mut *worker).await;
+                panic!("provider read did not start: {error}; worker cleanup: {cleanup:?}");
+            },
         }
     }
 
@@ -13286,7 +13824,12 @@ routes:
                     "content_provenance_key: replacement_key",
                 );
             engine
-                .reload_config(parse_fixture_config(&changed).expect("reload config parses"))
+                .reload_secrets_with_key(
+                    parse_fixture_config(&changed)
+                        .expect("reload config parses")
+                        .secrets,
+                    crate::config::ContentKeySource::Secret("replacement_key"),
+                )
                 .await
                 .expect("valid new selection reloads");
             Some(other)
@@ -13549,6 +14092,67 @@ mod rate_limit_dispatch_tests {
     // -----------------------------------------------------------------------------
     // Tests
     // -----------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn secret_reload_retains_initialized_rate_limit_override_state() {
+        let dir =
+            std::env::temp_dir().join(format!("ppe-reload-override-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("first.key"), "first").unwrap();
+        std::fs::write(dir.join("second.key"), "second").unwrap();
+        let (engine, probe) = limiter_engine_unloaded();
+        assert!(
+            engine.set_secret_providers(
+                crate::secrets::SecretProviderRegistry::with_builtin_backends()
+            )
+        );
+        let yaml = format!(
+            "{LIMITERS}secrets:\n  providers:\n    local: {{kind: file, base_dir: {}}}\n  values:\n    key: {{provider: local, ref: first.key}}\nglobal:\n  rate_limits:\n    - name: edge-a\n      config: {{ tag: overridden }}\nroutes:\n  - tool: t\n",
+            dir.display()
+        );
+        engine
+            .load_config(crate::config::parse_config(&yaml).unwrap())
+            .unwrap();
+        engine.initialize().await.unwrap();
+        dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, named("tool", "t")).await;
+        let before = engine.load_runtime();
+        let original_id = before
+            .rate_limit_overrides
+            .values()
+            .next()
+            .unwrap()
+            .plugin_ref
+            .id();
+        engine
+            .reload_secrets(
+                crate::config::parse_config(&yaml.replace("ref: first.key", "ref: second.key"))
+                    .unwrap()
+                    .secrets,
+            )
+            .await
+            .unwrap();
+        dispatch(&engine, HOOK_RATELIMIT_PRE_IDENTITY, named("tool", "t")).await;
+        let after = engine.load_runtime();
+        assert!(Arc::ptr_eq(
+            &before.rate_limit_overrides,
+            &after.rate_limit_overrides
+        ));
+        assert_eq!(
+            after
+                .rate_limit_overrides
+                .values()
+                .next()
+                .unwrap()
+                .plugin_ref
+                .id(),
+            original_id
+        );
+        assert_eq!(probe.hits().last().unwrap().2, 2);
+        assert_eq!(probe.built.load(Ordering::Acquire), 5);
+        assert_eq!(probe.inits.load(Ordering::Acquire), 5);
+        assert_eq!(probe.shutdowns.load(Ordering::Acquire), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[tokio::test]
     async fn each_rate_limit_hook_runs_only_its_own_plugins_in_list_order() {

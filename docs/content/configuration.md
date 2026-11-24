@@ -485,17 +485,50 @@ generation again until the value changes once more.
 
 ### Secrets and reload
 
-Secrets are resolved once, during `initialize()`. A reload whose `secrets:`
-block differs from the resolved one is refused, naming the declaration that
-changed, and the running configuration and its credentials keep serving.
-Adding, removing, or repointing a declaration therefore takes a restart.
+Synchronous `load_config` refuses a changed `secrets:` block after secret
+resolution. The running document and credentials remain installed. Before
+initialization, the block can change because `initialize()` reads the loaded
+document.
 
-Rotating the bytes behind an existing reference is unaffected: that is what
-`refresh_secrets()` is for, and the reference does not change.
+Use `PolicyEngine::reload_secrets(SecretsConfig)` to apply secret declarations
+without replacing policy or plugins. New and changed bindings resolve before
+publication; a failed read leaves the whole replacement unapplied. Provider
+settings changes rebuild that provider. Unchanged bindings retain their cells,
+so existing `SecretRef` handles see later refreshes without resetting their
+generations. Handles for a removed or repointed binding stay on their old
+binding; obtain a new handle for its replacement.
 
-A host that reloads by constructing a new engine, loading the document into it,
-and calling `initialize()` sees none of this, since nothing is resolved yet at
-load time.
+```rust
+use praxis_policy::SecretsConfig;
+
+let replacement: SecretsConfig = serde_yaml::from_str(r"
+providers:
+  local: { kind: file, base_dir: /etc/ppe }
+values:
+  service_key: { provider: local, ref: service.key }
+")?;
+engine.reload_secrets(replacement).await?;
+```
+
+The provenance-key selection is retained. To add and select a new key in one
+operation, call `reload_secrets_with_key` with the replacement block and
+`ContentKeySource::Secret("new_key")`. The selected value must resolve to at
+least 32 bytes. `ContentKeySource::Unkeyed` explicitly selects plain SHA-256;
+`Secret("unkeyed")` is refused because that name is reserved. Capture mode
+remains unchanged. See [content provenance](auditing.md#content-provenance).
+
+Secret reload requires a loaded document. Ordinary `reload_secrets` defers reads
+until `initialize()` if no store has been resolved yet. `reload_secrets_with_key`
+always resolves and validates the replacement, including before initialization.
+Cancellation, invalid key
+material or a concurrent configuration change refuse the replacement. Policy
+annotations, plugin identities and state, rate-limit overrides, factory
+context and audit counters survive the operation. Policy or plugin changes
+require the host's configuration-loading workflow; this API accepts secret
+material and key selection only.
+
+Rotating bytes behind an existing reference still uses `refresh_secrets()`.
+No declaration changes on that path.
 
 ### Per-plugin secret sources
 

@@ -307,6 +307,13 @@ impl ReloadedSecrets {
         self.store.value(name).map(|value| value.len())
     }
 
+    /// A handle to a replacement binding, or `None` if it is undeclared.
+    ///
+    /// Retained bindings expose their previous bytes until publication.
+    pub(crate) fn secret(&self, name: &str) -> Option<SecretRef> {
+        self.store.secret(name)
+    }
+
     /// Commit staged values and return the replacement store.
     ///
     /// Call only after accepting the reload. Hold `previous`'s refresh lock

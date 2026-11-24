@@ -2411,6 +2411,152 @@ routes:
 "#;
 
     #[tokio::test]
+    async fn secret_reload_preserves_apl_policy_and_inherited_assertions() {
+        use praxis_policy_core::config::PolicyConfig;
+        use praxis_policy_core::secrets::SecretProviderRegistry;
+
+        let dir = std::env::temp_dir().join(format!(
+            "ppe-policy-secret-reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("first.key"), "first-secret").unwrap();
+        std::fs::write(dir.join("second.key"), "second-secret").unwrap();
+        let yaml = format!(
+            r#"
+engine_settings:
+  dispatch: policy
+secrets:
+  providers:
+    local: {{ kind: file, base_dir: {} }}
+  values:
+    key: {{ provider: local, ref: first.key }}
+global:
+  assertions:
+    request:
+      headers:
+        - name: X-API-Key
+          from: secret.key
+routes:
+  - http: /protected
+    authorization:
+      pre_invocation:
+        - "http.method == 'DELETE': deny"
+"#,
+            dir.display()
+        );
+        let engine = Arc::new(PolicyEngine::default());
+        assert!(engine.set_secret_providers(SecretProviderRegistry::with_builtin_backends()));
+        crate::register_apl(&engine, crate::AplOptions::in_process());
+        engine.load_config_yaml(&yaml).unwrap();
+        engine.initialize().await.unwrap();
+        for method in ["GET", "DELETE"] {
+            let (result, _) = engine
+                .invoke_named::<HttpHook>(
+                    HOOK_HTTP_REQUEST,
+                    HttpPayload,
+                    http_request(method, Some("/protected")),
+                    None,
+                )
+                .await;
+            assert_eq!(
+                result.continue_processing,
+                method == "GET",
+                "the original APL body decides {method}"
+            );
+            if method == "GET" {
+                let headers = &result
+                    .modified_extensions
+                    .as_ref()
+                    .unwrap()
+                    .http
+                    .as_ref()
+                    .unwrap()
+                    .request_headers;
+                assert_eq!(
+                    headers.get("X-API-Key").map(String::as_str),
+                    Some("first-secret")
+                );
+            }
+        }
+        let replacement: PolicyConfig =
+            serde_yaml::from_str(&yaml.replace("ref: first.key", "ref: second.key")).unwrap();
+        engine
+            .reload_secrets(replacement.secrets.clone())
+            .await
+            .unwrap();
+        for method in ["GET", "DELETE"] {
+            let (result, _) = engine
+                .invoke_named::<HttpHook>(
+                    HOOK_HTTP_REQUEST,
+                    HttpPayload,
+                    http_request(method, Some("/protected")),
+                    None,
+                )
+                .await;
+            assert_eq!(
+                result.continue_processing,
+                method == "GET",
+                "secret reload must preserve the compiled APL body for {method}"
+            );
+            if method == "GET" {
+                let headers = &result
+                    .modified_extensions
+                    .as_ref()
+                    .unwrap()
+                    .http
+                    .as_ref()
+                    .unwrap()
+                    .request_headers;
+                assert_eq!(
+                    headers.get("X-API-Key").map(String::as_str),
+                    Some("second-secret")
+                );
+            }
+        }
+        let mut invalid = replacement.secrets;
+        invalid.values.remove("key");
+        let error = engine.reload_secrets(invalid).await.unwrap_err();
+        assert!(
+            matches!(
+                *error,
+                praxis_policy_core::error::PluginError::Config { .. }
+            ),
+            "{error}"
+        );
+        let (result, _) = engine
+            .invoke_named::<HttpHook>(
+                HOOK_HTTP_REQUEST,
+                HttpPayload,
+                http_request("GET", Some("/protected")),
+                None,
+            )
+            .await;
+        assert!(
+            result.continue_processing,
+            "failed removal retains the allow outcome"
+        );
+        assert_eq!(
+            result
+                .modified_extensions
+                .as_ref()
+                .unwrap()
+                .http
+                .as_ref()
+                .unwrap()
+                .request_headers
+                .get("X-API-Key")
+                .map(String::as_str),
+            Some("second-secret")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn an_http_prefix_route_evaluates_its_policy_body() {
         let mgr = engine_with(HTTP_ROUTE_BODIES).await;
 
