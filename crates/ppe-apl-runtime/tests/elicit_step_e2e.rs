@@ -81,6 +81,7 @@ struct FakeApprover {
 }
 
 struct FakeApproverFactory {
+    check_outcome: Option<ElicitationOutcomeKind>,
     ledger: Arc<Mutex<Vec<OpRecord>>>,
 }
 
@@ -89,8 +90,12 @@ impl PluginFactory for FakeApproverFactory {
         let plugin = Arc::new(FakeApprover {
             cfg: config.clone(),
             ledger: Arc::clone(&self.ledger),
-            check_status: ElicitationStatusKind::Pending,
-            check_outcome: None,
+            check_status: if self.check_outcome.is_some() {
+                ElicitationStatusKind::Resolved
+            } else {
+                ElicitationStatusKind::Pending
+            },
+            check_outcome: self.check_outcome,
             validate_valid: true,
             deny_code: None,
         });
@@ -287,6 +292,7 @@ routes:
     mgr.register_factory(
         "fake-approver",
         Box::new(FakeApproverFactory {
+            check_outcome: None,
             ledger: Arc::clone(&ledger),
         }),
     );
@@ -344,6 +350,91 @@ routes:
     assert!(
         !record.saw_metadata,
         "recipient resolution must not expose metadata to the channel plugin"
+    );
+}
+
+#[tokio::test]
+async fn approval_scope_uses_metadata_without_a_baseline_grant() {
+    let yaml = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: manager-approver
+    kind: fake-approver
+    hooks: [elicit]
+routes:
+  - tool: payroll_adjust
+    authorization:
+      pre_invocation:
+        - 'require_approval(manager-approver, from: "alice@example.com", scope: "!metadata.account.suspended")'
+"#;
+    let ledger = Arc::new(Mutex::new(Vec::new()));
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_factory(
+        "fake-approver",
+        Box::new(FakeApproverFactory {
+            check_outcome: Some(ElicitationOutcomeKind::Approved),
+            ledger: Arc::clone(&ledger),
+        }),
+    );
+    let mut options = AplOptions::in_process();
+    options.base_capabilities = Some(std::collections::HashSet::new());
+    register_apl(&mgr, options);
+    mgr.load_config_yaml(yaml).expect("configuration loads");
+    mgr.initialize().await.expect("engine initializes");
+
+    for suspended in [false, true] {
+        let mut extensions = Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some("tool".to_owned()),
+                entity_name: Some("payroll_adjust".to_owned()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        extensions
+            .install_metadata(
+                "account",
+                "metadata/http",
+                AcquiredFacts::success(
+                    serde_json::json!({"suspended": suspended}),
+                    "2026-10-19T12:00:00Z".parse().expect("RFC3339 fixture"),
+                    MetadataCacheDisposition::Disabled,
+                ),
+            )
+            .expect("metadata fixture installs");
+
+        let (result, _background) = mgr
+            .invoke_named::<CmfHook>(
+                "cmf.tool_pre_invoke",
+                MessagePayload {
+                    message: Message::text(Role::User, "adjust payroll"),
+                },
+                extensions,
+                None,
+            )
+            .await;
+
+        assert_eq!(
+            result.continue_processing, !suspended,
+            "approval must honor the live account suspension: {:?}",
+            result.violation
+        );
+        if suspended {
+            let violation = result.violation.expect("scope denial has a violation");
+            assert!(
+                format!("{violation:?}").contains("scope not satisfied"),
+                "the scope predicate must deny a suspended account"
+            );
+        }
+    }
+    assert!(
+        ledger
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|record| !record.saw_metadata),
+        "scope access must not grant metadata to the approval channel"
     );
 }
 

@@ -448,7 +448,8 @@ impl PdpResolver for CelResolver {
             return true;
         };
         self.get_or_compile(expr).map_or(true, |program| {
-            program.references().has_variable("metadata")
+            let references = program.references();
+            references.has_variable("metadata") || references.has_variable(".metadata")
         })
     }
 
@@ -760,7 +761,11 @@ mod tests {
 
         assert!(resolver.requires_metadata(&cel_call("metadata[\"account\"].active")));
         assert!(resolver.requires_metadata(&cel_call("size(metadata) > 0")));
+        assert!(resolver.requires_metadata(&cel_call("!.metadata.account.suspended")));
+        assert!(resolver.requires_metadata(&cel_call("size(.metadata) > 0")));
         assert!(!resolver.requires_metadata(&cel_call("subject.note == 'metadata.account'")));
+        assert!(!resolver.requires_metadata(&cel_call("subject.note == '.metadata.account'")));
+        assert!(!resolver.requires_metadata(&cel_call(".subject.active == true")));
         assert!(!resolver.requires_metadata(&cel_call("subject.active == true")));
     }
 

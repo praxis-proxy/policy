@@ -50,6 +50,7 @@ use praxis_policy_core::plugin::OnError;
 use praxis_policy_core::registry::HookEntry;
 
 use praxis_policy_apl_core::constraint::{RestrictSpec, StringSetSpec};
+use praxis_policy_apl_core::parser::parse_predicate;
 use praxis_policy_apl_core::pipeline::{FieldRule, Stage};
 use praxis_policy_apl_core::plugin_decl::{EffectivePlugin, PluginRegistry};
 use praxis_policy_apl_core::rules::{CompiledRoute, Condition, Effect, Expression};
@@ -645,7 +646,13 @@ fn effect_uses_metadata(
         Effect::FieldOp { path, stages } => {
             field_op_runs_in_half(path, request_half) && stages_use_metadata(stages)
         },
-        Effect::Elicit(step) => attribute_path_uses_metadata(&step.from),
+        Effect::Elicit(step) => {
+            attribute_path_uses_metadata(&step.from)
+                || step.scope.as_deref().is_some_and(|scope| {
+                    parse_predicate(scope)
+                        .is_ok_and(|expression| expression_uses_metadata(&expression))
+                })
+        },
         Effect::Restrict { spec } => restrict_uses_metadata(spec),
         _ => false,
     }
@@ -1043,7 +1050,7 @@ mod cache_tests {
     use praxis_policy_apl_core::constraint::{OnEmpty, RestrictSpec, StringSetSpec};
     use praxis_policy_apl_core::pipeline::{FieldRule, Pipeline, Stage};
     use praxis_policy_apl_core::rules::{Condition, Effect, Expression};
-    use praxis_policy_apl_core::step::{FetchStep, PdpCall, PdpDialect};
+    use praxis_policy_apl_core::step::{ElicitKind, ElicitStep, FetchStep, PdpCall, PdpDialect};
 
     #[tokio::test]
     async fn stale_generation_reuses_the_newer_initialized_plan() {
@@ -1072,6 +1079,43 @@ mod cache_tests {
             Arc::ptr_eq(&installed, &subsequent),
             "the stale request must not evict the current generation's plan"
         );
+    }
+
+    #[test]
+    fn elicitation_scope_grants_metadata_only_for_referenced_attributes() {
+        for (scope, expected) in [
+            (None, false),
+            (Some("!metadata.account.suspended"), true),
+            (Some("subject.active & !metadata.account.suspended"), true),
+            (Some("data.tenants[metadata.account.id].active"), true),
+            (Some("subject.note == 'metadata.account'"), false),
+            (Some("args.amount <= 25000"), false),
+            (Some("metadata.account.suspended &"), false),
+        ] {
+            let mut route = CompiledRoute::new("tool:approval");
+            route.post_invocation.push(Effect::Elicit(ElicitStep {
+                kind: ElicitKind::Approval,
+                plugin_name: "approver".to_owned(),
+                channel: None,
+                from: "alice@example.com".to_owned(),
+                purpose: None,
+                scope: scope.map(str::to_owned),
+                timeout: None,
+                config_override: None,
+                on_error: None,
+                source: "approval".to_owned(),
+            }));
+
+            assert_eq!(
+                route_uses_metadata(&route, false, None),
+                expected,
+                "response metadata inference must inspect scope {scope:?}"
+            );
+            assert!(
+                !route_uses_metadata(&route, true, None),
+                "a response approval must not grant request metadata"
+            );
+        }
     }
 
     #[test]
