@@ -1034,17 +1034,18 @@ Tested: inbound verification against Keycloak 26.8 (`dpop_live`, see
 
 **Use this when** a caller presents a token only the cluster can vouch for: a
 legacy Secret-based ServiceAccount token, which never expires and is revoked
-only by deleting its Secret; a bound token that must stop working as soon as
-its pod is deleted; or a token the cluster authenticates through a webhook or
-maps through its OIDC settings. It also returns the user's groups, which a
-ServiceAccount JWT does not carry.
+only by deleting its Secret; a bound token that must stop working soon after
+its pod is deleted, within the revocation window described below; or a token
+the cluster authenticates through a webhook or maps through its OIDC settings.
+It also returns the user's groups, which a ServiceAccount JWT does not carry.
 
 **Prefer instead** `identity/jwt` against the cluster's issuer for projected
 ServiceAccount tokens. It verifies them locally, with no call to the API server
-per request and no dependency on its availability. It needs the cluster's
-issuer discovery and JWKS reachable from PPE, which managed clusters publish
-and a self-managed one grants with a binding for `system:unauthenticated`, and
-it sees only the namespace and ServiceAccount, not groups. Treat legacy tokens
+per request. It still needs the cluster's JWKS, fetched at startup and on
+refresh, and keeps the last key set if a refresh fails. The issuer discovery
+and JWKS must be reachable from PPE: managed clusters publish them, and a
+self-managed one grants access with a binding for `system:unauthenticated`. It
+sees only the namespace and ServiceAccount, not groups. Treat legacy tokens
 as something to migrate off rather than a reason to keep this path: they never
 expire, and Kubernetes now removes unused ones.
 
