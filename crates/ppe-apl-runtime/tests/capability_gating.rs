@@ -143,7 +143,35 @@ impl HookHandler<CmfHook> for MetadataReader {
 }
 
 struct MetadataReaderFactory {
+    hook: &'static str,
     observed: Arc<std::sync::Mutex<Vec<bool>>>,
+}
+
+struct MetadataPdpRecorder {
+    observed: Arc<std::sync::Mutex<Vec<bool>>>,
+    requires_metadata: bool,
+}
+
+#[async_trait]
+impl PdpResolver for MetadataPdpRecorder {
+    fn dialect(&self) -> PdpDialect {
+        PdpDialect::Cel
+    }
+
+    fn requires_metadata(&self, _call: &PdpCall) -> bool {
+        self.requires_metadata
+    }
+
+    async fn evaluate(&self, _call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
+        self.observed
+            .lock()
+            .unwrap()
+            .push(bag.contains("metadata.account.active"));
+        Ok(PdpDecision {
+            decision: Decision::Allow,
+            diagnostics: Vec::new(),
+        })
+    }
 }
 
 impl PluginFactory for MetadataReaderFactory {
@@ -155,7 +183,7 @@ impl PluginFactory for MetadataReaderFactory {
         Ok(PluginInstance {
             plugin: plugin.clone(),
             handlers: vec![(
-                "cmf.tool_pre_invoke",
+                self.hook,
                 Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(plugin)),
             )],
         })
@@ -353,8 +381,12 @@ fn extensions_with_label(label: &str) -> Extensions {
 }
 
 fn extensions_with_metadata(active: bool) -> Extensions {
+    extensions_with_metadata_for("get_weather", active)
+}
+
+fn extensions_with_metadata_for(tool: &str, active: bool) -> Extensions {
     let mut extensions = Extensions {
-        meta: Some(Arc::new(meta_for_tool("get_weather"))),
+        meta: Some(Arc::new(meta_for_tool(tool))),
         ..Default::default()
     };
     extensions
@@ -362,7 +394,7 @@ fn extensions_with_metadata(active: bool) -> Extensions {
             "account",
             "metadata/http",
             AcquiredFacts::success(
-                serde_json::json!({"active": active}),
+                serde_json::json!({"active": active, "allowed_regions": ["eu"]}),
                 "2026-10-19T12:00:00Z"
                     .parse()
                     .expect("a literal RFC3339 instant"),
@@ -512,9 +544,336 @@ routes:
 
     assert!(
         result.continue_processing,
-        "the synthetic APL handler holds read_metadata intrinsically: {:?}",
+        "the synthetic APL handler infers read_metadata from the predicate: {:?}",
         result.violation
     );
+}
+
+#[tokio::test]
+async fn conditional_args_pipeline_reads_inferred_metadata_end_to_end() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: classify
+    args:
+      city: "str | redact(metadata.account.active)"
+    authorization:
+      pre_invocation:
+        - allow
+"#;
+
+    let mgr = Arc::new(PolicyEngine::default());
+    register_apl(&mgr, AplOptions::in_process());
+    mgr.load_config_yaml(YAML).expect("configuration loads");
+    mgr.initialize().await.expect("engine initializes");
+
+    let (result, _) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            tool_call_payload(serde_json::json!({"city": "Paris"})),
+            extensions_with_metadata_for("classify", true),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.continue_processing,
+        "the conditional pipeline should allow: {:?}",
+        result.violation
+    );
+    assert!(
+        result.modified_payload.is_some(),
+        "a true metadata condition must redact the argument"
+    );
+}
+
+#[tokio::test]
+async fn metadata_backed_restriction_reads_inferred_metadata_end_to_end() {
+    const YAML: &str = "
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - restrict:
+            allow_regions: metadata.account.allowed_regions
+";
+
+    let mgr = Arc::new(PolicyEngine::default());
+    register_apl(&mgr, AplOptions::in_process());
+    mgr.load_config_yaml(YAML).expect("configuration loads");
+    mgr.initialize().await.expect("engine initializes");
+
+    let (result, _) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("metadata-backed restriction"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.continue_processing,
+        "the metadata-backed restriction should allow: {:?}",
+        result.violation
+    );
+    let constraint = result
+        .modified_extensions
+        .and_then(|extensions| extensions.candidate_constraint.clone())
+        .expect("the restriction should emit a candidate constraint");
+    assert_eq!(
+        constraint.allow_regions.as_deref(),
+        Some(&["eu".to_owned()][..])
+    );
+}
+
+#[tokio::test]
+async fn resolver_policy_dependency_grants_metadata_end_to_end() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: "true"
+"#;
+
+    let mgr = Arc::new(PolicyEngine::default());
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut options = AplOptions::in_process();
+    options.pdps.push(Arc::new(MetadataPdpRecorder {
+        observed: Arc::clone(&observed),
+        requires_metadata: true,
+    }));
+    register_apl(&mgr, options);
+    mgr.load_config_yaml(YAML).expect("configuration loads");
+    mgr.initialize().await.expect("engine initializes");
+
+    let (result, _) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("metadata-backed PDP"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.continue_processing,
+        "the resolver-backed route should allow: {:?}",
+        result.violation
+    );
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![true],
+        "a resolver's compiled-policy dependency must widen the synthetic handler"
+    );
+}
+
+#[tokio::test]
+async fn metadata_capability_is_inferred_per_request_and_response_half() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: "true"
+      post_invocation:
+        - "require(metadata.account.active)"
+        - cel:
+            expr: "true"
+"#;
+
+    let mgr = Arc::new(PolicyEngine::default());
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut options = AplOptions::in_process();
+    options.pdps.push(Arc::new(MetadataPdpRecorder {
+        observed: Arc::clone(&observed),
+        requires_metadata: false,
+    }));
+    register_apl(&mgr, options);
+    mgr.load_config_yaml(YAML).expect("configuration loads");
+    mgr.initialize().await.expect("engine initializes");
+
+    for hook in ["cmf.tool_pre_invoke", "cmf.tool_post_invoke"] {
+        let (result, _) = mgr
+            .invoke_named::<CmfHook>(
+                hook,
+                cmf_payload("phase-specific metadata"),
+                extensions_with_metadata(true),
+                None,
+            )
+            .await;
+        assert!(
+            result.continue_processing,
+            "{hook} should allow: {:?}",
+            result.violation
+        );
+    }
+
+    assert_eq!(
+        *observed.lock().unwrap(),
+        vec![false, true],
+        "only the response half should receive metadata"
+    );
+}
+
+#[tokio::test]
+async fn response_plugin_capability_does_not_widen_request_handler() {
+    const YAML: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: metadata-reader
+    kind: metadata-reader
+    hooks: [cmf.tool_post_invoke]
+    capabilities: [read_metadata]
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: "true"
+      post_invocation:
+        - "run(metadata-reader)"
+"#;
+
+    let plugin_observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pdp_observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_factory(
+        "metadata-reader",
+        Box::new(MetadataReaderFactory {
+            hook: "cmf.tool_post_invoke",
+            observed: Arc::clone(&plugin_observed),
+        }),
+    );
+    let mut options = AplOptions::in_process();
+    options.pdps.push(Arc::new(MetadataPdpRecorder {
+        observed: Arc::clone(&pdp_observed),
+        requires_metadata: false,
+    }));
+    register_apl(&mgr, options);
+    mgr.load_config_yaml(YAML).expect("configuration loads");
+    mgr.initialize().await.expect("engine initializes");
+
+    let (result, _) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("phase-specific plugin capability"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.continue_processing,
+        "the request handler should allow: {:?}",
+        result.violation
+    );
+    assert_eq!(
+        *pdp_observed.lock().unwrap(),
+        vec![false],
+        "a response-only plugin must not grant metadata to the request handler"
+    );
+    assert!(
+        plugin_observed.lock().unwrap().is_empty(),
+        "the response-only plugin must not run on the request hook"
+    );
+}
+
+#[tokio::test]
+async fn metadata_capability_is_recomputed_when_configuration_reloads() {
+    const WITHOUT_METADATA: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: "true"
+"#;
+    const WITH_METADATA: &str = r#"
+engine_settings:
+  dispatch: policy
+plugins: []
+routes:
+  - tool: get_weather
+    authorization:
+      pre_invocation:
+        - "require(metadata.account.active)"
+        - cel:
+            expr: "true"
+"#;
+
+    let mgr = Arc::new(PolicyEngine::default());
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut options = AplOptions::in_process();
+    options.pdps.push(Arc::new(MetadataPdpRecorder {
+        observed: Arc::clone(&observed),
+        requires_metadata: false,
+    }));
+    register_apl(&mgr, options);
+
+    mgr.load_config_yaml(WITHOUT_METADATA)
+        .expect("the initial configuration loads");
+    mgr.initialize()
+        .await
+        .expect("the initial configuration initializes");
+    let (initial, _) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("initial"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+    assert!(initial.continue_processing);
+    assert_eq!(*observed.lock().unwrap(), vec![false]);
+
+    mgr.load_config_yaml(WITH_METADATA)
+        .expect("the metadata configuration reloads");
+    let (with_metadata, _) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("with metadata"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+    assert!(
+        with_metadata.continue_processing,
+        "the reloaded metadata predicate must see the metadata slot: {:?}",
+        with_metadata.violation
+    );
+    assert_eq!(*observed.lock().unwrap(), vec![false, true]);
+
+    mgr.load_config_yaml(WITHOUT_METADATA)
+        .expect("the non-metadata configuration reloads again");
+    let (final_result, _) = mgr
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            cmf_payload("final"),
+            extensions_with_metadata(true),
+            None,
+        )
+        .await;
+    assert!(final_result.continue_processing);
+    assert_eq!(*observed.lock().unwrap(), vec![false, true, false]);
 }
 
 /// Run `metadata-reader` from a route with the given plugin capabilities and
@@ -541,6 +900,7 @@ routes:
     mgr.register_factory(
         "metadata-reader",
         Box::new(MetadataReaderFactory {
+            hook: "cmf.tool_pre_invoke",
             observed: Arc::clone(&observed),
         }),
     );

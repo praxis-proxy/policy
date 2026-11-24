@@ -312,6 +312,17 @@ pub struct PdpCall {
 }
 
 impl PdpCall {
+    /// Whether the authored call arguments contain a metadata namespace
+    /// reference.
+    ///
+    /// This is a conservative fallback for resolvers that cannot expose
+    /// parsed dependency information. It recognizes dotted, whole-namespace,
+    /// and bracketed evaluator forms while ignoring quoted literals and
+    /// comments.
+    pub fn references_metadata(&self) -> bool {
+        yaml_references_metadata(&self.args)
+    }
+
     /// Whether the step requires a host-supplied LLM request document.
     pub fn requires_llm_request(&self) -> bool {
         self.args
@@ -399,6 +410,17 @@ pub trait PdpResolver: Send + Sync {
     /// to the resolver whose `dialect()` matches `Step::Pdp.call.dialect`.
     fn dialect(&self) -> PdpDialect;
 
+    /// Whether evaluating `call` may read acquired metadata from the policy
+    /// bag.
+    ///
+    /// The conservative default preserves metadata for host-defined and
+    /// remote resolvers whose policy dependencies are opaque to APL. Resolvers
+    /// that can inspect their compiled policy should override this so routes
+    /// that do not use metadata retain least privilege.
+    fn requires_metadata(&self, _call: &PdpCall) -> bool {
+        true
+    }
+
     /// Evaluate a call against the bag and return its decision.
     ///
     /// # Errors
@@ -461,6 +483,171 @@ pub trait PdpResolver: Send + Sync {
         }
         Ok(())
     }
+}
+
+fn yaml_references_metadata(value: &serde_yaml::Value) -> bool {
+    match value {
+        serde_yaml::Value::String(source) => source_references_metadata(source),
+        serde_yaml::Value::Sequence(values) => values.iter().any(yaml_references_metadata),
+        serde_yaml::Value::Mapping(values) => values
+            .iter()
+            .any(|(key, value)| yaml_references_metadata(key) || yaml_references_metadata(value)),
+        serde_yaml::Value::Tagged(tagged) => yaml_references_metadata(&tagged.value),
+        _ => false,
+    }
+}
+
+/// Whether evaluator source refers to the acquired `metadata` namespace.
+///
+/// The scanner intentionally understands only identifier, quoting, comment,
+/// and bracket-access boundaries common to CEL, Rego, and Cedar. Resolver
+/// implementations should prefer their parsed representation when available.
+pub fn source_references_metadata(source: &str) -> bool {
+    source_has_reference(source, |identifier, bytes, index| {
+        identifier == "metadata" || bracketed_metadata_after(bytes, index)
+    })
+}
+
+/// Whether evaluator source refers to `metadata` below `root`.
+///
+/// This is used when a resolver has a fixed policy input root, such as
+/// `input.metadata` in Rego or `context.metadata` in Cedar. It avoids treating
+/// an unrelated `data.metadata` or resource property as acquired metadata.
+pub fn source_references_metadata_under(source: &str, root: &str) -> bool {
+    source_has_reference(source, |identifier, bytes, index| {
+        identifier == root && metadata_accessor_after(bytes, index)
+    })
+}
+
+fn source_has_reference(
+    source: &str,
+    mut is_reference: impl FnMut(&str, &[u8], usize) -> bool,
+) -> bool {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        match byte {
+            b'\'' | b'"' | b'`' => index = skip_quoted(bytes, index),
+            b'#' => index = skip_line(bytes, index),
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index = skip_line(bytes, index + 2);
+            },
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = skip_block_comment(bytes, index + 2);
+            },
+            byte if is_identifier_start(byte) => {
+                let start = index;
+                index = identifier_end(bytes, index);
+                if source
+                    .get(start..index)
+                    .is_some_and(|identifier| is_reference(identifier, bytes, index))
+                {
+                    return true;
+                }
+            },
+            _ => index += 1,
+        }
+    }
+    false
+}
+
+fn identifier_end(bytes: &[u8], mut index: usize) -> usize {
+    index += 1;
+    while bytes
+        .get(index)
+        .is_some_and(|byte| is_identifier_continue(*byte))
+    {
+        index += 1;
+    }
+    index
+}
+
+fn metadata_accessor_after(bytes: &[u8], index: usize) -> bool {
+    if bracketed_metadata_after(bytes, index) {
+        return true;
+    }
+    let mut index = skip_whitespace(bytes, index);
+    if bytes.get(index) != Some(&b'.') {
+        return false;
+    }
+    index = skip_whitespace(bytes, index + 1);
+    let Some(end) = index.checked_add("metadata".len()) else {
+        return false;
+    };
+    bytes.get(index..end) == Some(b"metadata")
+        && bytes
+            .get(end)
+            .is_none_or(|byte| !is_identifier_continue(*byte))
+}
+
+fn bracketed_metadata_after(bytes: &[u8], mut index: usize) -> bool {
+    index = skip_whitespace(bytes, index);
+    if bytes.get(index) != Some(&b'[') {
+        return false;
+    }
+    index += 1;
+    index = skip_whitespace(bytes, index);
+    let Some(quote @ (b'\'' | b'"' | b'`')) = bytes.get(index).copied() else {
+        return false;
+    };
+    index += 1;
+    let Some(end) = index.checked_add("metadata".len()) else {
+        return false;
+    };
+    if bytes.get(index..end) != Some(b"metadata") || bytes.get(end) != Some(&quote) {
+        return false;
+    }
+    index = end + 1;
+    index = skip_whitespace(bytes, index);
+    bytes.get(index) == Some(&b']')
+}
+
+fn skip_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    index
+}
+
+fn skip_quoted(bytes: &[u8], start: usize) -> usize {
+    let Some(&quote) = bytes.get(start) else {
+        return bytes.len();
+    };
+    let mut index = start + 1;
+    while let Some(&byte) = bytes.get(index) {
+        if byte == b'\\' {
+            index = index.saturating_add(2);
+        } else if byte == quote {
+            return index + 1;
+        } else {
+            index += 1;
+        }
+    }
+    bytes.len()
+}
+
+fn skip_line(bytes: &[u8], start: usize) -> usize {
+    let Some(tail) = bytes.get(start..) else {
+        return bytes.len();
+    };
+    tail.iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(bytes.len(), |offset| start + offset + 1)
+}
+
+fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
+    bytes
+        .get(start..)
+        .and_then(|tail| tail.windows(2).position(|window| window == b"*/"))
+        .map_or(bytes.len(), |offset| start + offset + 2)
+}
+
+const fn is_identifier_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+const fn is_identifier_continue(byte: u8) -> bool {
+    is_identifier_start(byte) || byte.is_ascii_digit()
 }
 
 /// Structured values an APL route can supply to a PDP step.
@@ -1261,6 +1448,88 @@ mod tests {
         assert_eq!(json, "\"cel\"");
         let back: PdpDialect = serde_json::from_str(&json).unwrap();
         assert_eq!(back, PdpDialect::Cel);
+    }
+
+    #[test]
+    fn pdp_call_detects_metadata_references_across_evaluator_syntaxes() {
+        for source in [
+            "metadata.account.active",
+            "metadata[\"account\"].active",
+            "size(metadata) > 0",
+            "input.metadata.account",
+            "input['metadata'].account",
+            "context.metadata.account",
+        ] {
+            let call = PdpCall {
+                dialect: PdpDialect::Opa,
+                args: serde_yaml::Value::String(source.to_owned()),
+            };
+
+            assert!(
+                call.references_metadata(),
+                "metadata reference should be detected: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn pdp_call_ignores_metadata_text_that_is_not_a_reference() {
+        for source in [
+            r#"subject.note == "metadata.account""#,
+            "https://metadata.example",
+            "subject.active // metadata.account",
+            "subject.active /* metadata.account */",
+            "subject.active # metadata.account",
+            "subject.note == `metadata.account`",
+            "metadata_value == true",
+        ] {
+            let call = PdpCall {
+                dialect: PdpDialect::Opa,
+                args: serde_yaml::Value::String(source.to_owned()),
+            };
+
+            assert!(
+                !call.references_metadata(),
+                "non-reference text should not require metadata: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn pdp_call_detects_metadata_in_nested_and_tagged_yaml() {
+        let call = PdpCall {
+            dialect: PdpDialect::Opa,
+            args: serde_yaml::from_str(
+                r#"
+query:
+  nested:
+    - !expression 'input["metadata"].account'
+"#,
+            )
+            .unwrap(),
+        };
+
+        assert!(call.references_metadata());
+    }
+
+    #[test]
+    fn rooted_metadata_scanning_distinguishes_policy_namespaces() {
+        assert!(source_references_metadata_under(
+            "input.metadata.account.active",
+            "input"
+        ));
+        assert!(source_references_metadata_under(
+            "input [ `metadata` ].account.active",
+            "input"
+        ));
+        assert!(!source_references_metadata_under(
+            "data.metadata.account.active",
+            "input"
+        ));
+        assert!(!source_references_metadata_under(
+            "input.metadata_value",
+            "input"
+        ));
     }
 
     /// Records the bag it was handed and overrides nothing but `evaluate`.

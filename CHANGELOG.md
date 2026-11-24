@@ -92,6 +92,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   typed record required for publication. Sources must declare `metadata.fetch`
   and use `on_error: fail` or `ignore`.
   ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Breaking for route capability grants:** ordinary `run()` and field-pipeline
+  plugin capabilities now contribute only to the request or response handler
+  half where that plugin runs. Delegation, elicitation, and metadata-fetch
+  plugins still contribute their declared capabilities to both halves.
+  Predicates on the other half that read `client.*`, `caller.workload.*`, or
+  `this.workload.*` need `read_client` or `read_workload` in the host baseline.
+  ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 ### Fixed
 
@@ -261,8 +268,14 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   [#184](https://github.com/praxis-proxy/policy/issues/184).
 - APL attribute paths accept one leading `$` on a segment after the first,
   so policies read provenance leaves such as `metadata.account.$outcome`.
-  Route predicates read `metadata.*` without a host grant: the synthetic APL
-  handler holds `read_metadata` intrinsically.
+  The synthetic APL handler infers `read_metadata` independently for the
+  request and response halves from predicates, elicitation recipients and
+  scopes, field pipelines, restrictions, fetches, and PDP policy dependencies.
+  Custom PDP resolvers can report opaque policy dependencies through
+  `PdpResolver::requires_metadata`.
+  `source_references_metadata` and `source_references_metadata_under` are
+  available to resolver implementations that need conservative source scans.
+  ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 - **Typed credential locations for the `identity/jwt` plugin.** The plugin can
   now extract bearer JWTs from HTTP headers, cookies, or query parameters — one
