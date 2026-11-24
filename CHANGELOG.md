@@ -904,7 +904,10 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [0.2.0] - 2026-09-03
 
-> **Upgrading from 0.1.0?** Configurations require changes: this release removes ten keys, changes the default dispatch mode, and tightens APL lexical rules. `docs/upgrade-apl.md` lists the required rewrites with before-and-after examples.
+> **Upgrading from 0.1.0?** Configurations require changes: this release removes
+> ten keys, changes the default dispatch mode, and tightens APL lexical rules.
+> `docs/content/guides/upgrade-apl.md` lists the required rewrites with
+> before-and-after examples.
 >
 > `docs/content/apl/apl-grammar.md` is the normative APL grammar, replacing the parser's inline grammar comments.
 
