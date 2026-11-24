@@ -211,6 +211,11 @@ Any plugin that fetches JWKS, exchanges a token, or dispatches a CIBA
 prompt must declare it. See [Builtins](builtins.md) for how the bundled
 ones do.
 
+`read_secret:<name>` also gates something other than a slot: one declared
+secret, which a plugin exchanges for a handle during initialization. It names
+the value it grants, so an entry lists one per secret. See [Reading a secret
+from a plugin](configuration.md#reading-a-secret-from-a-plugin).
+
 ## Mutability tiers
 
 Extensions differ in how they may change during a request, and the runtime

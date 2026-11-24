@@ -272,12 +272,13 @@ impl SourcePath {
     /// on what a slot is, and the artifact prints it beside each header.
     ///
     /// A secret answers `None`, and that is the honest answer rather than a
-    /// gap: there is no plugin-facing secret read, so no capability grants one.
-    /// Naming a capability here would print one in the artifact and tell an
-    /// operator that a plugin holding it could read the value, which is the
-    /// blanket `read_secrets` grant the secrets work deliberately did not ship.
-    /// A per-secret grant, when there is a consumer to scope it against, is
-    /// what turns this into a `Some`.
+    /// gap: no plugin reads this slot. A plugin reaches a secret by name, once,
+    /// during `initialize_with`, under a per-name `read_secret:<name>` grant
+    /// that [`Capability`] cannot carry because it names a value. Naming a
+    /// capability here would print one in the artifact and tell an operator
+    /// that a plugin holding it could read every secret this path names, which
+    /// is the blanket `read_secrets` grant the secrets work deliberately did
+    /// not ship.
     #[must_use]
     pub fn capability(&self) -> Option<Capability> {
         match self {

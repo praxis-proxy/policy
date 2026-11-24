@@ -48,11 +48,19 @@
 // }
 // ```
 //
+// Secrets are the one exception to "operations, not accessors". A plugin
+// exchanges a name its entry grants (`read_secret:<name>`) for a `SecretRef`
+// during `initialize_with` and keeps it, because the handle is what a refresh
+// reaches; asking again per request would buy nothing. The grant is decided
+// per plugin entry at that point, and a reload that withdraws it builds new
+// instances that never receive the handle.
+//
 // `InitExtensions` is a distinct type rather than an `Extensions` with
 // every slot empty. Handing a plugin a request context when there is no
 // request invites reading `ext.security` at startup and getting a
 // confusing `None`; here there is nothing to reach for.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -61,6 +69,29 @@ use async_trait::async_trait;
 
 use crate::http::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
 use crate::http_retry::RetryPolicy;
+use crate::secrets::SecretRef;
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Service name used in [`ServiceError`] messages.
+pub const HTTP_SERVICE: &str = "http";
+
+/// Capability that gates the HTTP service, matching
+/// `Capability::PerformHttp`'s serialized form.
+pub const HTTP_CAPABILITY: &str = "perform_http";
+
+/// The prefix of a per-secret read grant, written `read_secret:<name>`.
+///
+/// One grant per declared value rather than one capability for all of them,
+/// so a plugin reaches exactly the secrets its own entry names. See
+/// [`secret_capability`].
+pub const SECRET_CAPABILITY_PREFIX: &str = "read_secret:";
+
+// -----------------------------------------------------------------------------
+// Public types and functions
+// -----------------------------------------------------------------------------
 
 /// One HTTP operation authorized while a host-service carrier was borrowed.
 ///
@@ -353,6 +384,12 @@ impl HttpTransportSlot {
 #[derive(Debug, Default)]
 pub struct InitExtensions {
     http: HttpTransportSlot,
+
+    /// The secrets this plugin's entry grants, by name.
+    ///
+    /// `None` for a grant naming a value nothing declares, so the plugin's
+    /// error says to declare it rather than to grant it.
+    secrets: HashMap<String, Option<SecretRef>>,
 }
 
 impl InitExtensions {
@@ -381,6 +418,60 @@ impl InitExtensions {
         self.http = HttpTransportSlot::withheld();
         self
     }
+
+    /// Grant the declared secret `name`, having already decided the plugin
+    /// holds its [`secret_capability`].
+    #[must_use]
+    pub fn with_secret(mut self, name: impl Into<String>, secret: SecretRef) -> Self {
+        self.secrets.insert(name.into(), Some(secret));
+        self
+    }
+
+    /// Record a grant for `name` that no declared value backs.
+    #[must_use]
+    pub fn with_undeclared_secret(mut self, name: impl Into<String>) -> Self {
+        self.secrets.insert(name.into(), None);
+        self
+    }
+
+    /// Exchange the name of a declared secret for a handle to its value.
+    ///
+    /// The plugin's entry must hold `read_secret:<name>`, and `secrets.values`
+    /// must declare `name`. Every declared value is resolved before any plugin
+    /// initializes, so a granted handle always has a value behind it.
+    ///
+    /// Keep the [`SecretRef`], not what [`SecretRef::get`] returns: the handle
+    /// reads through, so a host's `refresh_secrets()` reaches it. Unlike the
+    /// HTTP operation, this is offered here only and not at request time. The
+    /// grant is fixed for the life of the plugin instance, and a reload that
+    /// drops it builds a new instance that never receives the handle.
+    ///
+    /// ```
+    /// use praxis_policy_core::host::{InitExtensions, SecretAccessError};
+    ///
+    /// let ext = InitExtensions::new();
+    /// assert_eq!(
+    ///     ext.resolve_secret("verifier_token").unwrap_err(),
+    ///     SecretAccessError::NotPermitted { name: "verifier_token".to_owned() },
+    /// );
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`SecretAccessError::NotPermitted`] when the entry does not grant
+    /// `name`, and [`SecretAccessError::Undeclared`] when it does and nothing
+    /// declares it.
+    pub fn resolve_secret(&self, name: &str) -> Result<SecretRef, SecretAccessError> {
+        match self.secrets.get(name) {
+            Some(Some(secret)) => Ok(secret.clone()),
+            Some(None) => Err(SecretAccessError::Undeclared {
+                name: name.to_owned(),
+            }),
+            None => Err(SecretAccessError::NotPermitted {
+                name: name.to_owned(),
+            }),
+        }
+    }
 }
 
 #[async_trait]
@@ -394,12 +485,48 @@ impl HostServices for InitExtensions {
     }
 }
 
-/// Service name used in [`ServiceError`] messages.
-pub const HTTP_SERVICE: &str = "http";
+/// The capability that grants a plugin the declared secret `name`.
+///
+/// ```
+/// use praxis_policy_core::host::secret_capability;
+///
+/// assert_eq!(secret_capability("verifier_token"), "read_secret:verifier_token");
+/// ```
+#[must_use]
+pub fn secret_capability(name: &str) -> String {
+    format!("{SECRET_CAPABILITY_PREFIX}{name}")
+}
 
-/// Capability that gates the HTTP service, matching
-/// `Capability::PerformHttp`'s serialized form.
-pub const HTTP_CAPABILITY: &str = "perform_http";
+/// Why a plugin could not have a declared secret.
+///
+/// Both variants are config problems with different fixes, so each message
+/// names its own. Neither carries the value, and neither names the plugin:
+/// the engine already tags an initialization failure with it.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SecretAccessError {
+    /// The plugin's entry does not grant this secret.
+    #[error(
+        "reads the secret '{name}' but does not declare '{capability}'; add it to the \
+         plugin's `capabilities` in config",
+        capability = secret_capability(.name)
+    )]
+    NotPermitted {
+        /// The secret the plugin asked for.
+        name: String,
+    },
+
+    /// The entry grants the secret, and `secrets.values` declares nothing by
+    /// that name.
+    #[error(
+        "is granted the secret '{name}', but `secrets.values` declares no value by that \
+         name; declare it there"
+    )]
+    Undeclared {
+        /// The secret the plugin asked for.
+        name: String,
+    },
+}
 
 #[cfg(test)]
 #[allow(
@@ -489,5 +616,67 @@ mod tests {
         );
         assert!(!uninstalled.http.is_available());
         assert!(!withheld.http.is_available());
+    }
+
+    #[test]
+    fn a_granted_secret_resolves_to_its_value() {
+        let ext = InitExtensions::new().with_secret("token", SecretRef::fixed("hunter2"));
+        let secret = ext.resolve_secret("token").expect("the secret is granted");
+        assert_eq!(
+            secret.get().as_str(),
+            "hunter2",
+            "a granted handle reads the declared value"
+        );
+    }
+
+    #[test]
+    fn an_ungranted_secret_names_the_capability_to_add() {
+        let ext = InitExtensions::new().with_secret("token", SecretRef::fixed("hunter2"));
+        let err = ext
+            .resolve_secret("other")
+            .expect_err("a grant for one name reaches no other");
+        assert_eq!(
+            err,
+            SecretAccessError::NotPermitted {
+                name: "other".to_owned()
+            }
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("read_secret:other") && msg.contains("capabilities"),
+            "the message names the grant to add, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_grant_without_a_declaration_says_to_declare_it() {
+        let ext = InitExtensions::new().with_undeclared_secret("token");
+        let err = ext
+            .resolve_secret("token")
+            .expect_err("nothing declares the value");
+        assert_eq!(
+            err,
+            SecretAccessError::Undeclared {
+                name: "token".to_owned()
+            }
+        );
+        assert!(
+            err.to_string().contains("secrets.values"),
+            "the message names the block to fix, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_debug_formatted_carrier_does_not_print_a_granted_value() {
+        let ext = InitExtensions::new().with_secret("token", SecretRef::fixed("hunter2"));
+        let printed = format!("{ext:?}");
+        assert!(
+            !printed.contains("hunter2"),
+            "the carrier's Debug must not print secret bytes, got: {printed}"
+        );
+        assert!(
+            printed.contains("token"),
+            "the granted name stays visible for diagnostics, got: {printed}"
+        );
     }
 }

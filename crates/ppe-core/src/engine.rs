@@ -2459,13 +2459,14 @@ impl PolicyEngine {
     ///
     /// The withheld case is carried rather than dropped so the plugin's
     /// error names the capability to add instead of blaming the host for
-    /// installing nothing.
+    /// installing nothing. A secret grant naming nothing declared is carried
+    /// the same way, so the error says to declare it rather than to grant it.
     fn init_extensions_for(
         &self,
         capabilities: &std::collections::HashSet<String>,
     ) -> crate::host::InitExtensions {
         let ext = crate::host::InitExtensions::new();
-        match self.http_transport.get() {
+        let mut ext = match self.http_transport.get() {
             None => ext,
             Some(t) => {
                 if capabilities.contains(crate::host::HTTP_CAPABILITY) {
@@ -2474,7 +2475,19 @@ impl PolicyEngine {
                     ext.with_http_withheld()
                 }
             },
+        };
+
+        let store = self.secrets.get();
+        let granted = capabilities
+            .iter()
+            .filter_map(|cap| cap.strip_prefix(crate::host::SECRET_CAPABILITY_PREFIX));
+        for name in granted {
+            ext = match store.and_then(|s| s.secret(name)) {
+                Some(secret) => ext.with_secret(name, secret),
+                None => ext.with_undeclared_secret(name),
+            };
         }
+        ext
     }
 
     /// Seed a request's extensions with the host services available to
@@ -8173,6 +8186,183 @@ secrets:
         assert_eq!(handle.get().as_str(), "second");
         assert_eq!(handle.generation(), 1);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a plugin got back when it asked for one secret at initialization.
+    type SecretOutcome = Result<crate::secrets::SecretRef, crate::host::SecretAccessError>;
+
+    /// Asks for one secret during `initialize_with` and keeps what it got.
+    struct SecretProbePlugin {
+        cfg: PluginConfig,
+        ask: &'static str,
+        saw: Arc<std::sync::Mutex<Option<SecretOutcome>>>,
+    }
+
+    #[async_trait]
+    impl Plugin for SecretProbePlugin {
+        fn config(&self) -> &PluginConfig {
+            &self.cfg
+        }
+
+        async fn initialize_with(
+            &self,
+            ext: &crate::host::InitExtensions,
+        ) -> Result<(), Box<PluginError>> {
+            *self
+                .saw
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(ext.resolve_secret(self.ask));
+            Ok(())
+        }
+    }
+
+    impl HookHandler<TestHook> for SecretProbePlugin {
+        async fn handle(
+            &self,
+            _payload: &TestPayload,
+            _extensions: &Extensions,
+            _ctx: &mut PluginContext,
+        ) -> PluginResult<TestPayload> {
+            PluginResult::allow()
+        }
+    }
+
+    /// Initialize an engine reading `yaml` with one probe plugin holding
+    /// `caps`, and report what the probe got for `ask`.
+    async fn secret_probe(
+        yaml: &str,
+        caps: &[&str],
+        ask: &'static str,
+    ) -> (PolicyEngine, SecretOutcome) {
+        let engine = engine_reading_secrets(yaml);
+        let mut cfg = make_config("secret-probe", 10, PluginMode::Sequential);
+        cfg.capabilities = caps.iter().map(|c| (*c).to_owned()).collect();
+        let saw = Arc::new(std::sync::Mutex::new(None));
+        let plugin = Arc::new(SecretProbePlugin {
+            cfg: cfg.clone(),
+            ask,
+            saw: Arc::clone(&saw),
+        });
+        engine
+            .register_handler::<TestHook, _>(plugin, cfg)
+            .expect("the probe registers");
+        engine.initialize().await.expect("initializes");
+
+        let outcome = saw
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("the probe's initialize_with ran");
+        (engine, outcome)
+    }
+
+    #[tokio::test]
+    async fn a_plugin_granted_a_declared_secret_reads_it_at_init() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        let (_engine, outcome) =
+            secret_probe(&yaml, &["read_secret:upstream_key"], "upstream_key").await;
+
+        let secret = outcome.expect("the grant and the declaration both hold");
+        assert_eq!(
+            secret.get().as_str(),
+            "hunter2",
+            "the plugin reads the value the engine resolved"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_plugin_without_the_grant_is_told_which_capability_to_add() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        let (_engine, outcome) = secret_probe(&yaml, &["perform_http"], "upstream_key").await;
+
+        let err = outcome.expect_err("declaring the value grants it to no plugin");
+        assert_eq!(
+            err,
+            crate::host::SecretAccessError::NotPermitted {
+                name: "upstream_key".to_owned()
+            }
+        );
+        assert!(
+            err.to_string().contains("read_secret:upstream_key"),
+            "the message names the grant to add, got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_grant_for_one_secret_reaches_no_other() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        let yaml = yaml.replace(
+            "    upstream_key:",
+            "    other_key: { provider: local, ref: upstream.key }\n    upstream_key:",
+        );
+        let (_engine, outcome) =
+            secret_probe(&yaml, &["read_secret:upstream_key"], "other_key").await;
+
+        assert!(
+            matches!(
+                outcome,
+                Err(crate::host::SecretAccessError::NotPermitted { ref name }) if name == "other_key"
+            ),
+            "a declared value the entry does not name stays out of reach, got: {outcome:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_grant_naming_an_undeclared_secret_is_reported_as_undeclared() {
+        let (dir, yaml) = secret_fixture("hunter2\n");
+        let (_engine, outcome) =
+            secret_probe(&yaml, &["read_secret:missing_key"], "missing_key").await;
+
+        assert_eq!(
+            outcome.expect_err("nothing declares the value"),
+            crate::host::SecretAccessError::Undeclared {
+                name: "missing_key".to_owned()
+            },
+            "a grant with nothing behind it is a declaration to add, not a grant to add"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_grant_without_a_secrets_block_is_reported_as_undeclared() {
+        let (_engine, outcome) = secret_probe(
+            "\nengine_settings:\n  dispatch: hooks\n",
+            &["read_secret:upstream_key"],
+            "upstream_key",
+        )
+        .await;
+
+        assert!(
+            matches!(
+                outcome,
+                Err(crate::host::SecretAccessError::Undeclared { .. })
+            ),
+            "with no store resolved there is nothing to grant, got: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_reaches_a_secret_a_plugin_took_at_init() {
+        let (dir, yaml) = secret_fixture("first\n");
+        let (engine, outcome) =
+            secret_probe(&yaml, &["read_secret:upstream_key"], "upstream_key").await;
+        let secret = outcome.expect("granted and declared");
+        assert_eq!(secret.get().as_str(), "first");
+
+        std::fs::write(dir.join("upstream.key"), "second\n").expect("rotate");
+        let report = engine.refresh_secrets().await;
+        assert!(report.is_ok(), "{report:?}");
+
+        assert_eq!(
+            secret.get().as_str(),
+            "second",
+            "the handle a plugin kept reads through to the refreshed value"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

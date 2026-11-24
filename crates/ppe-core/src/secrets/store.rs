@@ -125,9 +125,10 @@ impl SecretRef {
     }
 
     /// A handle to a fixed value, for tests that need a secret without a
-    /// provider behind it.
-    #[cfg(test)]
-    pub(crate) fn fixed(value: &str) -> Self {
+    /// provider behind it. Requires the `test-util` feature.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn fixed(value: &str) -> Self {
         Self {
             cell: Arc::new(SecretCell::new(Zeroizing::new(value.to_owned()))),
         }

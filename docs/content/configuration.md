@@ -497,6 +497,42 @@ A host that reloads by constructing a new engine, loading the document into it,
 and calling `initialize()` sees none of this, since nothing is resolved yet at
 load time.
 
+### Reading a secret from a plugin
+
+A plugin reads a declared value only when its own entry grants it by name,
+with one `read_secret:<name>` capability per value. Declaring a value in
+`secrets.values` grants it to nobody, and there is no capability granting every
+secret at once.
+
+<!-- validate: fragment -->
+```yaml
+secrets:
+  providers:
+    local: { kind: file, base_dir: /etc/ppe }
+  values:
+    verifier_token: { provider: local, ref: verifier.token }
+
+plugins:
+  - name: ops-basic
+    kind: identity/basic
+    hooks: [identity.resolve]
+    capabilities: [perform_http, read_secret:verifier_token]
+```
+
+The plugin asks for the value once, during initialization, and keeps the
+handle. A host's `refresh_secrets()` reaches that handle, so a rotated value
+takes effect without a restart. Rust plugin authors call
+`InitExtensions::resolve_secret(name)` from `initialize_with`.
+
+Two failures are reported separately, because they have different fixes. A
+plugin asking for a value its entry does not grant is told which
+`read_secret:` capability to add. A plugin granted a name that `secrets.values`
+does not declare is told to declare it. A plugin that needs the value fails
+its initialization either way, which stops startup.
+
+The grant is fixed for the life of a plugin instance. A reload that removes it
+builds new instances, and those never receive the handle.
+
 ### Per-plugin secret sources
 
 Plugins that predate the `secrets:` block carry their own typed source
