@@ -15,10 +15,10 @@ for Policy's SHA-256 operations. Identity builtins are optional.
 
 ```toml
 # engine only
-praxis-policy = { version = "0.6.0", default-features = false, features = ["fips"] }
+praxis-policy = { version = "0.7.0", default-features = false, features = ["fips"] }
 
 # JWT and DPoP
-praxis-policy = { version = "0.6.0", default-features = false, features = [
+praxis-policy = { version = "0.7.0", default-features = false, features = [
   "fips", "jwt-openssl-fips",
 ] }
 ```
@@ -33,9 +33,12 @@ verifies with AWS-LC.
 - **HMAC.** The FIPS backend provides no HMAC. Keyed content provenance is
   refused at config load (see [Auditing](auditing.md)), and HMAC JWTs are
   refused under `jwt-openssl-fips`.
-- **Other builtins.** OAuth delegation, Vault delegation and Valkey keep
-  their own non-FIPS crypto. Enabling any of them, or ordinary `jwt`, makes
-  `fips_profile_is_safe()` false.
+- **Other builtins.** `basic`, OAuth delegation, Vault delegation and Valkey
+  keep their own non-FIPS crypto. Enabling any of them, or ordinary `jwt`,
+  makes `fips_profile_is_safe()` false. `basic` has no FIPS-safe
+  configuration: its bcrypt, argon2 and sha-crypt verification is RustCrypto's
+  whichever scheme the directory holds, so no choice of record moves it onto
+  OpenSSL.
 - **`http-hyper`.** It links ring for TLS, so it cannot be combined with
   `fips`.
 - **The host.** The report describes Policy's compiled features only. It does

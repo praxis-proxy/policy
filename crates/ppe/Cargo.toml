@@ -8,8 +8,8 @@
 # bundled plugins, PDPs and session stores. Each is behind a feature, so the bare
 # dependency is the engine alone, no plugins compiled.
 #
-#   praxis-policy = { version = "0.6.0", features = ["builtins"] }      # stable builtins
-#   praxis-policy = { version = "0.6.0", features = ["jwt", "cedar"] }  # a subset
+#   praxis-policy = { version = "0.7.0", features = ["builtins"] }      # stable builtins
+#   praxis-policy = { version = "0.7.0", features = ["jwt", "cedar"] }  # a subset
 #
 # then `praxis_policy::install_builtins(&mgr)` registers every enabled factory and
 # installs the APL config visitor in one call.
@@ -65,6 +65,8 @@ fips = [
 builtins = [
   "jwt",
   "api-key",
+  "basic",
+  "kubernetes-token-review",
   "oauth",
   "delegator-vault",
   "elicitation-ciba",
@@ -86,6 +88,8 @@ jwt = ["_jwt", "praxis-policy-builtins/jwt"]
 # `fips`; cannot be combined with `jwt`.
 jwt-openssl-fips = ["_jwt", "praxis-policy-builtins/jwt-openssl-fips"]
 api-key = ["_builtin", "praxis-policy-builtins/api-key"]
+basic = ["_builtin", "praxis-policy-builtins/basic"]
+kubernetes-token-review = ["_builtin", "praxis-policy-builtins/kubernetes-token-review"]
 oauth = ["_builtin", "praxis-policy-builtins/oauth"]
 delegator-vault = ["_builtin", "praxis-policy-builtins/delegator-vault"]
 elicitation-ciba = [

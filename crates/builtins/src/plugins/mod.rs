@@ -8,6 +8,11 @@
 //!
 //! - `identity_jwt` (`jwt` or `jwt-openssl-fips`): kind `identity/jwt`
 //! - `identity_api_key` (`api-key`) — kind `identity/api-key`
+//! - `identity_basic` (`basic`): kind `identity/basic`. The module also
+//!   publishes the decode, directory and verifier APIs a host can drive
+//!   directly.
+//! - `identity_kubernetes` (`kubernetes-token-review`): kind
+//!   `identity/kubernetes-token-review`
 //! - `delegator_oauth` (`oauth`) — kind `delegator/oauth`
 //! - `delegator_vault` (`delegator-vault`) — kind `delegator/vault`
 //! - `elicitation_ciba` (`elicitation-ciba`) — kind `elicitation/ciba`
@@ -19,6 +24,12 @@ pub mod identity_jwt;
 
 #[cfg(feature = "api-key")]
 pub mod identity_api_key;
+
+#[cfg(feature = "basic")]
+pub mod identity_basic;
+
+#[cfg(feature = "kubernetes-token-review")]
+pub mod identity_kubernetes;
 
 #[cfg(feature = "oauth")]
 pub mod delegator_oauth;

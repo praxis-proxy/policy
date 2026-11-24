@@ -36,9 +36,9 @@ retains its ordinary routing behavior; the payload does not select a source.
 The source receives the ordinary capability-filtered extension view and returns
 an acquired-facts record; framework code owns validation, provenance stamping,
 and installation of that record under the caller-resolved instance name.
-Run metadata sources in `sequential` or `transform` mode: audit and concurrent
-modes can allow the operation while discarding the modified payload. The caller
-must reject a missing source or missing `metadata.fetch` handler before
+Run metadata sources in `sequential` mode: other modes can allow the operation
+while discarding the modified payload, and the APL loader rejects them. The
+caller must reject a missing source or missing `metadata.fetch` handler before
 dispatch; `invoke_entries` itself allows an empty entry list.
 
 A host-provided metadata source can be configured in hook dispatch mode:

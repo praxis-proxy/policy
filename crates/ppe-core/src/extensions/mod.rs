@@ -68,8 +68,8 @@ pub use llm::{
 pub use mcp::{MCPExtension, PromptMetadata, ResourceMetadata, ToolMetadata};
 pub use meta::MetaExtension;
 pub use metadata::{
-    AcquiredFacts, MetadataCacheDisposition, MetadataExtension, MetadataInstallError,
-    MetadataOutcome, MetadataSource,
+    AcquiredFacts, CAP_FRAMEWORK_PUBLISH_METADATA, MetadataCacheDisposition, MetadataExtension,
+    MetadataInstallError, MetadataOutcome, MetadataSource,
 };
 pub use monotonic::{DeclassifierToken, MonotonicSet};
 pub use provenance::ProvenanceExtension;

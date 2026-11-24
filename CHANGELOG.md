@@ -17,6 +17,105 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Kubernetes `TokenReview` identity.** `identity/kubernetes-token-review`,
+  behind the `kubernetes-token-review` feature, resolves a bearer token by
+  submitting it to the API server's `TokenReview` API and maps `status.user`
+  onto the identity slots. It serves tokens that cannot be verified locally,
+  such as legacy Secret-based ServiceAccount tokens. PPE authenticates with
+  its own token from a file, re-read so a projected token rotates, or from an
+  environment variable. `audiences` are sent and checked in the answer, a
+  cached answer never outlives a JWT's `exp`, and a `401` or `403` denies as
+  `auth.directory_unavailable` rather than as a bad caller.
+  ([#213](https://github.com/praxis-proxy/policy/issues/213))
+
+## [0.7.0] - 2026-11-20
+
+### Added
+
+- **Typed metadata source dispatch.** `MetadataFetchHook`,
+  `MetadataFetchRequest` and `MetadataFetchResult` let callers select one
+  configured source and invoke its `metadata.fetch` handler through the normal
+  executor, with capability filtering and error handling. The framework owns
+  validation, provenance stamping and installation of acquired facts.
+  ([#281](https://github.com/praxis-proxy/policy/pull/281))
+- **APL metadata fetching.** `fetch(name)` acquires immutable facts in
+  `authorization.pre_invocation` and makes them available immediately to later
+  predicates and PDPs under `metadata.<name>.*`. Sources are validated at load;
+  each source may be fetched once per compiled route, and fetches cannot run in
+  `parallel`. `on_error: fail` stops authorization without publishing a record;
+  `ignore` publishes a valid source error record and continues. Malformed or
+  missing records and framework failures always fail closed.
+  `praxis_policy_apl_core::step` adds `FetchStep`, `MetadataFetchOutcome` and
+  `MetadataFetchError`. The new `PluginInvoker::fetch_metadata` method defaults
+  to rejecting unsupported fetches, preserving existing implementations.
+  `AcquiredFacts::validate()` exposes the core record validation rules.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+
+- **HTTP Basic identity.** The `basic` feature adds `identity/basic`, which
+  decodes an [RFC 7617] credential, verifies it against an on-disk directory
+  and projects the record onto the identity slots through `record_map`. Two
+  providers ship: `htpasswd`, for Apache `.htpasswd` files, and `user_file`,
+  a YAML file whose records carry projectable fields and an optional
+  `expires_at`. Both admit bcrypt, argon2, sha256crypt and sha512crypt with
+  one cost profile per file, and take `path`, `refresh_secs`,
+  `max_staleness_secs`, `limits` and `max_concurrent_verifications`. The
+  resolver adds `realm`, `credential`, `limits.max_password_bytes`,
+  `limits.max_user_id_bytes`, `failure_limit` (`max_failures`,
+  `window_secs`, `capacity`), `expiry`, `claims`, `role` and
+  `advertise_utf8_charset`. The failure limit keys on the user-id scoped to
+  the host-supplied client host, falling back to the user-id alone, and
+  defaults to 100 failures per 5-minute window. The feature is non-FIPS and
+  is not supported alongside `fips`. Nothing refuses the combination at
+  compile time, so a FIPS host must require
+  `CryptoCapabilityReport::fips_profile_is_safe()` at startup, which `basic`
+  makes return `false`. See [What Basic asks of the host] before enabling it.
+  ([#313](https://github.com/praxis-proxy/policy/pull/313),
+  [#340](https://github.com/praxis-proxy/policy/pull/340))
+
+[RFC 7617]: https://datatracker.ietf.org/doc/html/rfc7617
+[What Basic asks of the host]: docs/content/builtins.md#what-basic-asks-of-the-host
+
+### Changed
+
+- **Breaking for Rust callers:** `Effect` adds `Fetch`; downstream exhaustive
+  matches must handle the new variant. `RouteDispatchPlan` adds
+  `metadata_entries`; exhaustive struct literals must initialize it or use
+  `..Default::default()`, and exhaustive destructuring must name the field or
+  use `..`. Both types are also reachable through the `praxis_policy` facade's
+  crate re-exports. `RoutePluginEntry::pick_entry` takes a new leading
+  `requested_family` argument; pass the dispatching hook's `HookTypeDef::NAME`.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Breaking for metadata sources:** a plugin reached by APL `fetch(name)` must
+  use `mode: sequential`; `transform` and other modes cannot return the awaited
+  typed record required for publication. Sources must declare `metadata.fetch`
+  and use `on_error: fail` or `ignore`.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+
+### Fixed
+
+- **APL step dispatch picked hooks across families.** A plugin that registered
+  a CMF hook alongside an unphased hook such as `metadata.fetch`,
+  `identity.resolve` or `token.delegate` could have a `run()` step dispatched to
+  the unphased hook, depending on hash order, and denied with a payload type
+  mismatch. Step dispatch now also matches the hook family.
+  ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Experimental rate-limiter dependency maintenance.** Updated Limitador to
+  `0.14.1`, removing its Postcard default-feature dependency on unmaintained
+  `heapless 0.7.17` and the unused transitive dependencies it pulled in.
+  ([#355](https://github.com/praxis-proxy/policy/pull/355))
+
+### Internal
+
+- Documented revocation and transaction-token requirements, including proposed
+  enforcement points, signal freshness, credential lineage and phased delivery.
+  This is a design document; runtime enforcement is not implemented.
+  ([#284](https://github.com/praxis-proxy/policy/pull/284))
+- Added supply-chain maintenance exceptions for unmaintained `chrono` and
+  `chrono-tz` (RUSTSEC-2026-0543 and RUSTSEC-2026-0555), which remain runtime
+  dependencies of the engine and bundled PDPs with no patched release.
+
 ## [0.6.0] - 2026-11-06
 
 ### Added
@@ -319,6 +418,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   the load with the options listed, so an incomplete audit configuration no
   longer looks like a working one. `stderr` is still available and has to be
   named. ([#237](https://github.com/praxis-proxy/policy/issues/237))
+- **Breaking for Rust callers of `praxis-policy-plugin-ocsf-audit`:**
+  `OcsfAuditConfig.destination` and `.exporters` become one
+  `output: OutputSelection`, and the struct no longer implements `Default`;
+  build one with `OcsfAuditConfig::new`. YAML keys and serialized shape are
+  unchanged; a block that names no output, both, or an empty list now fails at
+  parse. ([#264](https://github.com/praxis-proxy/policy/issues/264))
 - **Breaking: CIBA config rejects unknown fields.** A misspelled key such as
   `stroe` now fails at load and names the field.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))
@@ -1127,7 +1232,8 @@ First release. The engine was extracted from another project rather than written
 
 - **191 lint rules configured across rustc, clippy and rustdoc,** every one at an explicit level. Anything that could silently change an enforcement decision is denied; [`docs/dev/lints.md`](docs/dev/lints.md) explains each group that is not.
 
-[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/praxis-proxy/policy/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/praxis-proxy/policy/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/praxis-proxy/policy/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/praxis-proxy/policy/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/praxis-proxy/policy/compare/v0.4.0...v0.4.1

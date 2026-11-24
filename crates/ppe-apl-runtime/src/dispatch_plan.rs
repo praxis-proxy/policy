@@ -45,6 +45,7 @@ use praxis_policy_core::delegation::HOOK_TOKEN_DELEGATE;
 use praxis_policy_core::elicitation::HOOK_ELICIT;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::hooks::{HookMetadata, HookPhase, lookup_hook_metadata};
+use praxis_policy_core::metadata::HOOK_METADATA_FETCH;
 use praxis_policy_core::plugin::OnError;
 use praxis_policy_core::registry::HookEntry;
 
@@ -78,7 +79,8 @@ impl RoutePluginEntry {
     /// praxis-policy-core hook metadata table for each, returns the first
     /// matching entry.
     ///
-    /// `requested_entity_type` comes from the request's
+    /// `requested_family` is the typed hook family carried by the current
+    /// invoker. `requested_entity_type` comes from the request's
     /// `MetaExtension.entity_type` (or `None` if the dispatcher
     /// doesn't have one — in which case any hook's `entity_type`
     /// matches). `requested_phase` comes from the APL invocation
@@ -95,15 +97,19 @@ impl RoutePluginEntry {
     /// plugin registered under a name nobody described still dispatches.
     pub fn pick_entry(
         &self,
+        requested_family: &str,
         requested_entity_type: Option<&str>,
         requested_phase: HookPhase,
     ) -> Option<&HookEntry> {
         self.entries_by_hook
             .iter()
             .find(|(hook_name, _)| {
-                lookup_hook_metadata(hook_name)
-                    .unwrap_or_else(HookMetadata::permissive)
-                    .matches(requested_entity_type, requested_phase)
+                let metadata =
+                    lookup_hook_metadata(hook_name).unwrap_or_else(HookMetadata::permissive);
+                metadata
+                    .family
+                    .is_none_or(|family| family == requested_family)
+                    && metadata.matches(requested_entity_type, requested_phase)
             })
             .map(|(_, entry)| entry)
     }
@@ -132,6 +138,8 @@ pub struct RouteDispatchPlan {
     /// by plugin name, not by `(kind, channel)`. Empty when the route has
     /// no elicitation.
     pub elicitation_entries: HashMap<String, HookEntry>,
+    /// Metadata source name → resolved `metadata.fetch` entry.
+    pub metadata_entries: HashMap<String, HookEntry>,
 }
 
 impl RouteDispatchPlan {
@@ -150,58 +158,14 @@ impl RouteDispatchPlan {
         engine: &PolicyEngine,
     ) -> Self {
         let mut plan = Self::default();
+        let mut resolved_entries: HashMap<String, Vec<(String, HookEntry)>> = HashMap::new();
         for name in collect_plugin_names(route) {
-            let eff = if let Some(e) =
-                EffectivePlugin::resolve(&name, registry, &route.plugin_overrides)
-            {
-                e
-            } else {
-                tracing::warn!(
-                    plugin = %name,
-                    route = %route.route_key,
-                    "APL route references plugin not in `plugins:` block — skipping",
-                );
+            let Some(entries) =
+                build_effective_plugin_entries(&name, route, registry, engine).await
+            else {
                 continue;
             };
-
-            // Pull the three overrideable values off the effective view.
-            // `EffectivePlugin` borrows from the registry / route overrides,
-            // so the captures here are slice / Option<&Value> refs.
-            let override_block = route.plugin_overrides.get(&name);
-            let config_override = override_block.and_then(|o| o.config.as_ref());
-            let caps_override: Option<std::collections::HashSet<String>> = matches!(
-                eff.capabilities,
-                praxis_policy_apl_core::plugin_decl::CapsView::Override(_)
-            )
-            .then(|| eff.capabilities.as_slice().iter().cloned().collect());
-            let on_error_override = override_block
-                .and_then(|o| o.on_error.as_deref())
-                .and_then(parse_on_error);
-
-            // Hand the override decision to praxis-policy-core. When no overrides
-            // are declared, this returns the base entries unchanged
-            // (no allocation, no factory call). When only caps/on_error
-            // differ, it wraps the shared base plugin in a fresh
-            // `PluginRef` with merged trusted config. When config
-            // differs, it invokes the factory + initializes a brand-new
-            // instance with its own circuit breaker.
-            let entries = engine
-                .build_override_entries(
-                    &name,
-                    config_override,
-                    caps_override.as_ref(),
-                    on_error_override,
-                )
-                .await;
-            if entries.is_empty() {
-                tracing::warn!(
-                    plugin = %name,
-                    route = %route.route_key,
-                    "APL plugin not resolvable (not registered, factory missing, \
-                     or override construction failed) — skipping",
-                );
-                continue;
-            }
+            resolved_entries.insert(name.clone(), entries.clone());
 
             // Store every (hook_name, HookEntry) pair the plugin
             // registered. Dispatch-time entry selection (pick_entry)
@@ -273,6 +237,31 @@ impl RouteDispatchPlan {
             }
         }
 
+        for name in collect_fetch_plugin_names(route) {
+            let entries = if let Some(entries) = resolved_entries.remove(&name) {
+                entries
+            } else {
+                let Some(entries) =
+                    build_effective_plugin_entries(&name, route, registry, engine).await
+                else {
+                    continue;
+                };
+                entries
+            };
+            if let Some((_, entry)) = entries
+                .into_iter()
+                .find(|(hook_name, _)| hook_name == HOOK_METADATA_FETCH)
+            {
+                plan.metadata_entries.insert(name, entry);
+            } else {
+                tracing::warn!(
+                    plugin = %name,
+                    route = %route.route_key,
+                    "APL route references metadata source not registered under metadata.fetch",
+                );
+            }
+        }
+
         plan
     }
 
@@ -302,6 +291,54 @@ impl RouteDispatchPlan {
             entries_by_hook,
         })
     }
+}
+
+/// Resolve a route plugin and materialize its route-level overrides.
+async fn build_effective_plugin_entries(
+    name: &str,
+    route: &CompiledRoute,
+    registry: &PluginRegistry,
+    engine: &PolicyEngine,
+) -> Option<Vec<(String, HookEntry)>> {
+    let Some(effective) = EffectivePlugin::resolve(name, registry, &route.plugin_overrides) else {
+        tracing::warn!(
+            plugin = %name,
+            route = %route.route_key,
+            "APL route references plugin not in `plugins:` block — skipping",
+        );
+        return None;
+    };
+
+    let override_block = route.plugin_overrides.get(name);
+    let config_override = override_block.and_then(|override_| override_.config.as_ref());
+    let capabilities_override: Option<HashSet<String>> = matches!(
+        effective.capabilities,
+        praxis_policy_apl_core::plugin_decl::CapsView::Override(_)
+    )
+    .then(|| effective.capabilities.as_slice().iter().cloned().collect());
+    let on_error_override = override_block
+        .and_then(|override_| override_.on_error.as_deref())
+        .and_then(parse_on_error);
+
+    let entries = engine
+        .build_override_entries(
+            name,
+            config_override,
+            capabilities_override.as_ref(),
+            on_error_override,
+        )
+        .await;
+    if entries.is_empty() {
+        tracing::warn!(
+            plugin = %name,
+            route = %route.route_key,
+            "APL plugin not resolvable (not registered, factory missing, \
+             or override construction failed) — skipping",
+        );
+        return None;
+    }
+
+    Some(entries)
 }
 
 fn parse_on_error(s: &str) -> Option<OnError> {
@@ -550,6 +587,18 @@ pub(crate) fn collect_elicit_plugin_names(route: &CompiledRoute) -> Vec<String> 
     out
 }
 
+/// Return unique metadata source names reached by `fetch(name)`.
+pub(crate) fn collect_fetch_plugin_names(route: &CompiledRoute) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for name in route.fetch_names() {
+        if seen.insert(name.clone()) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 /// Walk a `CompiledRoute` and return the unique plugin names referenced
 /// by any `Effect::Plugin` anywhere in `pre_invocation` / `post_invocation` (including
 /// nested) or `Stage::Plugin` (in `args` / `result` pipelines).
@@ -598,6 +647,7 @@ pub(crate) fn collect_plugin_names_by_half(route: &CompiledRoute) -> (Vec<String
                 Effect::Plugin { name } => name,
                 Effect::Delegate(ds) => &ds.plugin_name,
                 Effect::Elicit(es) => &es.plugin_name,
+                Effect::Fetch(step) => &step.plugin_name,
                 _ => return,
             };
             if seen.insert(name.clone()) {
@@ -649,6 +699,7 @@ pub(crate) fn collect_family_fixed_plugin_hooks(
         let pair = match e {
             Effect::Delegate(ds) => (ds.plugin_name.clone(), HOOK_TOKEN_DELEGATE),
             Effect::Elicit(es) => (es.plugin_name.clone(), HOOK_ELICIT),
+            Effect::Fetch(step) => (step.plugin_name.clone(), HOOK_METADATA_FETCH),
             _ => return,
         };
         if !out.contains(&pair) {
@@ -712,6 +763,13 @@ pub(crate) fn route_capability_union(
     let elicit_plugins = collect_elicit_plugin_names(route);
     for name in &elicit_plugins {
         if let Some(eff) = EffectivePlugin::resolve(name, registry, &route.plugin_overrides) {
+            for cap in eff.capabilities.as_slice() {
+                caps.insert(cap.clone());
+            }
+        }
+    }
+    for name in collect_fetch_plugin_names(route) {
+        if let Some(eff) = EffectivePlugin::resolve(&name, registry, &route.plugin_overrides) {
             for cap in eff.capabilities.as_slice() {
                 caps.insert(cap.clone());
             }
