@@ -633,7 +633,8 @@ namespace carries its instance name. `$fetched_at` is an RFC 3339 UTC string
 at second precision with a `Z` suffix, such as `2026-10-19T12:00:00Z`,
 matching `<ns>.attested_at`. APL reads these leaves as ordinary path
 segments, as in `metadata.account.$outcome`. A plugin sees this slot and
-namespace only with `read_metadata`; route predicates always can.
+namespace only with `read_metadata`; the synthetic APL handler receives that
+capability when the active route phase has a compiled metadata dependency.
 
 ---
 

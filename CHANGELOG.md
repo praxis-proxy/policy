@@ -17,6 +17,19 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Kubernetes `TokenReview` identity.** `identity/kubernetes-token-review`,
+  behind the `kubernetes-token-review` feature, resolves a bearer token by
+  submitting it to the API server's `TokenReview` API and maps `status.user`
+  onto the identity slots. It serves tokens that cannot be verified locally,
+  such as legacy Secret-based ServiceAccount tokens. PPE authenticates with
+  its own token from a file, re-read so a projected token rotates, or from an
+  environment variable. `audiences` are sent and checked in the answer, a
+  cached answer never outlives a JWT's `exp`, and a `401` or `403` denies as
+  `auth.directory_unavailable` rather than as a bad caller.
+  ([#213](https://github.com/praxis-proxy/policy/issues/213))
+
 ## [0.7.0] - 2026-11-20
 
 ### Added
@@ -40,6 +53,30 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   `AcquiredFacts::validate()` exposes the core record validation rules.
   ([#287](https://github.com/praxis-proxy/policy/pull/287))
 
+- **HTTP Basic identity.** The `basic` feature adds `identity/basic`, which
+  decodes an [RFC 7617] credential, verifies it against an on-disk directory
+  and projects the record onto the identity slots through `record_map`. Two
+  providers ship: `htpasswd`, for Apache `.htpasswd` files, and `user_file`,
+  a YAML file whose records carry projectable fields and an optional
+  `expires_at`. Both admit bcrypt, argon2, sha256crypt and sha512crypt with
+  one cost profile per file, and take `path`, `refresh_secs`,
+  `max_staleness_secs`, `limits` and `max_concurrent_verifications`. The
+  resolver adds `realm`, `credential`, `limits.max_password_bytes`,
+  `limits.max_user_id_bytes`, `failure_limit` (`max_failures`,
+  `window_secs`, `capacity`), `expiry`, `claims`, `role` and
+  `advertise_utf8_charset`. The failure limit keys on the user-id scoped to
+  the host-supplied client host, falling back to the user-id alone, and
+  defaults to 100 failures per 5-minute window. The feature is non-FIPS and
+  is not supported alongside `fips`. Nothing refuses the combination at
+  compile time, so a FIPS host must require
+  `CryptoCapabilityReport::fips_profile_is_safe()` at startup, which `basic`
+  makes return `false`. See [What Basic asks of the host] before enabling it.
+  ([#313](https://github.com/praxis-proxy/policy/pull/313),
+  [#340](https://github.com/praxis-proxy/policy/pull/340))
+
+[RFC 7617]: https://datatracker.ietf.org/doc/html/rfc7617
+[What Basic asks of the host]: docs/content/reference/builtins.md#what-basic-asks-of-the-host
+
 ### Changed
 
 - **Breaking for Rust callers:** `Effect` adds `Fetch`; downstream exhaustive
@@ -55,6 +92,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   typed record required for publication. Sources must declare `metadata.fetch`
   and use `on_error: fail` or `ignore`.
   ([#287](https://github.com/praxis-proxy/policy/pull/287))
+- **Breaking for route capability grants:** ordinary `run()` and field-pipeline
+  plugin capabilities now contribute only to the request or response handler
+  half where that plugin runs. Delegation, elicitation, and metadata-fetch
+  plugins still contribute their declared capabilities to both halves.
+  Predicates on the other half that read `client.*`, `caller.workload.*`, or
+  `this.workload.*` need `read_client` or `read_workload` in the host baseline.
+  ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 ### Fixed
 
@@ -224,8 +268,14 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   [#184](https://github.com/praxis-proxy/policy/issues/184).
 - APL attribute paths accept one leading `$` on a segment after the first,
   so policies read provenance leaves such as `metadata.account.$outcome`.
-  Route predicates read `metadata.*` without a host grant: the synthetic APL
-  handler holds `read_metadata` intrinsically.
+  The synthetic APL handler infers `read_metadata` independently for the
+  request and response halves from predicates, elicitation recipients and
+  scopes, field pipelines, restrictions, fetches, and PDP policy dependencies.
+  Custom PDP resolvers can report opaque policy dependencies through
+  `PdpResolver::requires_metadata`.
+  `source_references_metadata` and `source_references_metadata_under` are
+  available to resolver implementations that need conservative source scans.
+  ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 - **Typed credential locations for the `identity/jwt` plugin.** The plugin can
   now extract bearer JWTs from HTTP headers, cookies, or query parameters — one
@@ -381,6 +431,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   the load with the options listed, so an incomplete audit configuration no
   longer looks like a working one. `stderr` is still available and has to be
   named. ([#237](https://github.com/praxis-proxy/policy/issues/237))
+- **Breaking for Rust callers of `praxis-policy-plugin-ocsf-audit`:**
+  `OcsfAuditConfig.destination` and `.exporters` become one
+  `output: OutputSelection`, and the struct no longer implements `Default`;
+  build one with `OcsfAuditConfig::new`. YAML keys and serialized shape are
+  unchanged; a block that names no output, both, or an empty list now fails at
+  parse. ([#264](https://github.com/praxis-proxy/policy/issues/264))
 - **Breaking: CIBA config rejects unknown fields.** A misspelled key such as
   `stroe` now fails at load and names the field.
   ([#236](https://github.com/praxis-proxy/policy/issues/236))

@@ -20,8 +20,8 @@ use zeroize::Zeroizing;
 /// The credential as presented, after the configured location and the prefix
 /// gate.
 ///
-/// Octets, not text. An API key is an opaque handle that happens to arrive in
-/// a header: nothing about it is linguistic, and every text operation a
+/// Octets, not text. The credential is an opaque handle that happens to arrive
+/// in a header: nothing about it is linguistic, and every text operation a
 /// `String` invites is a way to authenticate the wrong caller. Case folding,
 /// trimming, or Unicode normalization all map two different credentials onto
 /// one lookup, and `==` on `str` is not constant time. Holding bytes means

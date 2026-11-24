@@ -438,6 +438,21 @@ impl PdpResolver for CelResolver {
         self.dialect.clone()
     }
 
+    fn requires_metadata(&self, call: &PdpCall) -> bool {
+        let Some(expr) = call
+            .args
+            .as_mapping()
+            .and_then(|map| map.get(serde_yaml::Value::String("expr".to_owned())))
+            .and_then(serde_yaml::Value::as_str)
+        else {
+            return true;
+        };
+        self.get_or_compile(expr).map_or(true, |program| {
+            let references = program.references();
+            references.has_variable("metadata") || references.has_variable(".metadata")
+        })
+    }
+
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
         self.evaluate_structured(call, bag, &StructuredInput::default())
             .await
@@ -738,6 +753,31 @@ mod tests {
             bag.set(*k, *v);
         }
         bag
+    }
+
+    #[test]
+    fn compiled_references_report_metadata_dependencies() {
+        let resolver = CelResolver::new();
+
+        assert!(resolver.requires_metadata(&cel_call("metadata[\"account\"].active")));
+        assert!(resolver.requires_metadata(&cel_call("size(metadata) > 0")));
+        assert!(resolver.requires_metadata(&cel_call("!.metadata.account.suspended")));
+        assert!(resolver.requires_metadata(&cel_call("size(.metadata) > 0")));
+        assert!(!resolver.requires_metadata(&cel_call("subject.note == 'metadata.account'")));
+        assert!(!resolver.requires_metadata(&cel_call("subject.note == '.metadata.account'")));
+        assert!(!resolver.requires_metadata(&cel_call(".subject.active == true")));
+        assert!(!resolver.requires_metadata(&cel_call("subject.active == true")));
+    }
+
+    #[test]
+    fn invalid_call_shape_conservatively_requires_metadata() {
+        let resolver = CelResolver::new();
+        let call = PdpCall {
+            dialect: PdpDialect::Cel,
+            args: serde_yaml::Value::Null,
+        };
+
+        assert!(resolver.requires_metadata(&call));
     }
 
     #[tokio::test]

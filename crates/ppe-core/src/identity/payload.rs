@@ -90,6 +90,8 @@ pub enum TokenSource {
     SpiffeJwtSvid,
     /// API key in a header or query param.
     ApiKey,
+    /// `Authorization: Basic <base64(user-id:password)>` per RFC 7617.
+    Basic,
     /// Operator-defined extraction path.
     #[serde(untagged)]
     Custom(String),

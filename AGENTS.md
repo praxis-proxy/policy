@@ -70,6 +70,7 @@ crates/
   builtins      the nine bundled extensions, one
                 Cargo feature each:
                   plugins::  identity_jwt, identity_api_key,
+                             identity_kubernetes,
                              delegator_oauth, elicitation_ciba
                   pdps::     cedar_direct, cel, opa
                   session::  valkey
