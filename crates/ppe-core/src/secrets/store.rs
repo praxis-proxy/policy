@@ -14,7 +14,7 @@
 // this module: copying compiles, passes every test with a static secret, and
 // silently never rotates in production.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
@@ -258,7 +258,7 @@ impl RefreshReport {
 
 /// A replacement store whose staged values remain private until publication.
 pub(crate) struct ReloadedSecrets {
-    reused_health: Vec<String>,
+    reused_health: Vec<ReusedHealth>,
     store: SecretStore,
     /// Pending values with their declared names and retained cells.
     updates: Vec<(String, Arc<SecretCell>, Zeroizing<String>)>,
@@ -313,11 +313,24 @@ impl ReloadedSecrets {
     /// until the replacement is installed.
     pub(crate) fn publish(mut self, previous: Option<&SecretStore>) -> SecretStore {
         if let Some(previous) = previous {
-            for name in &self.reused_health {
-                if let Some(source) = previous.health.get(name)
-                    && let Some(target) = self.store.health.get(name)
+            for reused in &self.reused_health {
+                if let Some(source) = previous.health.get(&reused.name)
+                    && let Some(target) = self.store.health.get(&reused.name)
                 {
-                    target.store(source.load_full());
+                    let current = source.load_full();
+                    if let Some(confirmed_at) = reused.confirmed_at {
+                        target.store(Arc::new(ProviderHealth {
+                            last_success: Some(confirmed_at),
+                            last_failure: current.last_failure.clone(),
+                            failing: current.failing
+                                && current
+                                    .last_failure
+                                    .as_ref()
+                                    .is_some_and(|failure| failure.at > confirmed_at),
+                        }));
+                    } else {
+                        target.store(current);
+                    }
                 }
             }
         }
@@ -326,6 +339,11 @@ impl ReloadedSecrets {
         }
         self.store
     }
+}
+
+struct ReusedHealth {
+    name: String,
+    confirmed_at: Option<DateTime<Utc>>,
 }
 
 /// Serializes refresh publication.
@@ -458,6 +476,8 @@ impl SecretStore {
         let mut values = HashMap::new();
         let mut updates = Vec::new();
         let mut carried = 0;
+        let mut confirmed_at = HashMap::new();
+        let mut unread_providers = HashSet::new();
         let mut declared_values: Vec<_> = config.values.iter().collect();
         declared_values.sort_by(|a, b| a.0.cmp(b.0));
         for (name, declared) in declared_values {
@@ -485,11 +505,13 @@ impl SecretStore {
                 carried += 1;
                 // A failed reload must leave every retained binding unchanged,
                 // including values read successfully from a rebuilt provider.
-                if !reused_provider
+                if reused_provider
                     .get(&declared.provider)
                     .copied()
                     .unwrap_or(false)
                 {
+                    unread_providers.insert(declared.provider.as_str());
+                } else {
                     let value =
                         provider
                             .get_secret(&declared.reference)
@@ -499,6 +521,7 @@ impl SecretStore {
                                 provider: declared.provider.clone(),
                                 source,
                             })?;
+                    confirmed_at.insert(declared.provider.as_str(), Utc::now());
                     updates.push((name.clone(), Arc::clone(&cell), value));
                 }
                 cell
@@ -511,6 +534,7 @@ impl SecretStore {
                         provider: declared.provider.clone(),
                         source,
                     })?;
+                confirmed_at.insert(declared.provider.as_str(), Utc::now());
                 Arc::new(SecretCell::new(value))
             };
             values.insert(
@@ -545,7 +569,16 @@ impl SecretStore {
         Ok(ReloadedSecrets {
             reused_health: reused_provider
                 .into_iter()
-                .filter_map(|(name, reused)| reused.then_some(name))
+                .filter_map(|(name, reused)| {
+                    reused.then(|| {
+                        let confirmed_at = if unread_providers.contains(name.as_str()) {
+                            None
+                        } else {
+                            confirmed_at.get(name.as_str()).copied()
+                        };
+                        ReusedHealth { name, confirmed_at }
+                    })
+                })
                 .collect(),
             store: Self {
                 declared: config.clone(),
@@ -1475,6 +1508,152 @@ values:
             "nothing in the old refresh committed: {report:?}"
         );
         assert!(!store.provider_health("scripted").expect("declared").failing);
+    }
+
+    #[tokio::test]
+    async fn fully_read_replacement_confirms_reused_provider_recovery() {
+        let provider = Scripted::new("last-good");
+        let registry = scripted_registry(Arc::clone(&provider));
+        let first = SecretStore::resolve(
+            &scripted_config("  api_key: { provider: scripted, ref: first }\n"),
+            &registry,
+        )
+        .await
+        .expect("initial binding resolves");
+        provider.fail();
+        let failed = first.refresh().await;
+        assert_eq!(failed.failed.len(), 1);
+        let failure = first.provider_health("scripted").expect("provider exists");
+        assert!(failure.failing);
+        provider.set("replacement-good");
+        let staged = SecretStore::resolve_replacing(
+            &scripted_config("  api_key: { provider: scripted, ref: second }\n"),
+            &registry,
+            Some(&first),
+        )
+        .await
+        .expect("every active replacement binding is read successfully");
+        let guard = first.lock_refresh().await;
+        let next = staged.publish(Some(&first));
+        drop(guard);
+        let health = next.provider_health("scripted").expect("provider exists");
+        assert_eq!(
+            next.value("api_key").expect("replacement exists").as_str(),
+            "replacement-good"
+        );
+        assert!(
+            !health.failing,
+            "all active bindings were successfully confirmed: {health:?}"
+        );
+        assert_eq!(
+            health.last_failure, failure.last_failure,
+            "outage history must survive recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn partially_carried_provider_does_not_infer_recovery() {
+        let provider = Scripted::new("last-good");
+        let registry = scripted_registry(Arc::clone(&provider));
+        let first = SecretStore::resolve(
+            &scripted_config("  api_key: { provider: scripted, ref: first }\n"),
+            &registry,
+        )
+        .await
+        .expect("initial binding resolves");
+        provider.fail();
+        first.refresh().await;
+        let failure = first.provider_health("scripted").expect("provider exists");
+        provider.set("new-binding-good");
+        let staged = SecretStore::resolve_replacing(
+            &scripted_config("  api_key: { provider: scripted, ref: first }\n  second_key: { provider: scripted, ref: second }\n"),
+            &registry, Some(&first),
+        ).await.expect("added binding resolves");
+        let guard = first.lock_refresh().await;
+        let next = staged.publish(Some(&first));
+        drop(guard);
+        assert_eq!(
+            next.provider_health("scripted"),
+            Some(failure),
+            "unread active bindings cannot confirm recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_confirmation_does_not_hide_a_later_failure() {
+        let provider = Scripted::new("initial");
+        let registry = scripted_registry(Arc::clone(&provider));
+        let first = SecretStore::resolve(
+            &scripted_config("  api_key: { provider: scripted, ref: first }\n"),
+            &registry,
+        )
+        .await
+        .expect("initial binding resolves");
+        provider.set("replacement");
+        let staged = SecretStore::resolve_replacing(
+            &scripted_config("  api_key: { provider: scripted, ref: second }\n"),
+            &registry,
+            Some(&first),
+        )
+        .await
+        .expect("replacement is confirmed");
+        let confirmed_at = staged
+            .reused_health
+            .first()
+            .expect("reused provider")
+            .confirmed_at
+            .expect("read confirmation");
+        provider.fail();
+        let failed = first.refresh().await;
+        assert_eq!(failed.failed.len(), 1);
+        let failure = first.provider_health("scripted").expect("provider exists");
+        let guard = first.lock_refresh().await;
+        let next = staged.publish(Some(&first));
+        drop(guard);
+        let health = next.provider_health("scripted").expect("provider exists");
+        assert!(
+            health.failing,
+            "a read cannot confirm recovery from a later outage: {health:?}"
+        );
+        assert_eq!(
+            health.last_success,
+            Some(confirmed_at),
+            "success records the actual confirmation time"
+        );
+        assert_eq!(
+            health.last_failure, failure.last_failure,
+            "later failure history must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_unread_provider_keeps_failure_recorded_before_publication() {
+        let provider = Scripted::new("initial");
+        let registry = scripted_registry(Arc::clone(&provider));
+        let config = scripted_config("  api_key: { provider: scripted, ref: first }\n");
+        let first = SecretStore::resolve(&config, &registry)
+            .await
+            .expect("initial binding resolves");
+        let staged = SecretStore::resolve_replacing(&config, &registry, Some(&first))
+            .await
+            .expect("unchanged binding is carried");
+        provider.fail();
+        let failed = first.refresh().await;
+        assert_eq!(failed.failed.len(), 1);
+        let failure = first.provider_health("scripted").expect("provider exists");
+        assert!(failure.failing);
+        let guard = first.lock_refresh().await;
+        let next = staged.publish(Some(&first));
+        drop(guard);
+        assert_eq!(
+            next.provider_health("scripted"),
+            Some(failure),
+            "health must be copied under the publication gate"
+        );
+        assert_eq!(
+            next.value("api_key").expect("binding remains").as_str(),
+            "initial"
+        );
     }
 
     // -----------------------------------------------------------------------------
