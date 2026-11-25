@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git rebase *)",
+      "Bash(git branch *)",
+      "Bash(cargo generate-lockfile *)",
+      "Bash(git add *)",
+      "Bash(GIT_EDITOR=true git rebase --continue)",
+      "Bash(rustup update *)",
+      "Bash(rustup run *)",
+      "Bash(bash tools/publish.sh --dry-run)",
+      "Bash(cargo nextest *)",
+      "Bash(gh pr *)",
+      "Bash(git fetch *)",
+      "Bash(gh run *)",
+      "Bash(sed -i 's|use crate::config::|use super::config::|g' identity.rs cache.rs delegator.rs)",
+      "Bash(sed -i 's|use crate::delegator::|use super::delegator::|g' factory.rs)",
+      "Bash(sed -i 's|use crate::cache::|use super::cache::|g' delegator.rs)",
+      "Bash(sed -i 's|use crate::identity|use super::identity|g' delegator.rs)",
+      "Bash(sed -i 's|use crate::vault|use super::vault|g' delegator.rs)",
+      "Bash(git ls-remote *)",
+      "Bash(cargo doc *)",
+      "Bash(grep -v \"^--$\")",
+      "Bash(timeout 30 cargo doc --lib)"
+    ],
+    "additionalDirectories": [
+      "/home/mkoushni/ACode/Praxis/ai/filters/src/token_rate_limit"
+    ]
+  }
+}

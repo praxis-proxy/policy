@@ -99,3 +99,100 @@ async fn documented_source_fetches_and_publishes_before_the_next_predicate() {
         "https://metadata.example/v1/accounts/check_account?resource=check_account"
     );
 }
+
+#[tokio::test]
+async fn malformed_content_type_rejects_response() {
+    let http = Arc::new(
+        FakeTransport::new().respond_with("/v1/accounts/check_account", |_| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", "malformed".parse().unwrap());
+            Ok(
+                HttpResponse::new(200, Bytes::from_static(br#"{"active":true}"#))
+                    .with_headers(headers),
+            )
+        }),
+    );
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(KIND, Box::new(MetadataHttpFactory));
+    register_apl(&engine, AplOptions::in_process());
+    let transport: Arc<dyn HttpTransport> = http.clone();
+    assert!(engine.set_http_transport(transport));
+    engine
+        .load_config_yaml(POLICY)
+        .expect("documented metadata HTTP policy loads");
+    engine.initialize().await.expect("engine initializes");
+
+    let (result, _background) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), extensions(), None)
+        .await;
+    assert!(
+        !result.continue_processing,
+        "malformed content-type stops processing"
+    );
+}
+
+#[tokio::test]
+async fn quoted_charset_parameter_accepted() {
+    let http = Arc::new(
+        FakeTransport::new().respond_with("/v1/accounts/check_account", |_| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "content-type",
+                "application/json; charset=\"utf-8\"".parse().unwrap(),
+            );
+            Ok(HttpResponse::new(
+                200,
+                Bytes::from_static(br#"{"active":true,"plan":"enterprise"}"#),
+            )
+            .with_headers(headers))
+        }),
+    );
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(KIND, Box::new(MetadataHttpFactory));
+    register_apl(&engine, AplOptions::in_process());
+    let transport: Arc<dyn HttpTransport> = http.clone();
+    assert!(engine.set_http_transport(transport));
+    engine
+        .load_config_yaml(POLICY)
+        .expect("documented metadata HTTP policy loads");
+    engine.initialize().await.expect("engine initializes");
+
+    let (result, _background) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), extensions(), None)
+        .await;
+    assert!(
+        result.continue_processing,
+        "quoted charset parameter is accepted"
+    );
+}
+
+#[tokio::test]
+async fn invalid_media_type_format_rejects_response() {
+    let http = Arc::new(
+        FakeTransport::new().respond_with("/v1/accounts/check_account", |_| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", "text".parse().unwrap());
+            Ok(
+                HttpResponse::new(200, Bytes::from_static(br#"{"active":true}"#))
+                    .with_headers(headers),
+            )
+        }),
+    );
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(KIND, Box::new(MetadataHttpFactory));
+    register_apl(&engine, AplOptions::in_process());
+    let transport: Arc<dyn HttpTransport> = http.clone();
+    assert!(engine.set_http_transport(transport));
+    engine
+        .load_config_yaml(POLICY)
+        .expect("documented metadata HTTP policy loads");
+    engine.initialize().await.expect("engine initializes");
+
+    let (result, _background) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), extensions(), None)
+        .await;
+    assert!(
+        !result.continue_processing,
+        "invalid media type format stops processing"
+    );
+}
