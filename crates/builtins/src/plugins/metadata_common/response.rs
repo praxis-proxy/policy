@@ -148,20 +148,41 @@ impl ResponseParser {
         }
         let mut parts = raw.split(';');
         let media = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
-        if parts.any(|parameter| {
+        for parameter in parts {
             let parameter = parameter.trim();
-            parameter.is_empty()
-                || parameter
-                    .split_once('=')
-                    .is_none_or(|(name, value)| name.trim().is_empty() || value.trim().is_empty())
-        }) {
+            if parameter.is_empty() {
+                return Err(bad_response());
+            }
+            let (name, value) = parameter.split_once('=').ok_or_else(bad_response)?;
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(bad_response());
+            }
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(bad_response());
+            }
+            if !value.contains('"')
+                || (value.starts_with('"') && value.ends_with('"') && value.len() > 1)
+            {
+                continue;
+            }
             return Err(bad_response());
         }
-        let matches = match self.config.response_type {
-            ResponseType::Json => media == "application/json" || media.ends_with("+json"),
-            ResponseType::Text => media == "text/plain",
-        };
-        if matches { Ok(()) } else { Err(bad_response()) }
+        if let Some((mtype, msubtype)) = media.split_once('/') {
+            if mtype.is_empty() || msubtype.is_empty() {
+                return Err(bad_response());
+            }
+            let matches = match self.config.response_type {
+                ResponseType::Json => {
+                    mtype == "application" && (msubtype == "json" || msubtype.ends_with("+json"))
+                },
+                ResponseType::Text => mtype == "text" && msubtype == "plain",
+            };
+            if matches { Ok(()) } else { Err(bad_response()) }
+        } else {
+            Err(bad_response())
+        }
     }
 
     fn parse_json(&self, body: &[u8]) -> Result<AcquiredFacts, CalloutFailure> {

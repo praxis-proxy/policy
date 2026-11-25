@@ -31,6 +31,9 @@ impl Template {
         while let Some(open) = rest.find('{') {
             let (literal, after_open) = rest.split_at(open);
             if !literal.is_empty() {
+                if literal.contains('}') {
+                    return Err("template has an unmatched closing brace".to_owned());
+                }
                 parts.push(Part::Literal(literal.to_owned()));
             }
             let after_open = after_open

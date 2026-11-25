@@ -324,6 +324,11 @@ impl CompiledRequest {
                         MetadataCalloutErrorCode::RejectedDestination,
                     ));
                 }
+                if rendered.contains(['\t', '\n', '\r']) {
+                    return Err(CalloutFailure::new(
+                        MetadataCalloutErrorCode::RejectedDestination,
+                    ));
+                }
                 segments.push(&rendered);
             }
         }
@@ -342,12 +347,12 @@ impl CompiledRequest {
             let mut values = Vec::new();
             for (name, template) in form {
                 for value in template.render_repeated(&bag, extensions)? {
-                    values.push((name.clone(), value));
+                    values.push((name.as_str(), value));
                 }
             }
             let borrowed: Vec<_> = values
                 .iter()
-                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .map(|(name, value)| (*name, value.as_str()))
                 .collect();
             form_urlencode(&borrowed).to_vec()
         } else {
