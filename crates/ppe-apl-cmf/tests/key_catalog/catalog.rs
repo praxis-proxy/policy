@@ -12,7 +12,7 @@
 // Three hand-maintained lists used to describe the same vocabulary and could
 // disagree: the extractor modules that write keys, the capability to prefix
 // table in `capability_namespaces`, and the per-slot catalog in
-// `docs/content/cmf-extensions.md`. Nothing bound them together, so an
+// `docs/content/concepts/cmf-extensions.md`. Nothing bound them together, so an
 // extension field could land unbridged, a capability could name a prefix
 // nothing writes, and the document could go stale, each without failing a
 // test.
@@ -81,7 +81,7 @@ impl KeyType {
     }
 }
 
-/// The `Extensions` slot a key comes from, as `docs/content/cmf-extensions.md`
+/// The `Extensions` slot a key comes from, as `docs/content/concepts/cmf-extensions.md`
 /// titles its section.
 ///
 /// Recorded so the document check can hold a key to the right table rather
@@ -231,7 +231,7 @@ const fn family(key: &'static str, ty: KeyType, gating: Gating, slot: Slot) -> K
 /// Every key the bridge emits, in the order the document lists them.
 ///
 /// Fields deliberately left off the bag are absent from here too, and
-/// `docs/content/cmf-extensions.md` records the reason for each: the
+/// `docs/content/concepts/cmf-extensions.md` records the reason for each: the
 /// conversation transcript, the per-hop delegation chain, the tool schemas,
 /// the prompt arguments, and `security.objects` / `security.data`.
 pub(crate) const CATALOG: &[KeyEntry] = &[

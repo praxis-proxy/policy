@@ -96,5 +96,5 @@ model cannot forge the Session Taint history used for write-down enforcement.
 
 - [Backend Restriction](restrict.md): apply Session Taint labels to backend
   selection.
-- [Configuration](../configuration.md): configure the session store and other
-  runtime components.
+- [Configuration](../reference/configuration.md): configure the session store
+  and other runtime components.

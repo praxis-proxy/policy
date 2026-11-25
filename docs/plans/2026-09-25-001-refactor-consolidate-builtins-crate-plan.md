@@ -42,7 +42,7 @@ The saving is worth stating precisely, because the plan's risk budget should be 
 ## Scope Boundaries
 
 - `reference/plugins/pii-scanner` and `reference/plugins/audit-logger` stay where they are and stay unpublished. They are deliberately not builtins and serve as out-of-tree plugin examples.
-- The admission test for future work, stated because consolidation removes the per-manifest "why this is not a builtin" note that currently documents the boundary: a bundled integration the facade exposes as a feature and the maintainers commit to publishing and supporting is a builtin; anything else is a reference plugin. This sentence lands in `docs/content/crates.md` in U8 so contributors read it where they look.
+- The admission test for future work, stated because consolidation removes the per-manifest "why this is not a builtin" note that currently documents the boundary: a bundled integration the facade exposes as a feature and the maintainers commit to publishing and supporting is a builtin; anything else is a reference plugin. This sentence lands in `docs/content/reference/crates.md` in U8 so contributors read it where they look.
 - No facade feature name, `install_builtins` signature, re-export path, or policy `kind` string changes.
 - The `ppe-*` engine crates (`ppe-core`, `ppe-apl-core`, `ppe-apl-cmf`, `ppe-apl-runtime`, `ppe-orchestration`) are not consolidated.
 - No behavioral change to what any builtin does. This is a packaging refactor.
@@ -129,7 +129,7 @@ All verified directly against the tree.
 - **Operator-facing error strings adopt `praxis-policy-builtins`.** Keeping `praxis-policy-plugin-identity-jwt` in a message would name a crate that future releases do not publish. This is an intentional, operator-visible string change, and the assertion at `identity-jwt/src/resolver.rs:1579` moves with it.
 - **Test targets collapse from 18 into exactly eight directory harnesses — one per implementation that has tests** (jwt, api_key, oauth, ciba, cedar, cel, opa, valkey; Vault has none), each declaring a single-feature `required-features`. The granularity is forced rather than chosen: `required-features` is all-or-nothing, so a harness gated on four plugin features would be skipped entirely under `--features jwt`, and the per-unit scenarios asserting that a unit's tests pass under its own feature would silently run zero cases. Declared in the U1 scaffold, not improvised by whichever move unit lands first.
 - **The move uses `git mv`** so per-file history survives the relocation.
-- **No consolidation narrative in source comments.** `CONTRIBUTING.md` names "This used to be a separate crate" as a do-not-write; migration guidance lives in `CHANGELOG.md` and `docs/content/crates.md` only. Distinguish this from dependency rationale, which is technical justification and must be carried across verbatim.
+- **No consolidation narrative in source comments.** `CONTRIBUTING.md` names "This used to be a separate crate" as a do-not-write; migration guidance lives in `CHANGELOG.md` and `docs/content/reference/crates.md` only. Distinguish this from dependency rationale, which is technical justification and must be carried across verbatim.
 - **Rustdoc stays short and essential, with one exception that is not verbosity.** New module docs are one line of what the module provides. The retired crates' header blocks that explain protocol flow or a security tradeoff (CIBA's flow, OAuth's backend tradeoff, regorus's exclusions) are substantive and move to the corresponding module's rustdoc intact rather than being truncated.
 
 ---
@@ -599,9 +599,9 @@ Two caveats on reading that diagram. It describes **normal** edges only: `apl-ru
 **Dependencies:** U5, U7
 
 **Files:**
-- Modify: `docs/content/crates.md` (the "Bundled extensions" table and its "each is its own published crate" framing; add the migration table)
-- Modify: `docs/content/builtins.md` (the "all eight below" count and the feature table)
-- Modify: `docs/content/identity-claim-mapping.md` (the `../../builtins/plugins/identity-jwt/src/...` links, the literal presets path, and the two `-p <old-crate>` command lines)
+- Modify: `docs/content/reference/crates.md` (the "Bundled extensions" table and its "each is its own published crate" framing; add the migration table)
+- Modify: `docs/content/reference/builtins.md` (the "all eight below" count and the feature table)
+- Modify: `docs/content/guides/identity-claim-mapping.md` (the `../../builtins/plugins/identity-jwt/src/...` links, the literal presets path, and the two `-p <old-crate>` command lines)
 - Modify: `README.md` (feature list and the `builtins/` layout line)
 - Modify: `AGENTS.md`, `.claude/CLAUDE.md` (crate-layout block, workspace crate count, and the stale "three module directories use `mod.rs`" note, which this refactor changes)
 - Modify: `CHANGELOG.md` (migration entry; existing entries untouched)

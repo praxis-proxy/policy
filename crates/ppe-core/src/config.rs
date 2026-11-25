@@ -1620,6 +1620,7 @@ const ASSERTION_HEADER_KEYS: &[ConfigKey] = &[
     structural_key("members", KeyOwner::Core),
     structural_key("on_missing", KeyOwner::Core),
     structural_key("encode", KeyOwner::Core),
+    structural_key("allow_credential_target", KeyOwner::Core),
 ];
 
 /// A config scope: one mapping shape the loader reads, with one key table each.
@@ -4348,6 +4349,7 @@ pub fn resolve_assertions_for_route(
                 source: resolve_entry_source(entry),
                 on_missing: entry.on_missing,
                 encode: entry.encode,
+                allow_credential_target: entry.allow_credential_target,
                 declared_in: declared_in.clone(),
                 level,
                 overrode: None,
@@ -11037,7 +11039,7 @@ routes:
         let config = load(FOUR_LEVELS);
         assert!(dropped_inherited_assertions(&config).is_empty());
     }
-    /// The configuration in `docs/content/auditing.md` has to load. A doc whose
+    /// The configuration in `docs/content/guides/auditing.md` has to load. A doc whose
     /// examples do not parse is worse than no doc: it sends an operator
     /// debugging their YAML instead of their policy.
     ///

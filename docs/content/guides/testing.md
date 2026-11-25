@@ -1,0 +1,380 @@
+# Testing Policy
+
+Test APL by loading a policy, driving operations through the runtime, and
+asserting each outcome. Most route tests need no live backend.
+
+## What to test
+
+For each route, cover the outcomes its policy produces:
+
+- Allow: a caller with the required attributes passes and the
+  operation forwards.
+- Deny: a caller missing a required attribute is rejected, with the
+  expected reason code.
+- Redaction: a field is present for an entitled caller and redacted
+  for an unentitled one.
+- Information flow: a session that acquired a taint label is blocked
+  on a later operation that gates on it.
+- Delegation: a passing caller mints a token with the requested
+  scope, and a post-check denies when the granted scope is short.
+
+## Testing the policy alone
+
+To assert on what a policy block compiles to, without an engine, use the
+`test-util` feature of `praxis-policy-apl-core`:
+
+```toml
+[dev-dependencies]
+praxis-policy-apl-core = { version = "0.7.0", features = ["test-util"] }
+```
+
+`compile_test_policy(source, yaml)` compiles a document with a `route:`
+block and any `plugins:` declarations; `compile_test_route` returns just
+the compiled route. A block declaring no APL term compiles to an empty
+route rather than vanishing, so a test that a section carries no policy
+asserts `route.declared_phases().is_empty()` rather than an absence.
+
+This replaces the removed `compile_config`, which accepted a route shape
+that production never used.
+
+## Testing through the engine
+
+For behavior rather than compilation, load the policy into an engine and
+drive operations through it:
+
+```rust,ignore
+async fn engine_with(policy: &str) -> Arc<PolicyEngine> {
+    let engine = Arc::new(PolicyEngine::default());
+    praxis_policy::install_builtins(&engine);
+    engine.load_config_yaml(policy).expect("policy should load");
+    engine.initialize().await.expect("initialize");
+    engine
+}
+```
+
+A table keeps the allow and deny matrix readable, one row per case.
+Anonymous callers are enough to exercise structural rules
+(authentication gates, argument guards, `result` pipelines) with no IdP.
+Identity-dependent rules need a token, which means either a real IdP or
+a scripted transport.
+
+## Testing what reaches outside the process
+
+`make check-crypto-consumer` builds the facade with the three compatible
+reference plugins in `tests/consumers/crypto`, a separate Cargo workspace
+with locked dependencies. It asserts ordinary capability reports and the
+four FIPS selections (`fips`, `fips,api-key`, `fips,jwt-openssl-fips` and
+both identity builtins), checks each FIPS production dependency graph, and
+requires the expected diagnostics for missing or conflicting backends. CI
+runs this alongside the per-package feature checks.
+
+Plugins that fetch JWKS, exchange tokens, or dispatch approvals go
+through the host's `HttpTransport`, which makes their failure paths
+testable without a server. `praxis_policy_core::http_testing` provides
+`FakeTransport`, a scripted transport that makes the cases a mock server
+cannot reach assertable without sleeping: a timeout, a connect failure,
+a key rotation between two fetches.
+
+Those are the branches worth covering. A token exchange that returns a
+short scope, a decision point that denies, an IdP that is unreachable:
+policy exists to handle them, so a test that only covers the happy path
+proves the least interesting half.
+
+## Integration coverage
+
+Unit-evaluating a route proves the policy logic. It does not prove the
+plugins it dispatches behave correctly end to end. For effects that call
+out, add an integration test that exercises the real plugin through the
+engine, so the interaction is covered and not just the policy's intent.
+
+The Valkey session store's tests are the standing example of the limit
+here: they are `#[ignore]`-gated and need `VALKEY_TEST_URL` pointing at a
+real server, because a session store is not meaningfully covered by a
+fake. That component makes Session Taint survive a reload or
+span a replica, so it is worth running them for real.
+
+The CIBA script-cache reload test flushes the server's entire script cache.
+It starts a separate Valkey container, or uses `VALKEY_SCRIPT_TEST_URL` when
+that is set to a dedicated server. Do not point it at `VALKEY_TEST_URL`.
+
+The shared `DPoP` replay guard has an ignored Valkey test under the `jwt`
+and `valkey` features. It uses two independent connection pools to the same
+server and checks that the second gateway rejects a replay. Set
+`VALKEY_TEST_URL` or let testcontainers start Valkey, then run:
+
+```console
+cargo test -p praxis-policy-builtins --features jwt,valkey \
+  --test jwt valkey_rejects_a_replay_across_independent_gateway_pools -- --ignored
+```
+
+### Vault KV v2 live test
+
+The Vault provider's normal suite uses `FakeTransport` for deterministic
+HTTP-contract coverage. A live check is available with the `secrets-vault`
+and `http-hyper` features and is `#[ignore]`-gated because it needs a
+provisioned Vault instance. It uses AppRole, reads a normal KV v2 field, and
+then reads a version soft-deleted with Vault's real HTTP 404 and
+`data.data: null` response.
+
+Start a disposable Vault 1.19 dev server, which already mounts `secret/` as
+KV v2, and provision the policy, AppRole, and two test values (the root token
+is development-only; the commands below use a local Vault CLI):
+
+```console
+docker run -d --rm --name ppe-vault -p 127.0.0.1:8200:8200 \
+  -e VAULT_DEV_ROOT_TOKEN_ID=root hashicorp/vault:1.19 server \
+  -dev -dev-root-token-id=root
+export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root
+until vault status >/dev/null 2>&1; do sleep 1; done
+vault policy write ppe-live-read - <<'EOF'
+path "secret/data/live" { capabilities = ["read"] }
+path "secret/data/live-deleted" { capabilities = ["read"] }
+EOF
+vault auth enable approle
+vault write auth/approle/role/ppe-live token_policies=ppe-live-read
+vault kv put secret/live password=live-value
+vault kv put secret/live-deleted password=deleted-value
+vault kv delete -versions=1 secret/live-deleted
+export VAULT_ROLE_ID=$(vault read -field=role_id auth/approle/role/ppe-live/role-id)
+export VAULT_SECRET_ID=$(vault write -field=secret_id -f auth/approle/role/ppe-live/secret-id)
+```
+
+Run the ignored test, then stop the container:
+
+```console
+cargo test -p praxis-policy --features "crypto-rustcrypto,secrets-vault,http-hyper" \
+  --test vault_live -- --ignored --nocapture
+docker stop ppe-vault
+```
+
+The test fails if the ordinary read is not `live-value`, or if the
+soft-deleted response is not HTTP 404 with `data.data: null`, a deletion
+timestamp, and a `SecretError::NotFound` mapping.
+
+### `DPoP` live test
+
+The `DPoP` suite in `crates/builtins/tests/jwt` signs its proofs with the same
+library the verifier uses, so a mistake shared by both sides would pass. The
+live check takes the token and its `cnf.jkt` from Keycloak instead: Keycloak
+verifies the proof sent to its token endpoint and binds the token to the key
+itself. The test then presents that token, with a fresh proof, to the
+`identity/jwt` resolver, and checks a replay, the `Bearer` scheme, and another
+key's proof are refused. It needs the `jwt` and `http-hyper` features and is
+`#[ignore]`-gated.
+
+It creates a confidential client, `ppe-dpop-live`, that requires `DPoP`-bound
+tokens in the given realm, and deletes it afterwards. Keycloak 26.4 and later
+support `DPoP` by default. Against a disposable Keycloak:
+
+```console
+docker run -d --rm --name ppe-keycloak -p 127.0.0.1:8080:8080 \
+  -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+  quay.io/keycloak/keycloak:26.8.0 start-dev
+until curl -sf http://127.0.0.1:8080/realms/master >/dev/null; do sleep 2; done
+DPOP_LIVE_KEYCLOAK_URL=http://127.0.0.1:8080 DPOP_LIVE_REALM=master \
+  DPOP_LIVE_ADMIN_USER=admin DPOP_LIVE_ADMIN_PASSWORD=admin \
+  cargo test -p praxis-policy --features "crypto-rustcrypto,jwt,http-hyper" --test dpop_live -- --ignored --nocapture
+docker stop ppe-keycloak
+```
+
+The test fails if Keycloak refuses the proof, if the token's `cnf.jkt` differs
+from the thumbprint PPE computes for the same key, or if the resolver accepts
+the token without recording the binding.
+
+## Integration suites
+
+The suites under `tests/` drive the full engine, every builtin and the
+reference plugins the way a host does, through the policy-engine demo's
+policies:
+
+| Crate | Path | Covers |
+|-------|------|--------|
+| `praxis-policy-tests-integration` | `tests/integration` | Demo scenarios 01 to 12 per PDP, the host contract, live mode |
+| `praxis-policy-tests-resilience` | `tests/resilience` | Dependency failures, timeouts, concurrency isolation |
+| `praxis-policy-tests-security` | `tests/security` | Adversarial tokens, headers and arguments |
+| `praxis-policy-test-utils` | `tests/utils` | The reference host, scripted IdP, upstream stand-in, fixtures, leak checks |
+
+Each suite is one test binary behind a `suite` feature. The `make test` pass
+builds these suites with the expanded `WORKSPACE_TEST_FEATURES` set; dedicated
+targets use explicit feature selections. The live-mode command below selects
+`experimental-ratelimit` to enable the suite and its rate-limit support. The
+demo policies live in
+`tests/integration/fixtures/`, each with a header recording how it departs
+from the demo.
+
+```console
+make test-integration   # all three suites
+make test-resilience
+make test-security
+```
+
+### The reference host
+
+`tests/utils/src/host.rs` mirrors the per-request sequence of the praxis
+`policy` filter: the identity gate, `cmf.tool_pre_invoke`, delegated
+tokens and request assertions, the upstream, response assertions, then
+`cmf.tool_post_invoke`. It returns engine-level outcomes (allow or deny,
+violation code, protocol error details, what the upstream saw), not the
+wire format. It does not reproduce host-owned behavior, which praxis tests
+itself: the SSRF-checking transport, Content-Length fitting of a rewritten
+response, JSON-RPC parsing and classifier metadata, body size
+ceilings, and header validity on the wire. The module
+docs list each.
+
+`Outcome::assert_no_leaks` also checks all OAuth tokens returned by the host's
+dependencies, including tokens minted before a denial and on earlier calls.
+Scenarios still plant inbound credentials and other sensitive values.
+
+### Host drift
+
+`host.rs` records the praxis commit it mirrors in `PRAXIS_COMMIT` and the
+files in `MIRRORED`. On pull requests, the `host-drift` job in
+`.github/workflows/integration-live.yml` checks out that exact commit and
+validates that every listed path exists as a file. Invalid pins, incomplete
+file lists and missing files fail the check. Changes to praxis `main` cannot
+change a PR's result.
+
+Scheduled and manual runs also diff those files from the reviewed commit to
+praxis `main` and fail, naming each changed file, when they differ. The logs
+record both commit IDs and the diff for review. Review the diff, update the
+host if the sequence changed, then move `PRAXIS_COMMIT`. A changed blob is a
+review signal; this check does not prove behavioral equivalence between hosts.
+
+### Known gaps
+
+A test that exposes an open defect is named `known_gap_*`, asserts the
+desired behavior with a message containing `known gap #<issue>`, and is
+marked `#[should_panic(expected = "known gap #<issue>")]`. It passes while
+the defect stands and fails once the fix lands. The fixing change removes
+the marker and the prefix. Preconditions and leak checks run before the gap
+assertion, so unrelated failures cannot satisfy it.
+
+Redaction paths match object keys without case sensitivity. `ssn` covers a
+top-level `SSN`; `employee.ssn` covers that nested field; `**.ssn` covers the
+name at any depth. A JSON record carried as a string in the host's joined
+`text` field is not parsed by the policy engine. Redact `text` as a whole or
+use a PII scanner for that shape. The original redaction cases were policy
+shape, and `tests/security/tests/suite/redaction.rs` holds positive tests.
+Numeric approval gates still need type and presence checks for missing
+amounts; present objects and nulls fail numeric comparisons closed.
+
+### Live mode
+
+The integration suite's `scenarios::live` tests run the scenarios against
+real dependencies. Each is `#[ignore]` and prints a skip line and passes
+when its variables are unset, so `--include-ignored` stays green.
+
+| Variable | Selects |
+|----------|---------|
+| `VALKEY_TEST_URL` | Scenarios 08 and 09 with the Valkey session store |
+| `PPE_KEYCLOAK_URL` | Scenarios 01 to 06 and 12 against the `policy-demo` realm |
+| `PPE_CIBA_AUTO_APPROVE` | With `PPE_KEYCLOAK_URL`, scenario 11 through a CIBA channel that approves on its own |
+| `VAULT_ADDR`, `VAULT_ROLE_ID`, `VAULT_SECRET_ID` | The secret assertion read from Vault `secret/hr-mcp#api_key` |
+| `VALKEY_TEST_URL` with `PPE_KEYCLOAK_URL` and `PPE_CIBA_AUTO_APPROVE` | Scenario 11 across two hosts sharing a Valkey CIBA store |
+
+Live personas get real tokens from the realm: a password grant for `bob`,
+`eve` and `alice`, `client_credentials` for `hr-copilot`. Keycloak ignores
+`actor_token`, so no live test asserts an `act` claim. The upstream stays
+the in-process stand-in.
+
+`tests/integration/fixtures/keycloak/realm-export.json` is the demo realm.
+Stock Keycloak serves it, with token exchange on; `PPE_KEYCLOAK_URL` must
+match the issuer it advertises:
+
+```console
+docker run -d --rm --name ppe-keycloak -p 127.0.0.1:8081:8081 \
+  -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+  -e KC_HOSTNAME=http://localhost:8081 -e KC_FEATURES=token-exchange-standard \
+  -v "$PWD/tests/integration/fixtures/keycloak:/opt/keycloak/data/import:ro" \
+  quay.io/keycloak/keycloak:26.6.3 start-dev --import-realm --http-port=8081
+docker run -d --rm --name ppe-valkey -p 127.0.0.1:6379:6379 valkey/valkey:8.1.10
+PPE_KEYCLOAK_URL=http://localhost:8081 VALKEY_TEST_URL=redis://127.0.0.1:6379 \
+  cargo test --features experimental-ratelimit -p praxis-policy-tests-integration \
+  -- --ignored --nocapture scenarios::live::
+docker stop ppe-keycloak ppe-valkey
+```
+
+To test the ACL users in
+[Elicitation](../apl/elicitation.md#shared-server-separate-acl-user), start a
+Valkey server and run the ignored `documented_acl_users` test. Set
+`PPE_ACL_VALKEY` to its address and provide both passwords:
+
+```console
+docker run -d --rm --name ppe-acl-valkey -p 127.0.0.1:6380:6379 valkey/valkey:8.1.10
+docker exec ppe-acl-valkey valkey-cli ACL SETUSER ppe-taint reset on '>taint-pw' \
+  '~taint:v1:*' resetchannels +sadd +smembers +expire +multi +exec +ping +unwatch '+client|setinfo'
+docker exec ppe-acl-valkey valkey-cli ACL SETUSER ppe-ciba reset on '>ciba-pw' \
+  '~ciba:v1:*' resetchannels +hmset +hgetall +hset +pexpire +del +exists \
+  +hget +hexists +hdel +time +multi +exec +evalsha '+script|load' \
+  +ping +unwatch '+client|setinfo'
+PPE_ACL_VALKEY=127.0.0.1:6380 PPE_TAINT_PW=taint-pw PPE_CIBA_PW=ciba-pw \
+  cargo nextest run -p praxis-policy-builtins --features "crypto-rustcrypto,valkey,elicitation-ciba" --test valkey \
+  --run-ignored only -E 'test(documented_acl_users)'
+docker stop ppe-acl-valkey
+```
+
+For Vault, provision a dev server as in the section above, with the policy
+granting `secret/data/hr-mcp` and `vault kv put secret/hr-mcp api_key=...`.
+The CIBA scenario needs the demo's Keycloak image, which adds the HTTP
+authentication-channel SPI, and a channel that approves without a human;
+CI has neither and skips it. The live workflow runs weekly and on manual
+dispatch, and never blocks a merge.
+
+## Running
+
+```console
+cargo nextest run --workspace          # everything
+cargo nextest run -p praxis-policy-apl-core --lib
+make test                              # both feature passes, as CI runs them
+make test-fips-no-provider             # FIPS checks that need no provider
+make test-fips-provider                # FIPS suites; needs a loaded provider
+```
+
+Tests run twice, once with Cargo defaults and once with the expanded
+`WORKSPACE_TEST_FEATURES` set.
+The facade has no builtin enabled by default, so its builtin tests
+are feature-gated and a single pass would hide them.
+
+The FIPS backend is mutually exclusive with RustCrypto, so it has its own
+targets rather than an `--all-features` pass. `test-fips-no-provider` checks
+the capability report, the HMAC and config refusals, and that hashing and
+engine initialization fail closed without a provider. It selects a
+default-provider-only OpenSSL configuration and requires
+`PRAXIS_REQUIRE_FIPS_PROVIDER` to be unset. It checks the report for each FIPS
+selection and that an engine-only `fips` build refuses to start. Its
+rate-limit test invokes the
+handler directly and asserts a safe denial and
+throttled crypto alarm when instruction hashing fails.
+The runtime crypto-failure harness checks route denials, PDP-cache failures,
+session-id failures and unkeyed audit digest omission, including safe errors
+and skipped downstream work.
+The API-key cases check both the file-index and cache failure alarms.
+`test-fips-provider` runs the core, CMF and runtime suites under `fips`,
+including startup recovery after provider loading in an isolated test process,
+and starts an engine-only `fips` build; it requires
+`PRAXIS_REQUIRE_FIPS_PROVIDER` and a loaded OpenSSL FIPS provider, as in the
+CI job. Both fail when a named test selects nothing. Groups of
+exact names also require the expected test count, so a partial match cannot
+silently drop a renamed test.
+
+The `jwt_fips` builtins suite covers `jwt-openssl-fips` and runs under
+`fips,jwt-openssl-fips`, without API-key. The `jsonwebtoken`
+provider and OpenSSL's provider state are process-wide, so each case re-runs
+itself in a child process with its own `OPENSSL_CONF`: `fips-default.cnf`
+(FIPS as the default), `fips-provider.cnf` (FIPS loaded but not the default)
+or `fips-no-provider.cnf`. Tokens come from the RFC 7515 and RFC 7520
+examples or are signed with RustCrypto, so no OpenSSL code signs what the
+suite verifies; see `crates/builtins/tests/jwt_fips/fixtures/README.md`.
+The missing-provider case runs in `test-fips-no-provider`; the rest run in
+`test-fips-provider`.
+
+The `jwt_verify` bench in `praxis-policy-builtins` compares the two JWT
+backends on the same tokens; its doc comment has both commands. Run the FIPS
+binary under `fips-default.cnf` after building with an ordinary config.
+
+## Related documentation
+
+- [Crates](../reference/crates.md): locate the APIs and test surfaces in the workspace.
+- [Builtins](../reference/builtins.md): review the bundled components covered by
+  integration tests.
+- [Documentation index](../index.md): return to the documentation map.

@@ -957,7 +957,14 @@ fn the_assertions_tables_are_the_accept_sets() {
     );
     assert_eq!(
         names(ConfigScope::AssertionHeader),
-        vec!["name", "from", "members", "on_missing", "encode"],
+        vec![
+            "name",
+            "from",
+            "members",
+            "on_missing",
+            "encode",
+            "allow_credential_target",
+        ],
         "an assertions header entry's accept set changed"
     );
 }

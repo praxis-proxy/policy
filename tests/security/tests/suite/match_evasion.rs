@@ -27,8 +27,8 @@ fn eve_reads_jane(tool: &str) -> Call {
 /// Accepted behavior. Route selection is an exact match, so a variant
 /// selects no route and passes on global policy alone, as an unknown tool
 /// does: no `tool: "*"` catch-all is declared, and a request matching no
-/// route falls through to global policy (`docs/content/http-routing.md`,
-/// "The catch-all"; `docs/content/identity-delegation.md`, layers table).
+/// route falls through to global policy (`docs/content/guides/http-routing.md`,
+/// "The catch-all"; `docs/content/guides/identity-delegation.md`, layers table).
 /// What the engine owes is that the variant never takes the
 /// `get_compensation` path without its gates: nothing delegates, no route
 /// step runs, and the name reaches the upstream byte for byte, so an exact

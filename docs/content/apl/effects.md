@@ -86,8 +86,8 @@ are members; a predicate rule such as `require(...)`, or a PDP call, is
 not, and nesting one is a load error. Gate first and group second, as
 above, rather than trying to run the gates concurrently.
 
-`parallel` also rejects field operations, delegation, and metadata fetches, because a
-discarded branch would silently lose those effects. Use `sequential`
+`parallel` also rejects field operations, delegation, and metadata fetches,
+because a discarded branch would silently lose those effects. Use `sequential`
 (the default for a `pre_invocation:` list) whenever one effect depends
 on another.
 

@@ -1,0 +1,31 @@
+{
+  "kind": "TokenReview",
+  "apiVersion": "authentication.k8s.io/v1",
+  "metadata": {},
+  "spec": {
+    "token": "<redacted>",
+    "audiences": [
+      "praxis-gateway"
+    ]
+  },
+  "status": {
+    "authenticated": true,
+    "user": {
+      "username": "system:serviceaccount:team-a:agent-bot",
+      "uid": "cf3c35b0-80e9-4be2-8442-c5b33d463a3b",
+      "groups": [
+        "system:serviceaccounts",
+        "system:serviceaccounts:team-a",
+        "system:authenticated"
+      ],
+      "extra": {
+        "authentication.kubernetes.io/credential-id": [
+          "JTI=119ab207-91f9-4755-a6b9-ab944c68a3b8"
+        ]
+      }
+    },
+    "audiences": [
+      "praxis-gateway"
+    ]
+  }
+}

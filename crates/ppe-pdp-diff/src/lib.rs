@@ -10,7 +10,7 @@
 //!
 //! The semantic subset and the known-divergence allowlist are documented in
 //! this crate's `README.md`. The CMF absent-value contract those cases
-//! check is `docs/content/cmf-extensions.md`. The catalog and allowlist here are
+//! check is `docs/content/concepts/cmf-extensions.md`. The catalog and allowlist here are
 //! the executable form.
 
 /// Factory `kind:` strings this harness drives.

@@ -49,7 +49,7 @@ For the FIPS profile, disable defaults and select `fips`, optionally with
 `PolicyEngine::initialize()` checks that the shared SHA-256 backend works.
 This profile rejects keyed content provenance, which requires HMAC;
 unkeyed content provenance remains available through SHA-256. See
-[FIPS](docs/content/fips.md).
+[FIPS](docs/content/guides/fips.md).
 
 The crates are versioned together and released together, so a single `0.7.0`
 requirement covers the set. Requires Rust 1.92 or newer.

@@ -9,9 +9,10 @@
 //
 // The host calls `PolicyEngine::load_config_yaml(yaml)`. praxis-policy-core
 // parses the YAML twice (once into a typed `PolicyConfig`, once into a
-// raw `serde_yaml::Value`), runs its own plugin instantiation, then
-// walks each registered visitor in registration order:
+// raw `serde_yaml::Value`), lets visitors validate the document, runs its own
+// plugin instantiation, then walks each visitor in registration order:
 //
+//   0. `validate_before_load` — before the new runtime snapshot is published
 //   1. `visit_plugins`       — once per visitor, immediately after
 //                              praxis-policy-core's own plugin instantiation,
 //                              receiving the parsed `&[PluginConfig]`
@@ -70,6 +71,17 @@ pub trait ConfigVisitor: Send + Sync {
     /// nothing looks a visitor up by it, and a visitor need not have a YAML key
     /// of its own — APL reads the policy terms written on each section.
     fn name(&self) -> &str;
+
+    /// Validate the complete raw document before the engine publishes its new
+    /// runtime snapshot. Use this only for checks that can run without
+    /// instantiating plugins or mutating visitor state.
+    /// # Errors
+    ///
+    /// Returns `VisitorError` when the document must be rejected atomically,
+    /// leaving the currently active runtime snapshot unchanged.
+    fn validate_before_load(&self, _yaml: &serde_yaml::Value) -> Result<(), VisitorError> {
+        Ok(())
+    }
 
     /// Visit the typed plugin declarations from the root `plugins:`
     /// block. Called once per visitor, immediately after praxis-policy-core's

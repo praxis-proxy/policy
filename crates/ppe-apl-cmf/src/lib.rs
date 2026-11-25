@@ -50,7 +50,7 @@
 //! policy author may reference, so adding one here widens the language.
 //!
 //! The absent-value contract, the original-vs-flattened relationship, and the
-//! per-slot catalog are in `docs/content/cmf-extensions.md`.
+//! per-slot catalog are in `docs/content/concepts/cmf-extensions.md`.
 
 /// Bridges agent session and lineage into `agent.*` keys.
 pub mod agent;
@@ -100,7 +100,7 @@ pub use http::extract_http;
 pub use llm::{extract_llm, extract_llm_request};
 pub use mcp::extract_mcp;
 pub use meta::extract_meta;
-pub use metadata::extract_metadata;
+pub use metadata::{extract_metadata, project_structured_metadata};
 pub use payload::{extract_args, extract_data, extract_result};
 pub use provenance::extract_provenance;
 pub use request::extract_request;

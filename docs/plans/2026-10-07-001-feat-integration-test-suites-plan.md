@@ -103,7 +103,7 @@ R13).
   `register_vault_secret_provider`). `install_builtins` is the one-call path; it cannot take
   extra session-store factories or Vault.
 - Assertions: `crates/ppe-core/src/assertions/{config,render,apply}.rs`; secret-sourced headers
-  ride on `HttpExtension.secret_headers` (`docs/content/assertions.md`).
+  ride on `HttpExtension.secret_headers` (`docs/content/reference/assertions.md`).
 - Scripted HTTP: `crates/ppe-core/src/http_testing.rs` (`FakeTransport`). It matches by URL
   fragment, replies from a per-fragment queue, and ignores `HttpRequest.timeout` and
   `max_response_bytes`. `with_latency` is a real sleep applied to every call.
@@ -745,7 +745,7 @@ non-blocking CI jobs (including host drift) and contributor docs.
 - Create: `tests/integration/fixtures/keycloak/realm-export.json` (copied from the demo)
 - Modify: `tests/utils/src/fixtures.rs`, `tests/utils/src/host.rs` (live transport and endpoints)
 - Create: `.github/workflows/integration-live.yml` (Keycloak and Valkey service containers and a host-drift job; `continue-on-error`; scheduled and manual dispatch; no bearer values echoed)
-- Modify: `docs/content/testing.md`, `CONTRIBUTING.md` (suite layout, make targets, live env vars, known-gap convention, host-drift check)
+- Modify: `docs/content/guides/testing.md`, `CONTRIBUTING.md` (suite layout, make targets, live env vars, known-gap convention, host-drift check)
 - Modify: `.claude/CLAUDE.md` and `AGENTS.md` quick reference for the new make targets
 
 **Approach:**
@@ -814,4 +814,4 @@ run each suite locally.
 - Epic: https://github.com/praxis-proxy/policy/issues/99
 - Praxis suites: `../praxis/tests/{integration,security,resilience,utils}`
 - Demo: `praxis-demos/demos/policy-engine`
-- Testing docs: `docs/content/testing.md`, `docs/safety-invariants.md`, `docs/content/assertions.md`
+- Testing docs: `docs/content/guides/testing.md`, `docs/safety-invariants.md`, `docs/content/reference/assertions.md`

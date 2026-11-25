@@ -69,7 +69,7 @@ The engine already has one structural dispatch list in policy mode, `authenticat
   - override limiter instances built once per config snapshot, so counters are stable for a whole config generation (see Key Technical Decisions);
   - a documented eviction policy: Limitador's bounded counter store can evict on capacity, which resets the affected counter; Limitador reports no eviction event, so small capacity with an unbounded key warns at load instead.
 - R9. Docs:
-  - `docs/content/rate-limiting.md` is the operator guide, with per-user (post-identity) and edge (pre-identity) examples that omit default keys; the plugin README is a short source-level entry point linking to it;
+  - `docs/content/guides/rate-limiting.md` is the operator guide, with per-user (post-identity) and edge (pre-identity) examples that omit default keys; the plugin README is a short source-level entry point linking to it;
   - `docs/content` updated: index, configuration scope table, pipeline hook table, http-routing host obligations, builtins, crates, cmf-extensions and extensions attribute rows, upgrade notes;
   - the CHANGELOG updated;
   - safety-invariants catalog rows;
@@ -141,7 +141,7 @@ The engine already has one structural dispatch list in policy mode, `authenticat
   - blocking phases fail closed;
   - `on_error: ignore` is a documented deliberate fail-open row;
   - I12 requires a non-allow cell for each dispatch mode.
-- `docs/content/threat-model.md`: never key on caller-controlled values. The repo has no prior guidance on client IP or `X-Forwarded-For`, so this plan writes the trust contract.
+- `docs/content/concepts/threat-model.md`: never key on caller-controlled values. The repo has no prior guidance on client IP or `X-Forwarded-For`, so this plan writes the trust contract.
 - `docs/dev/conventions.md` and `CLAUDE.md`:
   - a new capability needs unit and integration tests with allow and deny cases, docs and a bench;
   - coverage stays at 96% or above;
@@ -592,14 +592,16 @@ graph TD
 - Modify:
   - `crates/builtins/src/plugins/ratelimit/README.md`
   - `docs/content/index.md`
-  - `docs/content/configuration.md`, `pipeline.md`, `http-routing.md`
-  - `docs/content/builtins.md`, `crates.md`
-  - `docs/content/cmf-extensions.md`, `extensions.md`
-  - `docs/content/upgrade-apl.md`
+  - `docs/content/reference/configuration.md`
+  - `docs/content/concepts/pipeline.md`
+  - `docs/content/guides/http-routing.md`
+  - `docs/content/reference/builtins.md`, `crates.md`
+  - `docs/content/concepts/cmf-extensions.md`, `extensions.md`
+  - `docs/content/guides/upgrade-apl.md`
   - `docs/safety-invariants.md`
   - `docs/proposals/00134_limitador-rate-limit-plugin.md`
   - `CHANGELOG.md`
-- Add: `docs/content/rate-limiting.md`
+- Add: `docs/content/guides/rate-limiting.md`
 
 **Approach:**
 - **Rate-limiting guide:** document that a route that skips authentication but inherits a per-user limiter needs `rate_limits: {replace_inherited: true}`, and that the edge example needs a host that sets `client_address`. Include per-user post-identity and edge pre-identity examples, both omitting default keys (`mode`, `on_error`, `engine_settings.dispatch`, `counter_capacity`). Keep `capabilities` and explain why it is needed.
