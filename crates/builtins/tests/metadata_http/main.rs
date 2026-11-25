@@ -106,11 +106,10 @@ async fn inactive_account_response_is_denied() {
         FakeTransport::new().respond_with("/v1/accounts/check_account", |_| {
             let mut headers = HeaderMap::new();
             headers.insert("content-type", "application/json".parse().unwrap());
-            Ok(HttpResponse::new(
-                200,
-                Bytes::from_static(br#"{"active":false}"#),
+            Ok(
+                HttpResponse::new(200, Bytes::from_static(br#"{"active":false}"#))
+                    .with_headers(headers),
             )
-            .with_headers(headers))
         }),
     );
     let engine = Arc::new(PolicyEngine::default());
