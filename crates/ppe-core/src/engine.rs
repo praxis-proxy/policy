@@ -2491,8 +2491,11 @@ impl PolicyEngine {
     /// `filter_extensions` applies the `perform_http` gate; this only
     /// makes the transport reachable at all.
     fn with_host_services(&self, mut extensions: Extensions) -> Extensions {
+        if let Some(remaining) = extensions.http_transport.remaining() {
+            extensions = extensions.with_invocation_deadline(remaining);
+        }
         if let Some(t) = self.http_transport.get() {
-            extensions.http_transport = crate::host::HttpTransportSlot::installed(Arc::clone(t));
+            extensions.http_transport.install(Arc::clone(t));
         }
         extensions
     }
