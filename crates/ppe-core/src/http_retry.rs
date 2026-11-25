@@ -290,10 +290,18 @@ pub(crate) async fn execute_with_retry_until(
         let attempt_deadline = deadline.map_or(attempt_deadline, |invocation| {
             invocation.min(attempt_deadline)
         });
-        let result = match execute_at_deadline(transport, attempt_req, attempt_deadline).await {
+        let mut result = match execute_at_deadline(transport, attempt_req, attempt_deadline).await {
             Ok(result) => result,
             Err(_) => Err(HttpTransportError::Timeout),
         };
+        if Instant::now() >= attempt_deadline {
+            if let Err(error) = &result
+                && !policy.should_retry(error)
+            {
+                return Err(HttpTransportError::Timeout);
+            }
+            result = Err(HttpTransportError::Timeout);
+        }
         let err = match result {
             Ok(response) => return Ok(response),
             Err(error) => error,
@@ -324,13 +332,9 @@ async fn execute_at_deadline(
     if Instant::now() >= deadline {
         return Err(());
     }
-    let result = tokio::time::timeout_at(deadline, transport.execute(req))
+    tokio::time::timeout_at(deadline, transport.execute(req))
         .await
-        .map_err(|_timeout_error| ())?;
-    if Instant::now() >= deadline {
-        return Err(());
-    }
-    Ok(result)
+        .map_err(|_timeout_error| ())
 }
 
 #[cfg(test)]
@@ -355,6 +359,7 @@ mod tests {
             let transport = BlockingFailureTransport {
                 attempts: Arc::clone(&attempts),
                 delay: Duration::from_millis(40),
+                error: HttpTransportError::Connect("late failure".to_owned()),
             };
             let timeout = Duration::from_millis(20);
             let request = HttpRequest::get("https://metadata.example/account").timeout(
@@ -384,6 +389,49 @@ mod tests {
                 attempts.load(Ordering::SeqCst),
                 1,
                 "the {budget} budget must expire during the transport poll"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn late_terminal_errors_do_not_become_retryable_timeouts() {
+        for (error, expected_attempts) in [
+            (HttpTransportError::Rejected("egress refused".to_owned()), 1),
+            (
+                HttpTransportError::InvalidRequest("invalid URL".to_owned()),
+                1,
+            ),
+            (
+                HttpTransportError::ResponseTooLarge {
+                    actual: 2,
+                    limit: 1,
+                },
+                1,
+            ),
+            (HttpTransportError::Connect("late failure".to_owned()), 3),
+        ] {
+            let attempts = Arc::new(AtomicU32::new(0));
+            let transport = BlockingFailureTransport {
+                attempts: Arc::clone(&attempts),
+                delay: Duration::from_millis(40),
+                error: error.clone(),
+            };
+            let request = HttpRequest::get("https://metadata.example/account")
+                .timeout(Duration::from_millis(20));
+
+            let result = execute_with_retry(&transport, request, fast(RetryPolicy::idempotent()))
+                .await
+                .expect_err("every attempt returns a late transport error");
+
+            assert_eq!(
+                result,
+                HttpTransportError::Timeout,
+                "late {error:?} errors must report deadline exhaustion"
+            );
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                expected_attempts,
+                "timeout normalization must preserve the retry classification of {error:?}"
             );
         }
     }
@@ -741,6 +789,7 @@ mod tests {
     struct BlockingFailureTransport {
         attempts: Arc<AtomicU32>,
         delay: Duration,
+        error: HttpTransportError,
     }
 
     #[async_trait]
@@ -752,7 +801,7 @@ mod tests {
         async fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(self.delay);
-            Err(HttpTransportError::Connect("late failure".to_owned()))
+            Err(self.error.clone())
         }
     }
 }
