@@ -230,27 +230,42 @@ mod tests {
 
     #[tokio::test]
     async fn a_revoked_slot_outranks_an_unavailable_one() {
-        let transport = Arc::new(
-            FakeTransport::new()
-                .json("/introspect", 200, r#"{"active":false}"#)
-                .json("/introspect", 500, ""),
-        );
-        let ext = ext(
-            &transport,
-            &[
-                (IdentitySlot::Subject, jwt(ISSUER)),
-                (IdentitySlot::Client, jwt(ISSUER)),
-            ],
-        );
+        // Both orders, so neither answer can win only by arriving first.
+        for (first, second) in [
+            ((200, r#"{"active":false}"#), (500, "")),
+            ((500, ""), (200, r#"{"active":false}"#)),
+        ] {
+            let transport = Arc::new(
+                FakeTransport::new()
+                    .json("/introspect", first.0, first.1)
+                    .json("/introspect", second.0, second.1),
+            );
+            let ext = ext(
+                &transport,
+                &[
+                    (IdentitySlot::Subject, jwt(ISSUER)),
+                    (IdentitySlot::Client, jwt(ISSUER)),
+                ],
+            );
 
-        let result = run(
-            &checker(json!({})),
-            &asked(&[IdentitySlot::Subject, IdentitySlot::Client]),
-            &ext,
-        )
-        .await;
+            let result = run(
+                &checker(json!({})),
+                &asked(&[IdentitySlot::Subject, IdentitySlot::Client]),
+                &ext,
+            )
+            .await;
 
-        assert_eq!(denied_with(&result).0, REVOKED_CODE, "revoked wins");
+            assert_eq!(
+                denied_with(&result).0,
+                REVOKED_CODE,
+                "revoked wins after {first:?}"
+            );
+            assert_eq!(
+                transport.call_count(),
+                2,
+                "both slots were asked after {first:?}"
+            );
+        }
     }
 
     // -------------------------------------------------------------------------
