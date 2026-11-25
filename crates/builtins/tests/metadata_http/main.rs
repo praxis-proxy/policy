@@ -167,6 +167,37 @@ async fn quoted_charset_parameter_accepted() {
 }
 
 #[tokio::test]
+async fn trailing_semicolon_in_content_type_accepted() {
+    let http = Arc::new(
+        FakeTransport::new().respond_with("/v1/accounts/check_account", |_| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", "application/json;".parse().unwrap());
+            Ok(
+                HttpResponse::new(200, Bytes::from_static(br#"{"active":true,"plan":"enterprise"}"#))
+                    .with_headers(headers),
+            )
+        }),
+    );
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(KIND, Box::new(MetadataHttpFactory));
+    register_apl(&engine, AplOptions::in_process());
+    let transport: Arc<dyn HttpTransport> = http.clone();
+    assert!(engine.set_http_transport(transport));
+    engine
+        .load_config_yaml(POLICY)
+        .expect("documented metadata HTTP policy loads");
+    engine.initialize().await.expect("engine initializes");
+
+    let (result, _background) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), extensions(), None)
+        .await;
+    assert!(
+        result.continue_processing,
+        "trailing semicolon in Content-Type is accepted (RFC 9110)"
+    );
+}
+
+#[tokio::test]
 async fn invalid_media_type_format_rejects_response() {
     let http = Arc::new(
         FakeTransport::new().respond_with("/v1/accounts/check_account", |_| {

@@ -149,8 +149,23 @@ impl ResponseParser {
         let mut parts = raw.split(';');
         let media = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
         for parameter in parts {
-            if parameter.trim().is_empty() || !parameter.contains('=') {
+            let parameter = parameter.trim();
+            if parameter.is_empty() {
+                continue;
+            }
+            let (name, value) = parameter.split_once('=').ok_or_else(bad_response)?;
+            let name = name.trim();
+            if name.is_empty() {
                 return Err(bad_response());
+            }
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(bad_response());
+            }
+            if value.starts_with('"') {
+                if !value.ends_with('"') || value.len() < 2 {
+                    return Err(bad_response());
+                }
             }
         }
         if let Some((mtype, msubtype)) = media.split_once('/') {
