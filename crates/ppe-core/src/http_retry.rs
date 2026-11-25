@@ -222,8 +222,10 @@ impl Default for RetryPolicy {
 /// # Errors
 ///
 /// Returns the final [`HttpTransportError`] when attempts are exhausted or the
-/// policy will not repeat it. An exhausted attempt, retry, or invocation
-/// deadline returns [`HttpTransportError::Timeout`].
+/// policy will not repeat it. An exhausted attempt or retry budget returns
+/// [`HttpTransportError::Timeout`]. Request-time host services also enforce
+/// the invocation deadline; direct calls to this function have no invocation
+/// deadline.
 pub async fn execute_with_retry(
     transport: &dyn HttpTransport,
     req: HttpRequest,
@@ -325,7 +327,7 @@ async fn execute_at_deadline(
     let result = tokio::time::timeout_at(deadline, transport.execute(req))
         .await
         .map_err(|_timeout_error| ())?;
-    if Instant::now() >= deadline && result.is_ok() {
+    if Instant::now() >= deadline {
         return Err(());
     }
     Ok(result)
@@ -345,6 +347,46 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicU32;
+
+    #[tokio::test]
+    async fn late_transport_errors_are_classified_as_timeouts() {
+        for budget in ["attempt", "retry", "invocation"] {
+            let attempts = Arc::new(AtomicU32::new(0));
+            let transport = BlockingFailureTransport {
+                attempts: Arc::clone(&attempts),
+                delay: Duration::from_millis(40),
+            };
+            let timeout = Duration::from_millis(20);
+            let request = HttpRequest::get("https://metadata.example/account").timeout(
+                if budget == "attempt" {
+                    timeout
+                } else {
+                    Duration::from_secs(1)
+                },
+            );
+            let policy = if budget == "retry" {
+                RetryPolicy::none().with_total_budget(timeout)
+            } else {
+                RetryPolicy::none()
+            };
+            let deadline = (budget == "invocation").then(|| Instant::now() + timeout);
+
+            let error = execute_with_retry_until(&transport, request, policy, deadline)
+                .await
+                .expect_err("the transport returns an error after its deadline");
+
+            assert_eq!(
+                error,
+                HttpTransportError::Timeout,
+                "an expired {budget} budget must override a late transport error"
+            );
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                1,
+                "the {budget} budget must expire during the transport poll"
+            );
+        }
+    }
 
     /// Fails `fail_times` times, then succeeds. Counts every attempt.
     #[derive(Debug)]
@@ -689,5 +731,28 @@ mod tests {
             distinct > 1,
             "sixteen callers produced one delay: {delays:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    #[derive(Debug)]
+    struct BlockingFailureTransport {
+        attempts: Arc<AtomicU32>,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl HttpTransport for BlockingFailureTransport {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the regression requires a transport poll that blocks past its deadline"
+        )]
+        async fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            Err(HttpTransportError::Connect("late failure".to_owned()))
+        }
     }
 }

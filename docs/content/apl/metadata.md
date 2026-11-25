@@ -101,9 +101,11 @@ across nested dispatches and cap every HTTP attempt, connect hint, retry budget,
 and backoff before transport dispatch. An adapter may configure a stricter
 deadline but cannot extend the invocation budget. If no time remains, the host
 service returns the stable transport timeout classification without dispatching
-the request. If the route deadline expires before the source can return a
-trusted `metadata.timeout` record, the framework timeout still fails closed and
-`ignore` does not apply.
+the request. Sources using `on_error: ignore` must set a request deadline within
+the route budget remaining after earlier steps, leaving enough time to build
+and return a trusted `metadata.timeout` record. If the route deadline expires
+before the source can return that record, the framework timeout still fails
+closed and `ignore` does not apply.
 
 ## Callout audit contract
 

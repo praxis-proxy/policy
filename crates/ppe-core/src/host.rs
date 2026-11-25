@@ -73,10 +73,13 @@ pub type HttpRequestFuture =
 
 /// Absolute deadline shared by nested request-time host-service carriers.
 ///
-/// Hosts may seed a request with [`Self::after`]. Nested dispatch preserves the
+/// Hosts may seed a request with
+/// [`Extensions::with_invocation_deadline`]. Nested dispatch preserves the
 /// absolute instant, so it cannot reset the outer invocation's budget.
 /// Initialization carriers deliberately have no deadline because no request
 /// exists yet.
+///
+/// [`Extensions::with_invocation_deadline`]: crate::extensions::Extensions::with_invocation_deadline
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct InvocationDeadline(Option<tokio::time::Instant>);
 

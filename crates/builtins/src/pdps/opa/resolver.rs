@@ -1143,6 +1143,39 @@ policy := {"deny": [m | input.metadata.account.suspended; m := "suspended"]}"#,
     }
 
     #[test]
+    fn function_argument_bindings_do_not_read_same_named_package_rules() {
+        for argument in ["suspended", "[suspended]", "{\"active\": suspended}"] {
+            let resolver = resolver(
+                &[&format!(
+                    "package authz\nsuspended if input.metadata.account.suspended\naccept({argument}) := true\nallow := accept(false)"
+                )],
+                OnError::Deny,
+            );
+
+            assert!(
+                !resolver.requires_metadata(&call("data.authz.allow", None)),
+                "function argument bindings must not inherit package-rule dependencies: {argument}"
+            );
+        }
+    }
+
+    #[test]
+    fn function_argument_references_keep_their_metadata_dependencies() {
+        let resolver = resolver(
+            &[
+                "package helpers\nsuspended if input.metadata.account.suspended",
+                "package authz\naccept(data.helpers.suspended) := true\nallow := accept(true)",
+            ],
+            OnError::Deny,
+        );
+
+        assert!(
+            resolver.requires_metadata(&call("data.authz.allow", None)),
+            "a function argument that reads a helper must retain that helper's metadata dependency"
+        );
+    }
+
+    #[test]
     fn parent_document_query_includes_indexed_metadata_rules() {
         let indexed = resolver(
             &[r#"package authz
