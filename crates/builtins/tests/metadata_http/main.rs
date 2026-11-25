@@ -172,10 +172,11 @@ async fn trailing_semicolon_in_content_type_accepted() {
         FakeTransport::new().respond_with("/v1/accounts/check_account", |_| {
             let mut headers = HeaderMap::new();
             headers.insert("content-type", "application/json;".parse().unwrap());
-            Ok(
-                HttpResponse::new(200, Bytes::from_static(br#"{"active":true,"plan":"enterprise"}"#))
-                    .with_headers(headers),
+            Ok(HttpResponse::new(
+                200,
+                Bytes::from_static(br#"{"active":true,"plan":"enterprise"}"#),
             )
+            .with_headers(headers))
         }),
     );
     let engine = Arc::new(PolicyEngine::default());

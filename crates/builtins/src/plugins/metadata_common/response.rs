@@ -162,10 +162,8 @@ impl ResponseParser {
             if value.is_empty() {
                 return Err(bad_response());
             }
-            if value.starts_with('"') {
-                if !value.ends_with('"') || value.len() < 2 {
-                    return Err(bad_response());
-                }
+            if value.starts_with('"') && (!value.ends_with('"') || value.len() < 2) {
+                return Err(bad_response());
             }
         }
         if let Some((mtype, msubtype)) = media.split_once('/') {
