@@ -11,8 +11,9 @@
 //! - `cel` (`cel`) — kind `cel`
 //! - `opa` (`opa`) — kind `opa`
 //!
-//! Each reaches `praxis-policy-apl-core` only on its normal dependency edges,
-//! so a consumer enabling one PDP does not compile the runtime.
+//! Each resolver depends only on `praxis-policy-apl-core`. Its factory
+//! implements the runtime's `PdpFactory`, so enabling a PDP also compiles
+//! `praxis-policy-apl-runtime`.
 
 #[cfg(feature = "cedar")]
 pub mod cedar_direct;

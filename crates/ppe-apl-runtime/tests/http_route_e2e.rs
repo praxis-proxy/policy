@@ -59,9 +59,9 @@ use praxis_policy_core::identity::{
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 use praxis_policy_core::registry::AnyHookHandler;
 
-use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
+use praxis_policy_apl_core::step::PdpResolver;
 use praxis_policy_apl_core::{AttributeBag, Decision, PdpCall, PdpDecision, PdpDialect, PdpError};
-use praxis_policy_apl_runtime::{AplOptions, register_apl};
+use praxis_policy_apl_runtime::{AplOptions, PdpFactory, PdpHostServices, register_apl};
 
 // =====================================================================
 // What a scenario observes
@@ -269,6 +269,7 @@ impl PdpFactory for AllowCelFactory {
     fn build(
         &self,
         _config: &serde_yaml::Value,
+        _services: &PdpHostServices,
     ) -> Result<Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Arc::new(AllowCel))
     }

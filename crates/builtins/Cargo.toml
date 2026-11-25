@@ -109,12 +109,20 @@ experimental-ratelimit = [
   "dep:limitador",
   "dep:limitador-cel",
 ]
-cedar = ["_engine-apl-core", "_pdps", "dep:cedar-policy", "dep:stacker"]
+# Each PDP's factory implements the runtime's `PdpFactory`, so every PDP
+# feature reaches the runtime.
+cedar = [
+  "_engine-apl-core",
+  "_engine-apl-runtime",
+  "_pdps",
+  "dep:cedar-policy",
+  "dep:stacker",
+]
 # The feature and the crate share a name, so `dep:cel` is required: without it
 # the feature would shadow the implicit optional-dependency feature instead of
 # enabling the crate.
-cel = ["_engine-apl-core", "_pdps", "dep:cel"]
-opa = ["_engine-apl-core", "_pdps", "dep:regorus"]
+cel = ["_engine-apl-core", "_engine-apl-runtime", "_pdps", "dep:cel"]
+opa = ["_engine-apl-core", "_engine-apl-runtime", "_pdps", "dep:regorus"]
 valkey = [
   "_engine-apl-runtime",
   "_session",

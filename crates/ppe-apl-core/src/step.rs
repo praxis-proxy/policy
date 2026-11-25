@@ -666,39 +666,6 @@ pub struct StructuredInputAvailability {
     pub args: bool,
 }
 
-/// Build a [`PdpResolver`] from a unified-config block. Implemented per
-/// PDP backend (cedar-direct, opa, …) and registered with
-/// the praxis-policy-apl-runtime visitor so unified-config YAML can declare PDPs
-/// without the host pre-constructing them in code.
-///
-/// Hosts register a factory by handing it to praxis-policy-apl-runtime's
-/// `AplOptions.pdp_factories`. When the visitor walks the unified
-/// config and finds a `global.pdp[].kind` matching the factory's
-/// reported `kind()`, it calls `build` with the rest of that block.
-///
-/// The error type is `Box<dyn Error + Send + Sync>` to keep this trait
-/// in praxis-policy-apl-core (which has no engine deps). praxis-policy-apl-runtime's visitor wraps
-/// the boxed error into `VisitorError` → `PluginError::Config` at the
-/// engine boundary.
-pub trait PdpFactory: Send + Sync {
-    /// Identifies which `kind:` in a config block this factory handles.
-    /// Convention: kebab-case matching the published PDP product name
-    /// (`"cedar-direct"`, `"opa"`, …).
-    fn kind(&self) -> &str;
-
-    /// Build a resolver from the rest of the PDP config block (everything
-    /// under the same map level as `kind`). Implementations parse their
-    /// own config shape; missing or malformed fields surface here.
-    /// # Errors
-    ///
-    /// Returns the implementation's own error when a field of its config block is
-    /// missing or malformed.
-    fn build(
-        &self,
-        config: &serde_yaml::Value,
-    ) -> Result<std::sync::Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>>;
-}
-
 /// Where in the request lifecycle a plugin dispatch is happening.
 /// Threads through `PluginInvocation` so the invoker can select the
 /// right hook entry from a plugin that registered for both pre and

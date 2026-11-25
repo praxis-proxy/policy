@@ -36,9 +36,10 @@ use std::sync::Arc;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::visitor::ConfigVisitor;
 
-use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
+use praxis_policy_apl_core::step::PdpResolver;
 
 use crate::dispatch_plan::DispatchCache;
+use crate::pdp_factory::PdpFactory;
 use crate::session_store::{SessionStore, SessionStoreFactory};
 use crate::visitor::AplConfigVisitor;
 

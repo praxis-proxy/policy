@@ -23,7 +23,8 @@
 
 use std::sync::Arc;
 
-use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
+use praxis_policy_apl_core::step::PdpResolver;
+use praxis_policy_apl_runtime::{PdpFactory, PdpHostServices};
 
 use crate::pdps::opa::resolver::OpaResolver;
 
@@ -47,6 +48,7 @@ impl PdpFactory for OpaPdpFactory {
     fn build(
         &self,
         config: &serde_yaml::Value,
+        _services: &PdpHostServices,
     ) -> Result<Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>> {
         let resolver = OpaResolver::from_config(config)?;
         Ok(Arc::new(resolver))

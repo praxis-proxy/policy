@@ -109,9 +109,9 @@ pub use {
     praxis_policy_apl_cmf, praxis_policy_apl_core, praxis_policy_apl_runtime, praxis_policy_core,
 };
 
-pub use praxis_policy_apl_core::step::PdpFactory;
 pub use praxis_policy_apl_runtime::{
-    AplOptions, DispatchCache, MemorySessionStore, SessionStore, SessionStoreFactory, register_apl,
+    AplOptions, DispatchCache, MemorySessionStore, PdpFactory, PdpHostServices, SessionStore,
+    SessionStoreFactory, register_apl,
 };
 pub use praxis_policy_core::engine::PolicyEngine;
 
