@@ -695,6 +695,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "http",
  "jsonwebtoken",
  "openssl",
  "praxis-policy-apl-cmf",
