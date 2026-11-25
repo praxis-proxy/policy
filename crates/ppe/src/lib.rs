@@ -247,6 +247,10 @@ pub use praxis_policy_builtins::plugins::identity_jwt::{
 pub use praxis_policy_builtins::plugins::identity_kubernetes::{
     KIND as KUBERNETES_TOKEN_REVIEW_KIND, TokenReviewIdentityFactory,
 };
+#[cfg(feature = "metadata-http")]
+pub use praxis_policy_builtins::plugins::metadata_http::{
+    KIND as METADATA_HTTP_KIND, MetadataHttpFactory,
+};
 #[cfg(feature = "experimental-quota")]
 pub use praxis_policy_builtins::plugins::quota::{KIND as QUOTA_KIND, QuotaFactory};
 #[cfg(feature = "experimental-ratelimit")]
@@ -324,6 +328,8 @@ use praxis_policy_builtins::plugins::identity_basic as basic_builtin;
 use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
 #[cfg(feature = "kubernetes-token-review")]
 use praxis_policy_builtins::plugins::identity_kubernetes as token_review_builtin;
+#[cfg(feature = "metadata-http")]
+use praxis_policy_builtins::plugins::metadata_http as metadata_http_builtin;
 #[cfg(feature = "experimental-quota")]
 use praxis_policy_builtins::plugins::quota as quota_builtin;
 #[cfg(feature = "experimental-ratelimit")]
@@ -335,6 +341,7 @@ register_builtins! {
     feature "api-key"            => api_key_builtin::ApiKeyIdentityFactory,
     feature "basic"              => basic_builtin::BasicIdentityFactory,
     feature "kubernetes-token-review" => token_review_builtin::TokenReviewIdentityFactory,
+    feature "metadata-http"       => metadata_http_builtin::MetadataHttpFactory,
     feature "oauth"              => oauth_builtin::OAuthDelegatorFactory,
     feature "delegator-vault"    => vault_delegator_builtin::VaultDelegatorFactory,
     feature "elicitation-ciba"   => ciba_builtin::CibaApproverFactory,
@@ -714,6 +721,7 @@ mod tests {
                 cfg!(feature = "kubernetes-token-review"),
                 "identity/kubernetes-token-review",
             ),
+            (cfg!(feature = "metadata-http"), "metadata/http"),
             (cfg!(feature = "oauth"), "delegator/oauth"),
             (cfg!(feature = "delegator-vault"), "delegator/vault"),
             (cfg!(feature = "elicitation-ciba"), "elicitation/ciba"),

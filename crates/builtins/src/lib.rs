@@ -23,6 +23,7 @@
 //! | `api-key` | `plugins::identity_api_key` |
 //! | `basic` | `plugins::identity_basic`; password crypto is RustCrypto only |
 //! | `kubernetes-token-review` | `plugins::identity_kubernetes` |
+//! | `metadata-http` | `plugins::metadata_http` |
 //! | `crypto-rustcrypto` | RustCrypto SHA-256 and HMAC; on by default |
 //! | `fips` | OpenSSL FIPS SHA-256, shared by Policy, API-key and DPoP; no HMAC |
 //! | `oauth` | `plugins::delegator_oauth` |

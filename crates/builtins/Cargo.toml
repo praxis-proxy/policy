@@ -24,6 +24,7 @@ features = [
   "api-key",
   "basic",
   "kubernetes-token-review",
+  "metadata-http",
   "oauth",
   "delegator-vault",
   "elicitation-ciba",
@@ -67,6 +68,13 @@ kubernetes-token-review = [
   "_token_lookup",
   "_validation",
   "dep:base64",
+]
+metadata-http = [
+  "_engine-core",
+  "_engine-apl-core",
+  "_engine-apl-cmf",
+  "_plugins",
+  "dep:url",
 ]
 # RFC 7617 Basic authentication. `base64` decodes the credential and
 # `unicode-normalization` NFC-folds the user-id before it is used as an index
