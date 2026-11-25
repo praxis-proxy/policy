@@ -107,6 +107,32 @@ and return a trusted `metadata.timeout` record. If the route deadline expires
 before the source can return that record, the framework timeout still fails
 closed and `ignore` does not apply.
 
+## Builtin HTTP source
+
+Enable the `metadata-http` Cargo feature and call
+`praxis_policy::install_builtins` to register `kind: metadata/http`. The
+[loaded example](metadata-http.example.yaml) shows a complete source and route.
+
+The source fixes scheme, host, and port at load. Templates are allowed only in
+path segments, query values, header values, and whole JSON or form fields. PPE
+encodes each destination in its own context, rejects dot segments and `Host`
+headers, and requires HTTPS unless `request.insecure_http: true` is explicit.
+Each protected template reference requires its matching read capability;
+`meta.*` is unrestricted. Credential interpolation additionally requires the
+source capability, `allow_credential_interpolation: true`, and the exact target
+in `credential_fields`.
+
+Responses default to JSON and statuses 200–299. `response.type: text` accepts
+`text/plain`; configured `accepted_statuses` add statuses, and
+`expose_status: true` publishes `$status`. JSON is rejected atomically on
+duplicate or ambiguous keys, malformed or rounding numeric tokens, and byte,
+depth, node, key, or string limit violations. Defaults are 1 MiB, depth 8, 256
+nodes, 128-byte keys, and 4 KiB strings; hard ceilings are 4 MiB, depth 16,
+1,024 nodes, 256-byte keys, and 16 KiB strings.
+
+This initial transport path performs one attempt with redirects disabled by the
+host transport. Retry and total-budget behavior belongs to issue #251.
+
 ## Callout audit contract
 
 `MetadataCalloutAuditEvent` is a versioned, value-free record consumed through

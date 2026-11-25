@@ -34,6 +34,7 @@ impl MetadataHttp {
                 .security
                 .as_ref()
                 .and_then(|security| security.subject.as_ref())
+                .and_then(|subject| subject.id.as_deref())
                 .is_none()
         {
             return Err(CalloutFailure::new(
@@ -224,11 +225,13 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_transport_that_violates_the_response_byte_ceiling() {
         let mut config = config();
-        *config
+        config
             .config
             .as_mut()
-            .and_then(|value| value.pointer_mut("/request/max_response_bytes"))
-            .expect("max response setting") = json!(2);
+            .and_then(|value| value.pointer_mut("/request"))
+            .and_then(Value::as_object_mut)
+            .expect("request config")
+            .insert("max_response_bytes".to_owned(), json!(2));
         let http = Arc::new(
             FakeTransport::new().respond_with("metadata.example", |_| Ok(json_response("null"))),
         );

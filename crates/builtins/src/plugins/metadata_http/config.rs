@@ -64,6 +64,16 @@ impl CompiledConfig {
             .ok_or_else(|| "a `config:` block is required".to_owned())?;
         let config: MetadataHttpConfig = serde_json::from_value(raw)
             .map_err(|error| format!("invalid metadata/http config: {error}"))?;
+        if config.require_authenticated
+            && !plugin.capabilities.iter().any(|capability| {
+                praxis_policy_apl_cmf::capability_namespaces(capability).contains(&"authenticated")
+            })
+        {
+            return Err(
+                "`require_authenticated: true` requires a capability that exposes the subject baseline, such as `read_subject`"
+                    .to_owned(),
+            );
+        }
         let request = CompiledRequest::compile(
             &config.request,
             &plugin.capabilities,

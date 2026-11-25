@@ -203,11 +203,17 @@ impl CompiledRequest {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
 
+        let mut normalized_header_names = HashSet::new();
         let headers = config
             .headers
             .iter()
             .map(|(name, raw)| {
                 validate_header_name(name)?;
+                if !normalized_header_names.insert(name.to_ascii_lowercase()) {
+                    return Err(format!(
+                        "`request.headers` repeats `{name}` with different casing"
+                    ));
+                }
                 if raw.contains(['\r', '\n', '\0']) {
                     return Err(format!(
                         "`request.headers.{name}` contains a forbidden control character"

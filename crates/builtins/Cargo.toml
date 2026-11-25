@@ -469,6 +469,11 @@ path = "tests/token_review/main.rs"
 required-features = ["kubernetes-token-review"]
 
 [[test]]
+name = "metadata_http"
+path = "tests/metadata_http/main.rs"
+required-features = ["metadata-http"]
+
+[[test]]
 name = "oauth"
 path = "tests/oauth/main.rs"
 required-features = ["oauth"]
