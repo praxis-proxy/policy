@@ -104,6 +104,18 @@ absent for a request carrying no entity.
 Response bodies are not modeled. The response half covers headers and
 extensions.
 
+Revocation checks need nothing new from the host. The engine runs them
+while it handles `http.request`, before and after the policy pipeline, and
+`http.response`, after the pipeline allows the response. Once a checker is
+configured, `PolicyEngine::has_hooks_for` reports both hooks, so a host that
+skips hooks with nothing on them still calls these. The response check only
+happens if the host calls `http.response`. If it never does, responses go
+back unchecked. Set the request line on the extensions at both hooks, as
+for the identity hook: without a path, a route's own `revocation:` checkers
+cannot apply, only the global and entity-default ones run, and the engine
+warns once. See
+[Revocation](identity-delegation.md#where-the-engine-checks).
+
 ## Rate-limit hooks
 
 A configuration with a `rate_limits:` list needs the host to call the two

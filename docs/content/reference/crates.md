@@ -37,6 +37,7 @@ than named directly. See [Builtins](builtins.md).
 | `kubernetes-token-review` | `plugins::identity_kubernetes` | `identity/kubernetes-token-review` |
 | `oauth` | `plugins::delegator_oauth` | `delegator/oauth` |
 | `elicitation-ciba` | `plugins::elicitation_ciba` | `elicitation/ciba` |
+| `oauth-introspection` | `plugins::oauth_introspection` | `oauth/introspection` |
 | `cedar` | `pdps::cedar_direct` | `cedar-direct` |
 | `cel` | `pdps::cel` | `cel` |
 | `opa` | `pdps::opa` | `opa` |

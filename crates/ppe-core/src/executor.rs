@@ -1153,12 +1153,18 @@ impl Executor {
 
                         // Accept modifications
                         if can_modify && !deny_ignored {
-                            if let Some(mp) = erased.modified_payload {
-                                if let Some(identity) = mp
-                                    .as_any()
-                                    .downcast_ref::<crate::identity::IdentityPayload>()
+                            if let Some(mut mp) = erased.modified_payload {
+                                if let Some(identity) =
+                                    mp.as_any_mut()
+                                        .downcast_mut::<crate::identity::IdentityPayload>()
                                 {
                                     *credential_declined |= identity.credential_declined();
+                                    if let Some(before) = payload
+                                        .as_any()
+                                        .downcast_ref::<crate::identity::IdentityPayload>(
+                                    ) {
+                                        identity.settle_tokens_after(before);
+                                    }
                                 }
                                 *payload = mp;
                                 action = PluginAction::ModifiedPayload;

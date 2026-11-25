@@ -19,6 +19,53 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Revocation checks.** A new `revocation:` list names plugins on the
+  `revocation.check` hook that check whether a caller's credentials have
+  been revoked. It can be set at `global:`, `global.defaults.<entity>:`,
+  `groups.<name>:` and on routes, and combines the same way as
+  `rate_limits:`. The engine runs the checks on every `Pre` and `Post` hook,
+  before and after the request's policy pipeline and before the response
+  goes back, so hosts call nothing new. A checker denies with `auth.revoked`
+  or `auth.revocation_unavailable`, or vouches for the identities it
+  confirmed with the issuer. A request is denied if any of its identities
+  was not vouched for. Checkers must use `mode: sequential` and
+  `on_error: fail`. Configurations without a `revocation:` block behave as
+  before. Setting `engine_settings.require_revocation` makes a route that
+  authenticates callers but has no checker fail the load, instead of only
+  raising `revocation_partial_coverage`.
+  ([#205](https://github.com/praxis-proxy/policy/issues/205))
+- **`oauth/introspection` checker.** The `oauth-introspection`
+  feature, part of `builtins`, asks the issuer through RFC 7662
+  introspection whether a JWT from the configured `issuer` is still active.
+  Answers can be cached with `cache_ttl_seconds`, which defaults to `0`, so
+  every check is a live call. A cached answer never outlives the response's
+  `exp`. The cache key is the token's SHA-256 from
+  Policy's shared hashing, so the feature works under `fips`. It
+  authenticates with `client_secret_basic`, form-encoding the client ID and
+  secret first as RFC 6749 section 2.3.1 requires.
+- **`oauth/introspection` identity resolver.** With an `identity:` block
+  and the `identity.resolve` hook, the same plugin authenticates a bearer
+  token, typically an opaque one, by introspecting it. An active answer is
+  checked against `exp`, `nbf`, `iss` and, when configured, `audiences`,
+  then mapped onto the slot `identity.role` names through the shared claim
+  mapper, by default with `identity/jwt`'s `standard` map. The token is kept
+  with its issuer recorded, so the same plugin under `revocation:` covers
+  it, and both hooks share one cache. A JWT naming another issuer is
+  declined without being sent. New denial codes: `auth.token_inactive` and
+  `auth.introspection_unavailable`. A route cannot yet combine it with
+  `identity/jwt` on one header; see
+  [#379](https://github.com/praxis-proxy/policy/issues/379).
+  ([#378](https://github.com/praxis-proxy/policy/issues/378))
+- **`form_urlencode_component`.** `praxis_policy_core::http` exposes the
+  per-value encoder `form_urlencode` already used, for callers building an
+  RFC 6749 Basic credential.
+- **`RawInboundToken::issuer`.** A resolver can record the issuer that
+  vouched for a token with `RawInboundToken::with_issuer`. It is serialized
+  and shown in `Debug`; the token still is not. The introspection checker
+  sends a token to its endpoint when the recorded issuer is its own, so an
+  opaque token can be checked, and never when the recorded issuer is
+  another, whatever a JWT's `iss` says.
+
 - **Bounded metadata callout contracts.** `HostServices::remaining_invocation_time`
   and `Extensions::with_invocation_deadline` let the embedding propagate the
   gateway invocation budget through nested metadata dispatch. Stable metadata
@@ -103,6 +150,18 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   fixtures to use the new page paths.
   ([#362](https://github.com/praxis-proxy/policy/pull/362))
 
+- **Breaking for Rust callers:** `EngineSettings` adds `require_revocation`,
+  and `GlobalConfig`, `PolicyGroup` and `RouteEntry` each add `revocation`;
+  exhaustive struct literals must initialize them or use
+  `..Default::default()`, and exhaustive destructuring must name the fields
+  or use `..`. `ConfigScope` adds `Revocation` and `RevocationStep`, and
+  `RouteResolutionError` adds `RevocationUnavailable`; downstream exhaustive
+  matches must handle the new variants. `RawInboundToken` adds `issuer`;
+  build it with `RawInboundToken::new`, or initialize the field in an
+  exhaustive literal. All of these are also reachable
+  through the `praxis_policy` facade's crate re-exports.
+  ([#205](https://github.com/praxis-proxy/policy/issues/205))
+
 - **Breaking for Rust callers:** `MetadataFetchOutcome` adds `metadata`,
   `cedar_metadata`, and `metadata_provenance`; `HeaderEntry` and
   `ResolvedHeader` add `allow_credential_target`. Struct literals and
@@ -126,6 +185,27 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   Predicates on the other half that read `client.*`, `caller.workload.*`, or
   `this.workload.*` need `read_client` or `read_workload` in the host baseline.
   ([#242](https://github.com/praxis-proxy/policy/issues/242))
+
+### Fixed
+
+- **A replaced identity no longer keeps the previous identity's token.**
+  When a later `identity.resolve` plugin replaced a slot without storing a
+  token of its own, such as an API-key resolver after a JWT one, the earlier
+  identity's raw token stayed under that slot's role. A delegator exchanging
+  the user's token, or a revocation checker, then acted on the first
+  caller's credential for the second. A token now belongs to the identity
+  its slot held when the token was stored. When a later resolver changes
+  that slot in any way, the token is dropped unless the resolver stores it
+  again with the new `IdentityPayload::supply_inbound_token`, or stores a
+  different one. The whole slot is compared, so the same ID from two
+  authorities, such as a JWT `sub` and an API key's subject, counts as a
+  change. `identity/jwt` stores its token through `supply_inbound_token`, so
+  a second JWT resolver that maps the same token to a new subject keeps it.
+  A resolver outside this repository that edits a slot after `identity/jwt`
+  and still needs the token must store it again the same way.
+  `IdentityPayload::merge` applies the same rule. `SubjectExtension`,
+  `ClientExtension` and `WorkloadIdentity` now implement `PartialEq` and
+  `Eq`.
 
 ### Security
 

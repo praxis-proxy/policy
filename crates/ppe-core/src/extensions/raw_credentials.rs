@@ -264,7 +264,7 @@ pub enum DelegationMode {
 /// an empty token, so an out-of-process handler that needs the plaintext
 /// must receive it through a separate channel.
 ///
-/// `source` and `kind` remain available after serialization.
+/// `source`, `kind` and `issuer` remain available after serialization.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RawInboundToken {
     /// The raw credential bytes. Cleared on drop via `Zeroizing`.
@@ -278,6 +278,15 @@ pub struct RawInboundToken {
     /// Wire-format family of the token. Lets handlers route to the
     /// right validator without re-parsing the token contents.
     pub kind: TokenKind,
+
+    /// The issuer that vouched for this token, recorded by the resolver
+    /// that authenticated it. `None` when the resolver did not say.
+    ///
+    /// An opaque token carries no readable issuer, so this is the only way a
+    /// later plugin can tell whose token it is, and which issuer it may be
+    /// sent to: a revocation checker sends a token only to its own issuer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
 }
 
 impl fmt::Debug for RawInboundToken {
@@ -285,6 +294,7 @@ impl fmt::Debug for RawInboundToken {
         f.debug_struct("RawInboundToken")
             .field("source", &self.source)
             .field("kind", &self.kind)
+            .field("issuer", &self.issuer)
             .field("token", &"[REDACTED]")
             .finish()
     }
@@ -299,7 +309,15 @@ impl RawInboundToken {
             token: Zeroizing::new(token.into()),
             source,
             kind,
+            issuer: None,
         }
+    }
+
+    /// Record `issuer` as the issuer that vouched for this token.
+    #[must_use]
+    pub fn with_issuer(mut self, issuer: impl Into<String>) -> Self {
+        self.issuer = Some(issuer.into());
+        self
     }
 }
 
@@ -630,6 +648,29 @@ mod tests {
             }
         );
         assert!(matches!(tok.kind, TokenKind::Jwt));
+        assert_eq!(tok.issuer, None, "an older record has no issuer");
+    }
+
+    #[test]
+    fn a_recorded_issuer_round_trips_and_the_token_does_not() {
+        let tok = RawInboundToken::new(
+            "opaque-8xLq",
+            Credential::Header {
+                name: "Authorization".into(),
+            },
+            TokenKind::Opaque,
+        )
+        .with_issuer("https://idp.example/realms/demo");
+
+        let json = serde_json::to_string(&tok).unwrap();
+        let back: RawInboundToken = serde_json::from_str(&json).unwrap();
+
+        assert!(!json.contains("opaque-8xLq"), "{json}");
+        assert!(!format!("{tok:?}").contains("opaque-8xLq"), "{tok:?}");
+        assert_eq!(
+            back.issuer.as_deref(),
+            Some("https://idp.example/realms/demo")
+        );
     }
 
     #[test]

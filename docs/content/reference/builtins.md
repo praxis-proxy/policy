@@ -14,6 +14,7 @@ name it by `kind`.
 | `delegator/oauth` | delegator | `oauth` | RFC 8693 token exchange, with optional caching. See [Delegation](../apl/delegation.md). |
 | `delegator/vault` | delegator | `delegator-vault` | Resolve caller-scoped or workload-owned downstream credentials from Vault KV v2. See [Vault delegation recipes](../guides/identity-delegation.md#recipe-8-a-users-vault-stored-credential). |
 | `elicitation/ciba` | elicitation | `elicitation-ciba` | OIDC CIBA human approval. See [Elicitation](../apl/elicitation.md). |
+| `oauth/introspection` | identity resolver, revocation checker | `oauth-introspection` | Ask the issuer through RFC 7662 introspection about a token: authenticate it, typically an opaque one, under `authentication:`, or check each resolved identity's token is still active under `revocation:`. See [Recipe 13](../guides/identity-delegation.md#recipe-13-an-opaque-oauth-token-authenticated-by-introspection). |
 | `cedar-direct` | decision point | `cedar` | Evaluate Cedar policy (dialect `cedar`). |
 | `cel` | decision point | `cel` | Evaluate CEL expressions (dialect `cel`). |
 | `opa` | decision point | `opa` | Evaluate Rego, embedded (dialect `opa`). |
@@ -62,7 +63,7 @@ praxis-policy = { version = "0.7.0", features = ["jwt", "cedar"] }
 
 | Feature | Pulls in |
 |---|---|
-| `builtins` | all twelve below: `jwt`, `api-key`, `basic`, `kubernetes-token-review`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`. `basic` is unreleased: it is on `main` and not in 0.6.0, so a host pinned to a published version cannot select it yet |
+| `builtins` | all thirteen below: `jwt`, `api-key`, `basic`, `kubernetes-token-review`, `oauth`, `delegator-vault`, `elicitation-ciba`, `oauth-introspection`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`. `basic` is unreleased: it is on `main` and not in 0.6.0, so a host pinned to a published version cannot select it yet |
 | `jwt` | `identity/jwt`, verified with AWS-LC |
 | `jwt-openssl-fips` | `identity/jwt` and DPoP, verified with system OpenSSL under the FIPS provider. Requires `fips`; cannot be combined with `jwt`. HMAC (HS256, HS384, HS512) and EdDSA are refused at config load |
 | `api-key` | `identity/api-key` |
@@ -72,6 +73,7 @@ praxis-policy = { version = "0.7.0", features = ["jwt", "cedar"] }
 | `oauth` | `delegator/oauth` |
 | `delegator-vault` | `delegator/vault` |
 | `elicitation-ciba` | `elicitation/ciba` |
+| `oauth-introspection` | `oauth/introspection`. Hashes its cache keys with Policy's shared SHA-256, so it is safe under `fips` |
 | `cedar` | the `cedar-direct` decision point |
 | `cel` | the `cel` decision point |
 | `opa` | the `opa` decision point |

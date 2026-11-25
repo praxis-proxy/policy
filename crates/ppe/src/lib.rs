@@ -57,8 +57,9 @@
 //! defaults must select it or `fips`. `builtins`
 //! enables every bundled extension, including the Valkey session
 //! store; or pick a granular subset (`jwt`, `api-key`, `basic`,
-//! `kubernetes-token-review`, `oauth`, `elicitation-ciba`, `cedar`, `cel`,
-//! `opa`, `valkey`, `secrets-vault`; or `jwt-openssl-fips` in
+//! `kubernetes-token-review`, `oauth`, `elicitation-ciba`,
+//! `oauth-introspection`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`;
+//! or `jwt-openssl-fips` in
 //! place of `jwt`). Any of them brings in the registration
 //! helpers, and each one re-exports its own concrete factory type here.
 //!
@@ -247,6 +248,10 @@ pub use praxis_policy_builtins::plugins::identity_jwt::{
 pub use praxis_policy_builtins::plugins::identity_kubernetes::{
     KIND as KUBERNETES_TOKEN_REVIEW_KIND, TokenReviewIdentityFactory,
 };
+#[cfg(feature = "oauth-introspection")]
+pub use praxis_policy_builtins::plugins::oauth_introspection::{
+    IntrospectionFactory, KIND as OAUTH_INTROSPECTION_KIND,
+};
 #[cfg(feature = "experimental-quota")]
 pub use praxis_policy_builtins::plugins::quota::{KIND as QUOTA_KIND, QuotaFactory};
 #[cfg(feature = "experimental-ratelimit")]
@@ -286,9 +291,10 @@ pub use praxis_policy_builtins::session::valkey::{
 macro_rules! register_builtins {
     ( $( feature $feat:literal => $krate:ident :: $factory:ident ),* $(,)? ) => {
         /// Register every enabled by-kind plugin factory on `mgr`: identity
-        /// (`jwt`, `api-key`, `basic`), delegators (`oauth`), and elicitation
-        /// approvers (`elicitation-ciba`). Call before loading a config so the
-        /// engine can instantiate plugins whose YAML `kind:` matches.
+        /// (`jwt`, `api-key`, `basic`, `kubernetes-token-review`), delegators
+        /// (`oauth`), elicitation approvers (`elicitation-ciba`), and RFC 7662
+        /// introspection (`oauth-introspection`). Call before loading a config
+        /// so the engine can instantiate plugins whose YAML `kind:` matches.
         ///
         /// A host adds its own with [`PolicyEngine::register_factory`], after
         /// this call so a host registration wins on a shared `kind`.
@@ -324,6 +330,8 @@ use praxis_policy_builtins::plugins::identity_basic as basic_builtin;
 use praxis_policy_builtins::plugins::identity_jwt as jwt_builtin;
 #[cfg(feature = "kubernetes-token-review")]
 use praxis_policy_builtins::plugins::identity_kubernetes as token_review_builtin;
+#[cfg(feature = "oauth-introspection")]
+use praxis_policy_builtins::plugins::oauth_introspection as introspection_builtin;
 #[cfg(feature = "experimental-quota")]
 use praxis_policy_builtins::plugins::quota as quota_builtin;
 #[cfg(feature = "experimental-ratelimit")]
@@ -338,6 +346,7 @@ register_builtins! {
     feature "oauth"              => oauth_builtin::OAuthDelegatorFactory,
     feature "delegator-vault"    => vault_delegator_builtin::VaultDelegatorFactory,
     feature "elicitation-ciba"   => ciba_builtin::CibaApproverFactory,
+    feature "oauth-introspection" => introspection_builtin::IntrospectionFactory,
     // Experimental: registers only when `experimental-quota` is named, never via `builtins`.
     feature "experimental-quota" => quota_builtin::QuotaFactory,
     feature "experimental-ratelimit" => ratelimit_builtin::RateLimitFactory,
@@ -717,6 +726,7 @@ mod tests {
             (cfg!(feature = "oauth"), "delegator/oauth"),
             (cfg!(feature = "delegator-vault"), "delegator/vault"),
             (cfg!(feature = "elicitation-ciba"), "elicitation/ciba"),
+            (cfg!(feature = "oauth-introspection"), "oauth/introspection"),
         ];
         for (enabled, kind) in expected {
             if !enabled {

@@ -15,7 +15,7 @@ CARGO ?= cargo
 # and select both mutually exclusive backends. FIPS has its own targets.
 WORKSPACE_TEST_FEATURES := \
 	praxis-policy-core/crypto-rustcrypto,praxis-policy-apl-cmf/crypto-rustcrypto,praxis-policy-apl-runtime/crypto-rustcrypto \
-	praxis-policy-builtins/crypto-rustcrypto,praxis-policy-builtins/jwt,praxis-policy-builtins/api-key,praxis-policy-builtins/basic,praxis-policy-builtins/kubernetes-token-review,praxis-policy-builtins/oauth,praxis-policy-builtins/delegator-vault,praxis-policy-builtins/elicitation-ciba,praxis-policy-builtins/experimental-quota,praxis-policy-builtins/experimental-ratelimit,praxis-policy-builtins/cedar,praxis-policy-builtins/cel,praxis-policy-builtins/opa,praxis-policy-builtins/valkey,praxis-policy-builtins/secrets-vault \
+	praxis-policy-builtins/crypto-rustcrypto,praxis-policy-builtins/jwt,praxis-policy-builtins/api-key,praxis-policy-builtins/basic,praxis-policy-builtins/kubernetes-token-review,praxis-policy-builtins/oauth,praxis-policy-builtins/delegator-vault,praxis-policy-builtins/elicitation-ciba,praxis-policy-builtins/oauth-introspection,praxis-policy-builtins/experimental-quota,praxis-policy-builtins/experimental-ratelimit,praxis-policy-builtins/cedar,praxis-policy-builtins/cel,praxis-policy-builtins/opa,praxis-policy-builtins/valkey,praxis-policy-builtins/secrets-vault \
 	praxis-policy/builtins,praxis-policy/http-hyper,praxis-policy/experimental-quota,praxis-policy/experimental-ratelimit \
 	ppe-benches/dhat-heap \
 	praxis-policy-test-utils/experimental-ratelimit \
@@ -135,7 +135,8 @@ FIPS_GRAPH_ALLOWED := uuid|getrandom|signature
 CRYPTO_PATTERN := rand|rand_core|chacha20|sha1|sha3|md-5|md5|blake2|blake3|aes|aes-gcm|p256|p384|p521|rsa|ed25519-dalek|curve25519-dalek|ecdsa|elliptic-curve|digest|signature|$(NON_FIPS_CRYPTO)|$(FIPS_GRAPH_ALLOWED)
 # Every supported FIPS selection: the shared backend, with optional identity
 # builtins.
-FIPS_SELECTIONS := fips fips,api-key fips,jwt-openssl-fips fips,api-key,jwt-openssl-fips
+FIPS_SELECTIONS := fips fips,api-key fips,jwt-openssl-fips fips,api-key,jwt-openssl-fips \
+	fips,oauth-introspection
 # Selections a FIPS consumer must not reach for. Basic's bcrypt, argon2 and
 # sha-crypt verifiers have no OpenSSL path, so no `fips` graph may carry them,
 # whether `basic` is asked for directly or pulled in by another dependency.
@@ -638,7 +639,7 @@ docs-lint:
 # module-group marker or crypto backend. This is the only gate that builds a
 # partial feature set.
 BUILTIN_FEATURES := jwt api-key basic kubernetes-token-review oauth delegator-vault elicitation-ciba \
-	experimental-quota experimental-ratelimit cedar cel opa valkey secrets-vault
+	oauth-introspection experimental-quota experimental-ratelimit cedar cel opa valkey secrets-vault
 REFERENCE_PLUGINS := praxis-policy-plugin-audit-logger praxis-policy-plugin-ocsf-audit \
 	praxis-policy-plugin-pii-scanner praxis-policy-plugin-transcript-scanner
 

@@ -111,6 +111,9 @@ pub mod prelude;
 pub mod ratelimit_hook;
 /// Plugin instance and hook registries.
 pub mod registry;
+/// The revocation hook: checkers report revoked identities and vouch for
+/// the ones they verified.
+pub mod revocation;
 /// Secret material: providers, the declared values bound to them, and the
 /// handles consumers read through.
 pub mod secrets;

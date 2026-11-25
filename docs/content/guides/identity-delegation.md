@@ -76,6 +76,7 @@ delegator uses:
 | record both the user *and* the calling agent in the token | `subject: user`, `actor: caller_workload` | RFC 8693 `actor_token` |
 | forward a token the caller already obtained | no `delegate`, pass the header through | — |
 | authenticate a caller holding an opaque API key | `identity/api-key` → directory lookup | — |
+| authenticate an OAuth token PPE cannot verify itself, such as an opaque one | `oauth/introspection` with an `identity:` block, [Recipe 13](#recipe-13-an-opaque-oauth-token-authenticated-by-introspection) | RFC 7662 |
 | require the agent to prove it holds the key its token is bound to | `dpop` on the trusted issuer, then [Recipe 11](#recipe-11-an-agent-with-a-dpop-bound-token) | RFC 9449 |
 
 ---
@@ -1147,6 +1148,107 @@ fixtures.
 
 [TokenReview]: https://kubernetes.io/docs/reference/kubernetes-api/authentication-resources/token-review-v1/
 
+---
+
+### Recipe 13: An opaque OAuth token, authenticated by introspection
+
+Use `oauth/introspection` as a resolver when callers present OAuth access
+tokens PPE cannot verify by itself, such as opaque reference tokens. On each
+request it asks the issuer about the token through
+[RFC 7662](https://www.rfc-editor.org/rfc/rfc7662) introspection and maps the
+answer onto an identity slot with the same claim mapper `identity/jwt` uses.
+The same plugin can also be the route's [revocation checker](#revocation).
+
+```yaml
+plugins:
+  - name: kc-introspect
+    kind: oauth/introspection
+    hooks: [identity.resolve, revocation.check]
+    capabilities: [perform_http, read_inbound_credentials]
+    config:
+      issuer: https://keycloak.example/realms/demo
+      introspection_endpoint: https://keycloak.example/realms/demo/protocol/openid-connect/token/introspect
+      client_id: ppe-introspect
+      client_secret_source: { kind: env_var, name: PPE_INTROSPECT_SECRET }
+      cache_ttl_seconds: 10
+      identity:
+        role: user
+        audiences: [mcp-gateway]
+
+global:
+  authentication: [kc-introspect]
+  revocation: [kc-introspect]
+```
+
+The `identity:` block is what makes the plugin a resolver. The load fails if
+the plugin declares `identity.resolve` without the block, or has the block
+without declaring the hook. As a resolver, the plugin has to run with
+`mode: sequential` and `on_error: fail`. The connection settings are the
+checker's; see [The introspection checker](#the-introspection-checker).
+
+| Key under `identity:` | Default | Meaning |
+|---|---|---|
+| `role` | `user` | the slot the token fills: `user`, `client` or `workload` |
+| `credential` | `{ kind: header, name: authorization }` | where the token sits; a `query_param` location needs the `read_query` capability |
+| `prefix` | `"Bearer "` | what the value must start with; the auth scheme is removed before the token is sent. `null` accepts any value |
+| `record_map` | `identity/jwt`'s `standard` map | response fields onto the slot, as in [Reading claims](#reading-claims-the-way-your-idp-writes-them) |
+| `claims` | keep all | which response fields the identity's claims bag keeps |
+| `audiences` | none | when set, the response's `aud` must name one of them |
+| `leeway_seconds` | `0` | clock-skew tolerance for `exp` and `nbf` |
+
+The resolver accepts the token only if the issuer answers `active: true`,
+`exp` has not passed, and `nbf` has been reached. An `iss` in the answer must
+match `issuer`, and an `aud` must name one of `audiences` when they are set.
+The standard map reads `sub` into `subject.id` and `scope` into
+`subject.permissions`, and `client_id` into `client.client_id` for
+`role: client`.
+
+The resolver declines a value without the configured prefix, and a JWT whose
+`iss` names a different issuer, so another resolver can take it. Neither is
+sent to the endpoint. Every other value at the location is sent, opaque or
+not. If two IdPs issue opaque tokens to the same header, each one's tokens
+reach the other's endpoint, so give each its own route or credential
+location.
+
+The token is kept for later plugins under its role, with `issuer` recorded
+as the issuer that vouched for it. A delegator can exchange it, and the
+checker can cover it even though an opaque token carries no `iss`. Listing
+the plugin under both `authentication:` and `revocation:` with a cache
+means the check right after authentication reuses the same answer. The
+checks before dispatch and before release ask again once that answer
+expires.
+
+`cache_ttl_seconds` is the window for both uses. A token revoked at the
+issuer keeps authenticating until its cached answer expires, and never past
+the answer's `exp`. The default, `0`, asks the issuer on every request.
+
+A route's `authentication:` list runs every resolver in order, and
+`identity/jwt` denies a token that is not a JWT. So this resolver and
+`identity/jwt` cannot read the same header on one route yet: whichever runs
+second sees the other's tokens. Put them on separate routes or credential
+locations until [#379](https://github.com/praxis-proxy/policy/issues/379)
+adds a way to pick one method per request. The same holds for
+`identity/kubernetes-token-review`, which sends every value carrying its
+prefix to the API server.
+
+#### Introspection denial codes
+
+| Code | Means |
+|---|---|
+| `auth.missing_credential` | nothing at the configured location |
+| `auth.empty_credential` | the location held an empty value |
+| `auth.malformed_credential` | the location held a value that could not be read |
+| `auth.token_inactive` | the issuer says the token is not active: unknown, expired or revoked, which RFC 7662 does not distinguish |
+| `auth.token_expired` | the answer's `exp` has passed |
+| `auth.token_not_yet_valid` | the answer's `nbf` has not been reached |
+| `auth.untrusted_issuer` | the answer names another issuer |
+| `auth.audience_mismatch` | the answer's `aud` names none of `audiences` |
+| `auth.introspection_unavailable` | the endpoint timed out, failed, answered other than 200, or sent a body that is not an RFC 7662 answer |
+| `auth.mapping_failed` | the map produced no identity from the answer |
+
+Tested: unit tests against a fake transport only. The recipe has not been run
+against a live IdP.
+
 ## Reading claims the way your IdP writes them
 
 The JWT identity plugin infers a subject from a token's claims. Which
@@ -1473,6 +1575,182 @@ Loading reports it, under `alarm = "delegation_without_identity_resolution"`,
 naming the route and the delegate plugins on it. `subject: this_workload`
 is excluded, since it carries no inbound credential.
 
+## Revocation
+
+Once PPE has validated a JWT, it trusts the token until it expires. If an
+operator disables a user, an agent's client or a workload at the IdP,
+requests carrying a token issued before that keep getting through until the
+token expires. A `revocation:` list closes that gap: on each request, a
+checker asks whether the caller's credentials are still good. It is
+optional. Without a `revocation:` block, nothing changes.
+
+```yaml
+plugins:
+  - name: kc-introspect
+    kind: oauth/introspection
+    hooks: [revocation.check]
+    capabilities: [perform_http, read_inbound_credentials]
+    config:
+      issuer: https://keycloak.example/realms/demo
+      introspection_endpoint: https://keycloak.example/realms/demo/protocol/openid-connect/token/introspect
+      client_id: ppe-introspect
+      client_secret_source: { kind: env_var, name: PPE_INTROSPECT_SECRET }
+      cache_ttl_seconds: 10
+
+global:
+  revocation: [kc-introspect]
+
+routes:
+  - tool: transfer_funds
+    revocation:
+      - name: kc-introspect
+        config: { cache_ttl_seconds: 0 }
+  - http: { path: /healthz }
+    revocation: { steps: [], replace_inherited: true }
+```
+
+The list combines across scopes the same way `authentication:` does.
+[Configuration](../reference/configuration.md#revocation) covers where you can set it,
+per-route overrides, and what the load reports.
+
+### Where the engine checks
+
+The host does not call anything new. The engine runs the checks while it
+handles any hook registered as `Pre` or `Post`: `http.request`,
+`http.response`, the tool, LLM, prompt and resource hooks, and any
+host-defined hook that has a phase.
+
+| Check point | When it runs |
+|---|---|
+| `AfterAuthentication` | On a `Pre` hook, before the policy pipeline. |
+| `BeforeDispatch` | On a `Pre` hook, after the pipeline allows the request. This catches a credential revoked while a policy step, a PDP call or a human approval was still in progress, as long as the checker asks the issuer again. A checker that caches answers can reuse the one from before the pipeline, and then catches the revocation only once that answer expires. |
+| `BeforeRelease` | On a `Post` hook, after the pipeline allows the response and before it goes back to the caller. |
+
+Hooks without a phase are not checked: `identity.resolve`, the rate-limit
+hooks, `token.delegate`, and `revocation.check` itself. A request with no
+resolved identity has nothing to check, so it passes.
+
+Checkers run on the context table the host passed with the hook, as they
+would if the host called `revocation.check` itself. A checker sees what the
+host and earlier checks stored there, and what it stores is passed to the
+policy pipeline and returned to the host in `PipelineResult.context_table`.
+
+One request can go through several phased hooks. For example, an HTTP
+request that carries a tool call is checked at both. With
+`cache_ttl_seconds: 0`, that means more than one call to the IdP per
+request, so choose the cache TTL with that in mind.
+
+### Every identity must be covered
+
+Authentication can fill up to three [identity slots](#identity-slots-inbound)
+on a request: `subject` (the user), `client` (the agent) and
+`caller_workload` (the calling service). The revocation check has to cover
+each one that is filled. Each checker is told which slots are filled, and
+reads the identities and raw tokens it is allowed to see through its
+capabilities.
+
+A checker does one of two things:
+
+- It denies, with `auth.revoked` if a credential is revoked, or with
+  `auth.revocation_unavailable` if it is responsible for a slot but could
+  not get an answer.
+- It allows, and vouches for each slot it confirmed with the issuer. Slots
+  it does not handle are left alone.
+
+After all the checkers allow, the engine looks for any filled slot that no
+checker vouched for, and denies the request with
+`auth.revocation_unavailable` if it finds one. So if callers on a route
+authenticate with an API key, a Basic password or a Kubernetes TokenReview
+and the only checker is introspection, every request is denied. To fix
+that, add a checker that handles those credentials, or exclude the route.
+
+Two checkers can cover the same slot, and if either denies, the request is
+denied. Adding a checker can also let requests through: one that vouches
+for a slot nobody else covered turns that slot's denial into a pass. Add a
+checker only for credentials it can actually confirm with their issuer.
+
+A checker should vouch for a slot only when it actually asked the issuer. A
+kill-list checker, for example, knows an identity is not on its list, but
+not whether the credential is still valid, so it should allow without
+vouching. The engine cannot enforce this. If you write your own checker,
+follow it.
+
+### Denial codes
+
+| Code | Raised by | Means |
+|---|---|---|
+| `auth.revoked` | the checker | The issuer says the credential is no longer active. |
+| `auth.revocation_unavailable` | the checker or the engine | A checker errored, timed out or panicked; no checker vouched for one of the identities; or a listed checker is missing from the running configuration or disabled (status 503). |
+
+Both codes come with a fixed reason, "credential revoked" or "revocation
+status unavailable", and no details. Hosts pass a violation's reason and
+details back to the caller, so anything more specific, such as the
+endpoint or the upstream error, goes to the log instead. If a checker
+denies with any other code, the request is still denied and the engine
+logs a warning. Checkers run one at a time in the order they are listed,
+and the code comes from the first one that denies.
+
+Checkers have to run with `mode: sequential` and `on_error: fail`, and the
+load fails otherwise. A checker that errors must deny the request, not let
+it through.
+
+### The introspection checker
+
+`oauth/introspection` uses
+[RFC 7662](https://www.rfc-editor.org/rfc/rfc7662) token introspection to
+ask the issuer whether a token is still active. It only handles a slot
+whose raw token belongs to the `issuer` setting, compared exactly. When the
+resolver that authenticated the token recorded its issuer, that decides.
+Otherwise the token must be a JWT whose `iss` matches. It never sends a
+token to the endpoint when the token belongs to another issuer, or is
+opaque with no issuer recorded. Another checker has to handle those slots.
+
+If the issuer answers `active: true`, the checker vouches for the slot, and
+`active: false` denies with `auth.revoked`. A timeout, a transport error,
+any status other than 200, or a response body it cannot parse denies with
+`auth.revocation_unavailable`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `issuer` | required | compared exactly with each token's `iss` |
+| `introspection_endpoint` | required | the RFC 7662 endpoint; `https://` only |
+| `client_id` | required | sent with `client_secret_basic` |
+| `client_secret_source` | required | `{ kind: env_var, name }`, `{ kind: file, path }` or `{ kind: literal, secret }` |
+| `timeout_ms` | `500` | per call; must be nonzero |
+| `cache_ttl_seconds` | `0` | how long an active or inactive answer is reused |
+| `cache_max_entries` | `10000` | cache size; must be nonzero when caching |
+| `insecure_http` | `false` | allow `http://`, for a local or demo issuer only |
+| `identity` | none | makes the plugin an identity resolver too; see [Recipe 13](#recipe-13-an-opaque-oauth-token-authenticated-by-introspection) |
+
+The plugin needs two capabilities: `perform_http` to reach the endpoint
+through the host's HTTP transport, and `read_inbound_credentials` to read
+the raw tokens. It authenticates to the endpoint with HTTP Basic as RFC 6749
+section 2.3.1 describes: the client ID and secret are each form-encoded,
+joined with `:`, and base64-encoded. A secret containing `+`, `%`, `&` or a
+space therefore reaches the server unchanged.
+
+`cache_ttl_seconds` sets the revocation window. After a token is revoked at
+the issuer, PPE keeps accepting it until the cached answer expires. The
+default, `0`, turns caching off and asks the issuer every time. When the
+issuer's answer includes `exp`, the answer is not kept past that time, even
+if the TTL is longer, as RFC 7662 section 4 requires. The cache
+key is the token's SHA-256, computed with Policy's shared hashing, so the
+plugin works in a `fips` build. With caching on, if several requests check
+the same token at once, only one call goes to the issuer. With the default
+of `0`, each check makes its own call. A failed lookup is never cached. A
+route that overrides the plugin's `config:` gets its own instance, with its
+own cache.
+
+The IdP has to offer RFC 7662 introspection to a confidential client. For
+tokens another resolver authenticated, such as `identity/jwt`, it also has to
+issue JWT access tokens, since the checker leaves an opaque token alone
+unless this plugin authenticated it. Keycloak, Okta, Ping and ForgeRock, Curity, WSO2, Gluu, Ory Hydra, Zitadel,
+Authentik, Duende IdentityServer and Spring Authorization Server all do.
+Microsoft Entra ID, Auth0, Amazon Cognito and Google do not offer it for
+access tokens, and OpenShift and Kubernetes use TokenReview instead. Those
+need a checker that reads revocation events the IdP pushes, which is not
+available yet.
+
 ## Where to place PPE
 
 See [Deployment → Placement guidance](deployment.md). The identity-specific
@@ -1499,6 +1777,8 @@ standards, not any one vendor. Per layer:
 | Service token (`client_credentials`) | RFC 6749 §4.4 | Keycloak | broadly supported |
 | On-behalf-of exchange | RFC 8693 | Keycloak (STE v2) | IdPs vary in RFC 8693 support; verify per target |
 | SVID as client credential | RFC 7523 + `draft-ietf-oauth-spiffe-client-auth` | Keycloak 26.6 (`spiffe:v1`) | emerging; an IETF OAuth WG draft, other IdPs not yet confirmed |
+| Revocation check | RFC 7662 | not yet; only unit-tested against a fake transport | Keycloak, Okta, Ping, Curity, or any IdP with an introspection endpoint, for JWT access tokens or tokens the same plugin authenticated; see [Revocation](#revocation) |
+| Opaque token authentication | RFC 7662 | not yet; only unit-tested against a fake transport | Keycloak, Okta, Ping, Curity, or any IdP with an introspection endpoint; see [Recipe 13](#recipe-13-an-opaque-oauth-token-authenticated-by-introspection) |
 
 If the IdP does not support SPIFFE, PPE can still validate
 the SVID *itself* (it already fetches SPIRE's JWKS in `identity.resolve`),

@@ -27,6 +27,7 @@ features = [
   "oauth",
   "delegator-vault",
   "elicitation-ciba",
+  "oauth-introspection",
   "experimental-quota",
   "experimental-ratelimit",
   "cedar",
@@ -98,6 +99,10 @@ oauth = [
 ]
 delegator-vault = ["_engine-core", "_plugins", "dep:sha2", "dep:moka"]
 elicitation-ciba = ["_engine-core", "_plugins", "dep:base64"]
+# RFC 7662 introspection, as an identity resolver and a revocation checker.
+# `base64` reads the token's issuer before the token is sent anywhere; `moka`
+# holds the answer cache, keyed by the Policy crypto backend's SHA-256.
+oauth-introspection = ["_engine-core", "_plugins", "dep:base64", "dep:moka"]
 # Experimental per-consumer token quota against a standalone Limitador. Calls go
 # through the host transport, so no direct HTTP dependency is needed here.
 experimental-quota = ["_engine-core", "_plugins"]
@@ -197,12 +202,13 @@ jsonwebtoken = { workspace = true, optional = true }
 # OpenSSL signature verification for `jwt-openssl-fips`.
 openssl = { workspace = true, optional = true }
 
-# --- jwt, basic, oauth, elicitation-ciba -------------------------------------
+# --- jwt, basic, oauth, elicitation-ciba, oauth-introspection ----------------
 
-# `base64` for the peek-at-iss helper in the JWT resolver, the RFC 7617
-# credential decode in the Basic resolver, the read-only `act` claim interop
-# check in the OAuth delegator, and the approver-claim decode in CIBA. None of
-# the four verifies a signature with it. jsonwebtoken 11 still
+# `base64` for the peek-at-iss helpers in the JWT resolver and the
+# introspection plugin, the RFC 7617 credential decode in the Basic resolver,
+# the read-only `act` claim interop check in the OAuth delegator, and the
+# approver-claim decode in CIBA. None of them verifies a signature with it.
+# jsonwebtoken 11 still
 # pulls 0.22, so both versions sit in the tree until it catches up.
 base64 = { workspace = true, optional = true }
 
@@ -271,7 +277,10 @@ hmac = { workspace = true, optional = true }
 # inserted into, never pruned, so the structure protecting the cache
 # grows without the bound that protects the cache. moka's coalescing
 # lives inside the bounded map, so `max_entries` covers both.
-moka = { version = "0.12", optional = true, features = ["future"] }
+#
+# The Vault delegator's credential cache and the introspection checker's
+# answer cache rely on the same two guarantees.
+moka = { workspace = true, optional = true }
 
 # --- cedar -------------------------------------------------------------------
 

@@ -56,7 +56,7 @@ pub struct KeyBinding {
 }
 
 /// Authenticated subject identity.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubjectExtension {
     /// Subject identifier (e.g., JWT sub).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -219,7 +219,7 @@ impl Default for ClientTrustLevel {
 /// `subject.roles.contains("admin")` with the same idiom; some `IdPs`
 /// (Keycloak service accounts, Auth0 M2M apps, AWS IAM role grants)
 /// attach RBAC grants to clients directly.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientExtension {
     /// OAuth `client_id` — required. Anchor identifier for the client.
     pub client_id: String,
@@ -288,7 +288,7 @@ pub struct ClientExtension {
 /// Populated by the framework / identity-resolver plugin from
 /// attestation evidence. Plugins read it via the `read_workload`
 /// capability.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadIdentity {
     /// SPIFFE-SVID identifier — `spiffe://<trust-domain>/<path>`.
     /// Set when the workload presented a SPIFFE-SVID (X.509 or JWT)

@@ -1152,12 +1152,14 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
             TokenRole::CallerWorkload => TokenKind::SpiffeJwt,
             _ => TokenKind::Jwt,
         };
-        let mut raw_creds = updated.raw_credentials.clone().unwrap_or_default();
-        raw_creds.inbound_tokens.insert(
+        //
+        //    Supplied through the payload rather than written into the map,
+        //    so the token stays bound to the identity this call produced
+        //    even when an earlier resolver held the same bytes.
+        updated.supply_inbound_token(
             self.role.clone(),
             RawInboundToken::new(raw_token, self.location.credential.clone(), kind),
         );
-        updated.raw_credentials = Some(raw_creds);
         updated.resolved_at = Some(chrono::Utc::now());
         // Pass the full claim map through `raw_claims` so audit /
         // downstream policy that wants uncategorized claims has them.

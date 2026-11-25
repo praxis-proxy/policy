@@ -47,6 +47,7 @@ declared by a sink still produce warnings.
 | `audit_timeout_milliseconds` | `100` | maximum time per audit sink callback, in milliseconds |
 | `short_circuit_on_deny` | `true` | stop a hook's remaining plugins once one denies |
 | `route_cache_max_entries` | `10000` | dispatch-plan cache size |
+| `require_revocation` | `false` | fail the load if a route authenticates callers but has no revocation check; see [Revocation](#revocation) |
 
 ## What each scope accepts
 
@@ -56,15 +57,17 @@ its scope's set is a load error naming the scope and the set.
 | Scope | Keys |
 |---|---|
 | the document | `global`, `plugins`, `groups`, `routes`, `secrets`, `engine_settings` |
-| `global:` | `defaults`, `authentication`, `rate_limits`, `assertions`, `response`, `authorization`, `pdp`, `session_store`, `attribute_files` |
-| `global.defaults.<entity>:` | `description`, `metadata`, `plugins`, `authentication`, `rate_limits`, `assertions`, `response`, `authorization`, `args`, `result` |
+| `global:` | `defaults`, `authentication`, `rate_limits`, `revocation`, `assertions`, `response`, `authorization`, `pdp`, `session_store`, `attribute_files` |
+| `global.defaults.<entity>:` | `description`, `metadata`, `plugins`, `authentication`, `rate_limits`, `revocation`, `assertions`, `response`, `authorization`, `args`, `result` |
 | `groups.<name>:` | the same set as `global.defaults.<entity>:` |
-| `routes[]` | `tool`, `resource`, `prompt`, `llm`, `http`, `meta`, `groups`, `plugins`, `authentication`, `rate_limits`, `assertions`, `response`, `authorization`, `args`, `result` |
-| `engine_settings:` | `dispatch`, `plugin_timeout`, `audit_timeout_milliseconds`, `short_circuit_on_deny`, `route_cache_max_entries`, `effect_log_path`, `effect_log_compaction_threshold`, `capture_content_provenance`, `content_provenance_key`, `audit_stream_namespace` |
+| `routes[]` | `tool`, `resource`, `prompt`, `llm`, `http`, `meta`, `groups`, `plugins`, `authentication`, `rate_limits`, `revocation`, `assertions`, `response`, `authorization`, `args`, `result` |
+| `engine_settings:` | `dispatch`, `plugin_timeout`, `audit_timeout_milliseconds`, `short_circuit_on_deny`, `route_cache_max_entries`, `require_revocation`, `effect_log_path`, `effect_log_compaction_threshold`, `capture_content_provenance`, `content_provenance_key`, `audit_stream_namespace` |
 | an `authentication:` block | `steps`, `replace_inherited` |
 | an `authentication:` step | `name`, `config` |
 | a `rate_limits:` block | `steps`, `replace_inherited` |
 | a `rate_limits:` step | `name`, `config` |
+| a `revocation:` block | `steps`, `replace_inherited` |
+| a `revocation:` step | `name`, `config` |
 | an `assertions:` block | `request`, `response` |
 | an `assertions:` direction | `headers`, `strip`, `replace_inherited` |
 | an `assertions:` header entry | `name`, `from`, `members`, `on_missing`, `encode`, `allow_credential_target` |
@@ -331,6 +334,71 @@ like the other policy scopes. See
 [HTTP Routing](../guides/http-routing.md#rate-limit-hooks) for what the host
 must do, and [Rate Limiting](../guides/rate-limiting.md) for plugin settings and
 counter behavior.
+
+## Revocation
+
+`revocation:` lists the plugins that check whether a caller's credentials
+have been revoked since they were issued. You can set it in the same four
+places as `rate_limits:`, it accepts the same list and object forms, and the
+lists combine the same way, from `global:` down to the route.
+
+A step can carry its own `config:`, which is merged over the plugin's
+config, and the engine builds a separate instance of the plugin for that
+step. In the example below, every route caches answers for 10 seconds,
+`transfer_funds` asks the IdP on every call, and `/healthz` is not checked
+at all:
+
+```yaml
+plugins:
+  - name: kc-introspect
+    kind: oauth/introspection
+    hooks: [revocation.check]
+    capabilities: [perform_http, read_inbound_credentials]
+    config:
+      issuer: https://keycloak.example/realms/demo
+      introspection_endpoint: https://keycloak.example/realms/demo/protocol/openid-connect/token/introspect
+      client_id: ppe-introspect
+      client_secret_source: { kind: env_var, name: PPE_INTROSPECT_SECRET }
+      cache_ttl_seconds: 10
+
+global:
+  revocation: [kc-introspect]
+
+routes:
+  - tool: transfer_funds
+    revocation:
+      - name: kc-introspect
+        config: { cache_ttl_seconds: 0 }
+  - http: { path: /healthz }
+    revocation: { steps: [], replace_inherited: true }
+```
+
+The load fails if a listed plugin does not exist, does not declare the
+`revocation.check` hook, or is not set to `mode: sequential` and
+`on_error: fail`. The error message says which scope the step is in. A
+plugin whose only hook is `revocation.check` cannot be called from a
+`run(name)` step. Like the other policy keys, `revocation:` is not allowed
+under `dispatch: hooks`.
+
+How strict the check is depends on how you set it up:
+
+| Configuration | Effect |
+|---|---|
+| No `revocation:` block anywhere | Nothing changes. The hook is never called and the load reports nothing. |
+| Checkers on some routes, with `require_revocation: false` (the default) | Checks run where you listed them. For each route that authenticates callers but has no checker, the load raises the `revocation_partial_coverage` alarm. |
+| `require_revocation: true` | Those same routes fail the load. |
+| A route with `revocation: { steps: [], replace_inherited: true }` | The route opts out on purpose. The load raises `revocation_replaced_inherited` so the opt-out is visible. This is allowed even with `require_revocation: true`. |
+
+Requests that do not match any route are still checked, using the checkers
+from `global.revocation` and the default for their entity type. If
+`global.authentication` is set, those requests count as covered only when
+`global.revocation` lists a checker, because an entity default covers only
+its own entity type. Otherwise they are reported like an uncovered route,
+as `global (requests matching no route)`.
+
+[Identity](../guides/identity-delegation.md#revocation) covers where the checks run,
+which identities a checker has to cover, the denial codes, and the
+settings for `oauth/introspection`.
 
 ## Requests with no entity
 

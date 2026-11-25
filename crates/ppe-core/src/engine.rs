@@ -106,6 +106,10 @@ pub enum RouteResolutionError {
     /// A `rate_limits:` step has no limiter in the running snapshot.
     #[error("a rate limit step has no limiter in the running configuration")]
     RateLimitUnavailable,
+
+    /// A `revocation:` step has no checker in the running snapshot.
+    #[error("a revocation step has no checker in the running configuration")]
+    RevocationUnavailable,
 }
 
 impl RouteResolutionError {
@@ -113,8 +117,8 @@ impl RouteResolutionError {
     /// unreadable path or an unidentified request, because the request itself
     /// is malformed rather than forbidden: the engine is missing something the
     /// host was supposed to supply, and no rule was ever reached to forbid
-    /// anything. `503` for a missing limiter, because the fault is the
-    /// engine's state, not the request.
+    /// anything. `503` for a missing limiter or checker, because the fault is
+    /// the engine's state, not the request.
     fn violation(self) -> crate::error::PluginViolation {
         match self {
             Self::UnreadablePath(cause) => crate::error::PluginViolation::new(
@@ -129,6 +133,15 @@ impl RouteResolutionError {
             Self::RateLimitUnavailable => crate::error::PluginViolation::new(
                 VIOLATION_RATE_LIMIT_UNAVAILABLE,
                 "rate limit unavailable",
+            )
+            .with_details(std::collections::HashMap::from([(
+                DETAIL_HTTP_STATUS.to_owned(),
+                serde_json::json!(503),
+            )]))
+            .with_proto_error_code(503),
+            Self::RevocationUnavailable => crate::error::PluginViolation::new(
+                crate::revocation::REVOCATION_UNAVAILABLE_CODE,
+                crate::revocation::REVOCATION_UNAVAILABLE_REASON,
             )
             .with_details(std::collections::HashMap::from([(
                 DETAIL_HTTP_STATUS.to_owned(),
@@ -156,6 +169,10 @@ fn declares_http_route(config: &PolicyConfig) -> bool {
 /// Route annotations count because a `global.authorization:` block is an APL
 /// term praxis-policy-core does not model: what praxis-policy-core sees of it
 /// is the handler the orchestrator installed.
+///
+/// `global.revocation` counts too: otherwise a request with no route metadata
+/// in a revocation-only config skips route resolution, and with it the refusal
+/// of a missing or disabled checker.
 fn declares_a_policy(config: &PolicyConfig, snapshot: &RuntimeSnapshot) -> bool {
     !config.routes.is_empty()
         || !config.groups.is_empty()
@@ -163,6 +180,7 @@ fn declares_a_policy(config: &PolicyConfig, snapshot: &RuntimeSnapshot) -> bool 
         || !config.global.defaults.is_empty()
         || config.global.authentication.is_some()
         || config.global.rate_limits.is_some()
+        || config.global.revocation.is_some()
         || !snapshot.route_annotations.is_empty()
 }
 
@@ -225,7 +243,7 @@ fn is_glob_selector(selector: &config::StringOrList) -> bool {
 fn deny_missing_assertion(
     missing: crate::assertions::MissingSource,
     direction: crate::assertions::Direction,
-    mut result: PipelineResult,
+    result: PipelineResult,
 ) -> PipelineResult {
     let mut details = std::collections::HashMap::new();
     details.insert(
@@ -253,13 +271,38 @@ fn deny_missing_assertion(
     .with_details(details)
     .with_proto_error_code(403);
 
+    deny_allowed(violation, result)
+}
+
+/// One dispatch's outcome before [`PolicyEngine::finish`] settles it.
+struct Dispatched<'snapshot> {
+    result: PipelineResult,
+    tasks: BackgroundTasks,
+
+    /// The route the request matched, which the `assertions:` contract
+    /// resolves from.
+    matched: Option<config::MatchedRoute<'snapshot>>,
+
+    /// The payload for the audit emit when `result` carries none.
+    refused: Option<Box<dyn PluginPayload>>,
+}
+
+/// Turn a pipeline result the executor allowed into a denial with `violation`,
+/// for a check the engine runs after the pipeline.
+///
+/// Keeps what the pipeline recorded: its extensions, context table, errors,
+/// metadata, and the steps in its decision log. `finish` sets the verdict
+/// afterwards, so the log must carry those steps through. The payload is
+/// dropped; a caller that reports it takes it out first.
+fn deny_allowed(
+    violation: crate::error::PluginViolation,
+    mut result: PipelineResult,
+) -> PipelineResult {
     let extensions = result.modified_extensions.take().unwrap_or_default();
     let context_table = std::mem::take(&mut result.context_table);
     let mut denied = PipelineResult::denied(violation, extensions, context_table);
     denied.errors = std::mem::take(&mut result.errors);
     denied.metadata = result.metadata.take();
-    // Preserve the pipeline steps that explain this denial. `finish` sets the
-    // verdict after assertions, so the log must carry those steps through.
     denied.decision_log = std::mem::take(&mut result.decision_log);
     denied
 }
@@ -383,6 +426,13 @@ fn http_routes_declaring_rate_limits(config: &PolicyConfig) -> Arc<[String]> {
     http_routes_declaring(config, |route| route.rate_limits.is_some())
 }
 
+/// The names of the `http:` routes that declare `revocation:`, for the same
+/// missing-path warning. Revocation is checked on `http.response` too, where a
+/// host is likeliest to leave the path off.
+fn http_routes_declaring_revocation(config: &PolicyConfig) -> Arc<[String]> {
+    http_routes_declaring(config, |route| route.revocation.is_some())
+}
+
 /// The names of the `http:` routes `declares` holds for. Empty in hook mode,
 /// since no route selects anything then.
 fn http_routes_declaring(
@@ -409,12 +459,15 @@ enum StructuralList {
     Authentication,
     /// `rate_limits:`, for one of the two rate-limit hooks.
     RateLimits(RateLimitStage),
+    /// `revocation:`, for `revocation.check`.
+    Revocation,
 }
 
 impl StructuralList {
     fn for_hook(hook_name: &str) -> Option<Self> {
         match hook_name {
             crate::identity::HOOK_IDENTITY_RESOLVE => Some(Self::Authentication),
+            crate::revocation::HOOK_REVOCATION_CHECK => Some(Self::Revocation),
             crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY => {
                 Some(Self::RateLimits(RateLimitStage::PreIdentity))
             },
@@ -429,6 +482,11 @@ impl StructuralList {
     fn is_rate_limits(hook_name: &str) -> bool {
         matches!(Self::for_hook(hook_name), Some(Self::RateLimits(_)))
     }
+
+    /// Whether `hook_name` is the revocation hook.
+    fn is_revocation(hook_name: &str) -> bool {
+        matches!(Self::for_hook(hook_name), Some(Self::Revocation))
+    }
 }
 
 /// Which side of identity resolution a rate-limit hook runs on.
@@ -438,14 +496,15 @@ enum RateLimitStage {
     PostIdentity,
 }
 
-// A route-cache miss must not rebuild an override and reset its counters: the
-// cache is bounded and is cleared on registration changes.
-struct RateLimitOverride {
+// A route-cache miss must not rebuild an override and reset its state (a
+// limiter's counters, a checker's cache): the cache is bounded and is cleared
+// on registration changes.
+struct StepOverride {
     handlers: Vec<(&'static str, Arc<dyn AnyHookHandler>)>,
     plugin_ref: Arc<PluginRef>,
 }
 
-impl RateLimitOverride {
+impl StepOverride {
     /// The handler entry for `hook_name`, if this override serves it.
     fn entry_for(&self, hook_name: &str) -> Option<crate::registry::HookEntry> {
         self.handlers
@@ -458,8 +517,15 @@ impl RateLimitOverride {
     }
 }
 
-/// Override instances by the `rate_limits:` step they serve.
-type RateLimitOverrides = Arc<HashMap<config::RateLimitStepSite, RateLimitOverride>>;
+/// Override instances by the `rate_limits:` or `revocation:` step they serve.
+type StepOverrides = Arc<HashMap<config::StepSite, StepOverride>>;
+
+/// The step-list blocks whose steps may carry a `config:` override, each with
+/// the hooks an override instance must serve.
+const OVERRIDABLE_STEP_LISTS: [(&config::StepListBlock, fn(&str) -> bool); 2] = [
+    (&config::RATE_LIMITS_BLOCK, StructuralList::is_rate_limits),
+    (&config::REVOCATION_BLOCK, StructuralList::is_revocation),
+];
 
 /// Overlay a step's `config:` on the plugin's own, key by key.
 fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Value) -> PluginConfig {
@@ -478,8 +544,8 @@ fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Valu
     merged
 }
 
-/// Build one instance for every `rate_limits:` step carrying a `config:`
-/// override, through the plugin's own factory.
+/// Build one instance for every `rate_limits:` or `revocation:` step carrying
+/// a `config:` override, through the plugin's own factory.
 ///
 /// Must run with no engine lock held, for the reason
 /// [`create_plugin_instances`] gives.
@@ -487,24 +553,31 @@ fn merge_override_config(base: &PluginConfig, override_config: &serde_json::Valu
 /// # Errors
 ///
 /// A `config:` that is not a mapping fails the load, as does a factory that
-/// rejects the merged config, or an instance with no handler for a rate-limit
-/// hook the plugin declares: falling back to the base instance would run the
-/// limiter with a config nobody wrote.
+/// rejects the merged config, or an instance with no handler for a hook of
+/// that block the plugin declares: falling back to the base instance would
+/// run the plugin with a config nobody wrote.
 ///
 /// [`create_plugin_instances`]: create_plugin_instances
-fn create_rate_limit_overrides(
+fn create_step_overrides(
     config: &PolicyConfig,
     factories: &[Arc<dyn crate::factory::PluginFactory>],
     context: &crate::factory::FactoryContext,
-) -> Result<RateLimitOverrides, Box<PluginError>> {
+) -> Result<StepOverrides, Box<PluginError>> {
     let mut overrides = HashMap::new();
     if !config.dispatch_mode().is_policy() {
         return Ok(Arc::new(overrides));
     }
-    for (site, step) in config::rate_limit_override_steps(config) {
+    let steps = OVERRIDABLE_STEP_LISTS
+        .iter()
+        .flat_map(|(block, owns_hook)| {
+            config::override_steps(config, block)
+                .into_iter()
+                .map(move |(site, step)| (site, step, *owns_hook))
+        });
+    for (site, step, owns_hook) in steps {
         let where_declared = format!(
-            "`{}` rate_limits step {} (plugin '{}')",
-            site.section, site.index, step.name
+            "`{}` {} step {} (plugin '{}')",
+            site.section, site.block, site.index, step.name
         );
         let Some((base, factory)) = config
             .plugins
@@ -531,11 +604,7 @@ fn create_rate_limit_overrides(
                 "{where_declared}: the plugin's factory rejects the step's `config:` override: {e}"
             ))
         })?;
-        for hook in base
-            .hooks
-            .iter()
-            .filter(|hook| StructuralList::is_rate_limits(hook))
-        {
+        for hook in base.hooks.iter().filter(|hook| owns_hook(hook)) {
             let Some((_, handler)) = instance.handlers.iter().find(|(name, _)| name == hook) else {
                 return Err(config_error(format!(
                     "{where_declared}: the instance built for the step's `config:` override \
@@ -547,7 +616,7 @@ fn create_rate_limit_overrides(
         }
         overrides.insert(
             site,
-            RateLimitOverride {
+            StepOverride {
                 handlers: instance.handlers,
                 plugin_ref: Arc::new(PluginRef::new(instance.plugin, merged)),
             },
@@ -558,11 +627,6 @@ fn create_rate_limit_overrides(
 
 /// The entries one rate-limit hook dispatches for a request, in `rate_limits:`
 /// order.
-///
-/// A step whose plugin declares only the other stage drops out here. A step
-/// with a `config:` override runs the snapshot's instance for it, never one
-/// built per request. A base limiter runs once per request however often the
-/// folded list names it, since each run counts the request again.
 ///
 /// # Errors
 ///
@@ -580,9 +644,61 @@ fn rate_limit_entries(
     hook_name: &str,
     unavailable_warned: &AtomicBool,
 ) -> Result<Vec<crate::registry::HookEntry>, RouteResolutionError> {
+    step_entries(
+        snapshot,
+        policy_config,
+        &config::RATE_LIMITS_BLOCK,
+        entries,
+        matched,
+        request_entity_type,
+        hook_name,
+    )
+    .map_err(|missing| {
+        if !unavailable_warned.swap(true, Ordering::AcqRel) {
+            error!(
+                plugin = %missing.plugin,
+                section = %missing.site.section,
+                index = missing.site.index,
+                hook = hook_name,
+                "a rate_limits step has no limiter in the running snapshot, so requests it \
+                 covers are denied with ratelimit.unavailable until the plugin is registered \
+                 again or the configuration is reloaded",
+            );
+        }
+        RouteResolutionError::RateLimitUnavailable
+    })
+}
+
+/// A step whose plugin declares the hook but has no instance in the running
+/// snapshot.
+struct MissingStepInstance {
+    plugin: String,
+    site: config::StepSite,
+}
+
+/// The entries one hook dispatches for a request from `block`, in list order.
+///
+/// A step whose plugin does not declare `hook_name` drops out here. A step
+/// with a `config:` override runs the snapshot's instance for it, never one
+/// built per request. A base instance runs once per request however often the
+/// folded list names it.
+///
+/// # Errors
+///
+/// [`MissingStepInstance`] when a step's plugin declares `hook_name` but the
+/// snapshot has no instance for it, as after the plugin is unregistered. The
+/// caller decides what that denies.
+fn step_entries(
+    snapshot: &RuntimeSnapshot,
+    policy_config: &PolicyConfig,
+    block: &config::StepListBlock,
+    entries: &[crate::registry::HookEntry],
+    matched: Option<&config::MatchedRoute<'_>>,
+    request_entity_type: Option<&str>,
+    hook_name: &str,
+) -> Result<Vec<crate::registry::HookEntry>, MissingStepInstance> {
     let mut selected: Vec<crate::registry::HookEntry> = Vec::new();
-    for resolved in
-        config::rate_limit_step_refs_for_route(policy_config, matched, request_entity_type)
+    for resolved in config::step_refs_for_route(policy_config, block, matched, request_entity_type)
     {
         let step = resolved.step;
         let declares_this_stage = policy_config
@@ -596,7 +712,7 @@ fn rate_limit_entries(
         let entry = if step.config_override.is_some() {
             let site = resolved.site(policy_config, matched.map(|m| m.route));
             snapshot
-                .rate_limit_overrides
+                .step_overrides
                 .get(&site)
                 .and_then(|instance| instance.entry_for(hook_name))
         } else {
@@ -611,19 +727,10 @@ fn rate_limit_entries(
             base.cloned()
         };
         let Some(entry) = entry else {
-            if !unavailable_warned.swap(true, Ordering::AcqRel) {
-                let site = resolved.site(policy_config, matched.map(|m| m.route));
-                error!(
-                    plugin = %step.name,
-                    section = %site.section,
-                    index = site.index,
-                    hook = hook_name,
-                    "a rate_limits step has no limiter in the running snapshot, so requests it \
-                     covers are denied with ratelimit.unavailable until the plugin is registered \
-                     again or the configuration is reloaded",
-                );
-            }
-            return Err(RouteResolutionError::RateLimitUnavailable);
+            return Err(MissingStepInstance {
+                plugin: step.name.clone(),
+                site: resolved.site(policy_config, matched.map(|m| m.route)),
+            });
         };
         selected.push(entry);
     }
@@ -794,13 +901,18 @@ struct RuntimeSnapshot {
     /// hooks' counterpart of the warning above.
     http_routes_declaring_rate_limits: Arc<[String]>,
 
+    /// The `http:` routes that declare `revocation:`, for the revocation
+    /// hook's counterpart of the warning above.
+    http_routes_declaring_revocation: Arc<[String]>,
+
     // Keep configured hook presence after unregistration so the empty-registry
     // path cannot allow unchecked requests.
     declares_pre_identity_rate_limits: bool,
     declares_post_identity_rate_limits: bool,
+    declares_revocation: bool,
 
-    // Snapshot ownership keeps counters across route-cache and registry changes.
-    rate_limit_overrides: RateLimitOverrides,
+    // Snapshot ownership keeps state across route-cache and registry changes.
+    step_overrides: StepOverrides,
 
     /// Whether any level declares an `assertions:` block. False for every
     /// config that does not use the feature, which is what keeps the extra
@@ -824,16 +936,17 @@ impl RuntimeSnapshot {
         hook_name: &str,
         entries: &[crate::registry::HookEntry],
     ) -> bool {
-        let lists_rate_limits = match StructuralList::for_hook(hook_name) {
+        let lists_steps = match StructuralList::for_hook(hook_name) {
             Some(StructuralList::RateLimits(RateLimitStage::PreIdentity)) => {
                 self.declares_pre_identity_rate_limits
             },
             Some(StructuralList::RateLimits(RateLimitStage::PostIdentity)) => {
                 self.declares_post_identity_rate_limits
             },
+            Some(StructuralList::Revocation) => self.declares_revocation,
             _ => false,
         };
-        entries.is_empty() && self.route_annotations.is_empty() && !lists_rate_limits
+        entries.is_empty() && self.route_annotations.is_empty() && !lists_steps
     }
 }
 
@@ -903,6 +1016,10 @@ pub struct PolicyEngine {
     /// The same gate for an `http:` route's `rate_limits:` list. Separate, so
     /// one warning does not spend the other. Reset by `clear_routing_cache()`.
     route_rate_limits_unreachable_warned: AtomicBool,
+
+    /// The same gate for an `http:` route's `revocation:` list. Reset by
+    /// `clear_routing_cache()`.
+    route_revocation_unreachable_warned: AtomicBool,
 
     /// Whether a skipped `ratelimit.pre_identity` stage has been reported this
     /// cycle. A host that never calls the stage misses it on every request, so
@@ -1224,7 +1341,7 @@ fn warn_on_dropped_inherited_authentication(cfg: &PolicyConfig) {
 /// Report every route whose inherited `rate_limits:` steps a
 /// `replace_inherited: true` drops, at a section or on the route itself.
 fn warn_on_dropped_inherited_rate_limits(cfg: &PolicyConfig) {
-    for finding in crate::config::dropped_inherited_rate_limits(cfg) {
+    for finding in crate::config::dropped_inherited_steps(cfg, &crate::config::RATE_LIMITS_BLOCK) {
         warn!(
             alarm = "rate_limits_replaced_inherited",
             route = %finding.route,
@@ -1233,6 +1350,41 @@ fn warn_on_dropped_inherited_rate_limits(cfg: &PolicyConfig) {
             "`rate_limits.replace_inherited: true` drops the rate limits this route inherited, \
              so requests on it are no longer counted against them. Remove the flag if the block \
              meant to add limits, or keep it if the route is meant to run without them.",
+        );
+    }
+}
+
+/// Report every route whose inherited `revocation:` checkers a
+/// `replace_inherited: true` drops. Dropping them all is how a route is
+/// excluded from revocation, so every exclusion is visible at load.
+fn warn_on_dropped_inherited_revocation(cfg: &PolicyConfig) {
+    for finding in crate::config::dropped_inherited_steps(cfg, &crate::config::REVOCATION_BLOCK) {
+        warn!(
+            alarm = "revocation_replaced_inherited",
+            route = %finding.route,
+            declared_in = %finding.declared_in,
+            dropped = ?finding.dropped,
+            "`revocation.replace_inherited: true` drops the revocation checkers this route \
+             inherited, so a revoked identity is no longer stopped by them here. Remove the flag \
+             if the block meant to add checkers, or keep it if the route is meant to be excluded.",
+        );
+    }
+}
+
+/// Report every route that resolves authentication but runs no revocation
+/// check, once revocation is in use. Under `require_revocation` these routes
+/// fail validation instead, so this only reports partial coverage.
+fn warn_on_routes_without_revocation(cfg: &PolicyConfig) {
+    if cfg.engine_settings.require_revocation {
+        return;
+    }
+    for route in crate::config::routes_without_revocation(cfg) {
+        warn!(
+            alarm = "revocation_partial_coverage",
+            route = %route,
+            "this route resolves authentication but runs no revocation check, so a revoked \
+             identity is not stopped here. Give it a `revocation:` checker it inherits, or exclude \
+             it explicitly with `revocation: {{ steps: [], replace_inherited: true }}`.",
         );
     }
 }
@@ -1371,7 +1523,7 @@ fn snapshot_from_config(
     prev: Option<&RuntimeSnapshot>,
     content_key: Option<crate::hooks::payload::ContentKey>,
     factory_context: &crate::factory::FactoryContext,
-    rate_limit_overrides: RateLimitOverrides,
+    step_overrides: StepOverrides,
 ) -> RuntimeSnapshot {
     let mut executor = Executor::new(ExecutorConfig {
         timeout_seconds: policy_config.engine_settings.plugin_timeout,
@@ -1444,14 +1596,21 @@ fn snapshot_from_config(
     let route_cache_max_entries = policy_config.engine_settings.route_cache_max_entries;
     let http_routes_declaring_authentication = http_routes_declaring_authentication(&policy_config);
     let http_routes_declaring_rate_limits = http_routes_declaring_rate_limits(&policy_config);
+    let http_routes_declaring_revocation = http_routes_declaring_revocation(&policy_config);
     let declares_rate_limits_at = |hook: &str| {
         policy_config.dispatch_mode().is_policy()
-            && config::declares_rate_limits_at(&policy_config, hook)
+            && config::step_list_declares_hook(&policy_config, &config::RATE_LIMITS_BLOCK, hook)
     };
     let declares_pre_identity_rate_limits =
         declares_rate_limits_at(crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY);
     let declares_post_identity_rate_limits =
         declares_rate_limits_at(crate::ratelimit_hook::HOOK_RATELIMIT_POST_IDENTITY);
+    let declares_revocation = policy_config.dispatch_mode().is_policy()
+        && config::step_list_declares_hook(
+            &policy_config,
+            &config::REVOCATION_BLOCK,
+            crate::revocation::HOOK_REVOCATION_CHECK,
+        );
     let declares_assertions = declares_assertions(&policy_config);
     let http_routes_declaring_assertions = http_routes_declaring_assertions(&policy_config);
     let declares_glob_named_routes = declares_glob_named_routes(&policy_config);
@@ -1464,9 +1623,11 @@ fn snapshot_from_config(
         route_annotations: HashMap::new(),
         http_routes_declaring_authentication,
         http_routes_declaring_rate_limits,
+        http_routes_declaring_revocation,
         declares_pre_identity_rate_limits,
         declares_post_identity_rate_limits,
-        rate_limit_overrides,
+        declares_revocation,
+        step_overrides,
         declares_assertions,
         http_routes_declaring_assertions,
         declares_glob_named_routes,
@@ -1497,9 +1658,11 @@ impl PolicyEngine {
             route_annotations: HashMap::new(),
             http_routes_declaring_authentication: Arc::from(Vec::new()),
             http_routes_declaring_rate_limits: Arc::from(Vec::new()),
+            http_routes_declaring_revocation: Arc::from(Vec::new()),
             declares_pre_identity_rate_limits: false,
             declares_post_identity_rate_limits: false,
-            rate_limit_overrides: Arc::new(HashMap::new()),
+            declares_revocation: false,
+            step_overrides: Arc::new(HashMap::new()),
             declares_assertions: false,
             http_routes_declaring_assertions: Arc::from(Vec::new()),
             declares_glob_named_routes: false,
@@ -1512,6 +1675,7 @@ impl PolicyEngine {
             route_cache_full_warned: AtomicBool::new(false),
             route_authentication_unreachable_warned: AtomicBool::new(false),
             route_rate_limits_unreachable_warned: AtomicBool::new(false),
+            route_revocation_unreachable_warned: AtomicBool::new(false),
             rate_limit_stage_skipped_warned: AtomicBool::new(false),
             rate_limit_unavailable_warned: AtomicBool::new(false),
             route_request_assertions_unreachable_warned: AtomicBool::new(false),
@@ -1810,6 +1974,8 @@ impl PolicyEngine {
         warn_on_dropped_inherited_rate_limits(&policy_config);
         warn_on_rate_limits_listed_twice(&policy_config);
         warn_on_rate_limits_without_authentication(&policy_config);
+        warn_on_dropped_inherited_revocation(&policy_config);
+        warn_on_routes_without_revocation(&policy_config);
         warn_on_assertions_findings(&policy_config);
 
         // Resolve under the factories read lock, then drop it and
@@ -1825,8 +1991,7 @@ impl PolicyEngine {
             resolve_factories(&policy_config.plugins, &registry)?
         };
         let instances = create_plugin_instances(&policy_config.plugins, &factories, context)?;
-        let rate_limit_overrides =
-            create_rate_limit_overrides(&policy_config, &factories, context)?;
+        let step_overrides = create_step_overrides(&policy_config, &factories, context)?;
 
         // Build the new snapshot from the current one — copy-on-write so
         // concurrent invokes keep using the existing config until we swap.
@@ -1864,7 +2029,7 @@ impl PolicyEngine {
                 Some(current.as_ref()),
                 content_key,
                 context,
-                Arc::clone(&rate_limit_overrides),
+                Arc::clone(&step_overrides),
             )));
             // Same generation bump as mutate_runtime — load_config doesn't
             // go through that helper because it has to swap registry + executor
@@ -1872,7 +2037,7 @@ impl PolicyEngine {
             self.generation.fetch_add(1, Ordering::Release);
             Ok(())
         });
-        // Released before `instances`, `rate_limit_overrides`, `new_registry`
+        // Released before `instances`, `step_overrides`, `new_registry`
         // and `current` fall out of scope, the same discipline
         // try_mutate_runtime follows. A rejected load holds the only
         // references to plugins the factories just built, and dropping one
@@ -2147,6 +2312,8 @@ impl PolicyEngine {
         warn_on_dropped_inherited_rate_limits(&policy_config);
         warn_on_rate_limits_listed_twice(&policy_config);
         warn_on_rate_limits_without_authentication(&policy_config);
+        warn_on_dropped_inherited_revocation(&policy_config);
+        warn_on_routes_without_revocation(&policy_config);
         warn_on_assertions_findings(&policy_config);
 
         let engine = Self::new(PolicyEngineConfig {
@@ -2161,7 +2328,7 @@ impl PolicyEngine {
             &resolved,
             &crate::factory::FactoryContext::default(),
         )?;
-        let rate_limit_overrides = create_rate_limit_overrides(
+        let step_overrides = create_step_overrides(
             &policy_config,
             &resolved,
             &crate::factory::FactoryContext::default(),
@@ -2176,7 +2343,7 @@ impl PolicyEngine {
             None,
             content_key,
             &crate::factory::FactoryContext::default(),
-            rate_limit_overrides,
+            step_overrides,
         )));
 
         Ok(engine)
@@ -2601,8 +2768,8 @@ impl PolicyEngine {
             }
         }
 
-        let mut initialized_overrides: Vec<&RateLimitOverride> = Vec::new();
-        for (site, instance) in snapshot.rate_limit_overrides.iter() {
+        let mut initialized_overrides: Vec<&StepOverride> = Vec::new();
+        for (site, instance) in snapshot.step_overrides.iter() {
             let init_ext =
                 self.init_extensions_for(&instance.plugin_ref.trusted_config().capabilities);
             if let Err(e) = instance
@@ -2613,8 +2780,8 @@ impl PolicyEngine {
             {
                 let plugin_name = instance.plugin_ref.name().to_owned();
                 error!(
-                    "Failed to initialize the `{}` rate_limits step {} instance of '{}': {}",
-                    site.section, site.index, plugin_name, e
+                    "Failed to initialize the `{}` {} step {} instance of '{}': {}",
+                    site.section, site.block, site.index, plugin_name, e
                 );
                 let overrides = initialized_overrides
                     .iter()
@@ -2704,10 +2871,11 @@ impl PolicyEngine {
                 }
             }
         }
-        for instance in snapshot.rate_limit_overrides.values() {
+        for (site, instance) in snapshot.step_overrides.iter() {
             if let Err(e) = instance.plugin_ref.plugin().shutdown().await {
                 error!(
-                    "Error shutting down a rate_limits override of '{}': {}",
+                    "Error shutting down a {} override of '{}': {}",
+                    site.block,
                     instance.plugin_ref.name(),
                     e
                 );
@@ -2745,31 +2913,72 @@ impl PolicyEngine {
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
-        // Single atomic load — own the snapshot for the rest of the call so
-        // a concurrent register/load_config swapping in a new snapshot doesn't
-        // change our view mid-pipeline.
-        let snapshot = self.load_runtime();
-        let context_table =
-            self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
-        let hook_type = HookType::new(hook_name);
-        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
-        // Same caveat as `invoke_named`: route annotations can produce a
-        // dispatch entry without any plugin being registered on the
-        // hook directly, so we can only short-circuit when both the
-        // registry and the annotation map are empty.
-        if snapshot.has_nothing_to_dispatch(hook_name, hook_entries) {
-            // Route filtering has not run, so the route is resolved here: a
-            // contract written on a route holds whether or not this hook has a
-            // plugin on it.
-            let matched = resolve_contract_route(&snapshot, &extensions);
+        self.dispatch(
+            &self.load_runtime(),
+            hook_name,
+            payload,
+            extensions,
+            context_table,
+        )
+        .await
+    }
+
+    /// The dispatch behind [`invoke_by_name`](Self::invoke_by_name),
+    /// [`invoke`](Self::invoke) and [`invoke_named`](Self::invoke_named):
+    /// check revocation, resolve the route's entries for `hook_name` and run
+    /// them, check revocation again on an allow, and settle the result through
+    /// [`finish`](Self::finish).
+    ///
+    /// `snapshot` is loaded once by the caller and held for the whole call, so
+    /// a concurrent `register` or `load_config` swapping in a new snapshot
+    /// doesn't change its view mid-pipeline. The revocation checks dispatch on the
+    /// same one, so the checkers come from the configuration the request's
+    /// route was matched against.
+    ///
+    /// Revocation is checked here rather than in a route's policy handler
+    /// because only the engine holds the host's unfiltered extensions. Each
+    /// checker still sees them through its own capabilities.
+    async fn dispatch(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        hook_name: &str,
+        payload: Box<dyn PluginPayload>,
+        extensions: Extensions,
+        context_table: Option<PluginContextTable>,
+    ) -> (PipelineResult, BackgroundTasks) {
+        let mut context_table =
+            self.track_rate_limit_stage(snapshot, hook_name, &extensions, context_table);
+        // Gated on the snapshot, not left to the revocation dispatch to find
+        // nothing: that dispatch settles through `finish` like any other and
+        // would emit an audit record per check point on every request.
+        let (check_before, check_after) = if snapshot.declares_revocation {
+            crate::revocation::check_points(hook_name)
+        } else {
+            (None, None)
+        };
+
+        // Before the route's entries are resolved, so a revoked identity is
+        // refused whether or not the route has a plugin on this hook.
+        let refused_before = match check_before {
+            Some(check_point) => {
+                let (violation, table) = self
+                    .check_revocation(snapshot, &extensions, check_point, context_table)
+                    .await;
+                context_table = table;
+                violation
+            },
+            None => None,
+        };
+        if let Some(violation) = refused_before {
+            let matched = resolve_contract_route(snapshot, &extensions);
             return (
                 self.finish(
-                    &snapshot,
+                    snapshot,
                     Some(hook_name),
                     matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        payload,
+                    Some(payload),
+                    PipelineResult::denied(
+                        violation,
                         extensions,
                         context_table.unwrap_or_default(),
                     ),
@@ -2779,45 +2988,150 @@ impl PolicyEngine {
             );
         }
 
+        let Dispatched {
+            mut result,
+            tasks,
+            matched,
+            mut refused,
+        } = self
+            .route_and_execute(snapshot, hook_name, payload, extensions, context_table)
+            .await;
+
+        // On the extensions the pipeline finished with, so a check after a
+        // delegation step sees the identities that step left behind.
+        if let Some(check_point) = check_after
+            && !result.is_denied()
+            && let Some(extensions) = result.modified_extensions.as_ref()
+        {
+            let table = std::mem::take(&mut result.context_table);
+            let (violation, table) = self
+                .check_revocation(snapshot, extensions, check_point, Some(table))
+                .await;
+            result.context_table = table.unwrap_or_default();
+            if let Some(violation) = violation {
+                refused = result.modified_payload.take();
+                result = deny_allowed(violation, result);
+            }
+        }
+
+        (
+            self.finish(snapshot, Some(hook_name), matched.as_ref(), refused, result)
+                .await,
+            tasks,
+        )
+    }
+
+    /// Check whether the identities `extensions` carries still hold authority
+    /// on the request's route, at `check_point`: `None` to pass, or the
+    /// violation to deny with, and the request's context table after the
+    /// check.
+    ///
+    /// Dispatches the revocation hook on `snapshot`, the snapshot of the
+    /// dispatch being checked, so a reload landing between the two cannot
+    /// swap in another configuration's checkers. The route is resolved from
+    /// `extensions` exactly as the checked dispatch resolved it.
+    ///
+    /// The checkers run on `context_table`, the request's own, as they would
+    /// when a host dispatches `revocation.check` itself: they see what the
+    /// host and earlier check points left there, and what they write goes on
+    /// to the pipeline and back to the host.
+    async fn check_revocation(
+        &self,
+        snapshot: &RuntimeSnapshot,
+        extensions: &Extensions,
+        check_point: crate::revocation::CheckPoint,
+        context_table: Option<PluginContextTable>,
+    ) -> (
+        Option<crate::error::PluginViolation>,
+        Option<PluginContextTable>,
+    ) {
+        let Some(asked) = crate::revocation::question(extensions, check_point) else {
+            return (None, context_table);
+        };
+        // Boxed because the dispatch this enters is the one that called here.
+        let (mut result, _background) = Box::pin(self.dispatch(
+            snapshot,
+            crate::revocation::HOOK_REVOCATION_CHECK,
+            Box::new(asked.clone()),
+            extensions.clone(),
+            context_table,
+        ))
+        .await;
+        let context_table = std::mem::take(&mut result.context_table);
+        (
+            crate::revocation::verdict(&asked, result),
+            Some(context_table),
+        )
+    }
+
+    /// Resolve the route's entries for `hook_name` and run them, without
+    /// settling the result: [`dispatch`](Self::dispatch) still checks it and
+    /// passes it through [`finish`](Self::finish).
+    async fn route_and_execute<'snapshot>(
+        &self,
+        snapshot: &'snapshot RuntimeSnapshot,
+        hook_name: &str,
+        payload: Box<dyn PluginPayload>,
+        extensions: Extensions,
+        context_table: Option<PluginContextTable>,
+    ) -> Dispatched<'snapshot> {
+        let hook_type = HookType::new(hook_name);
+        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
+        // No registered entries AND no route annotations → nothing to
+        // do. Allow-and-pass-through. We can't short-circuit on
+        // `hook_entries.is_empty()` alone, because route annotations
+        // (external-orchestrator handlers from APL / future Rego /
+        // Cedar-direct) can produce a single-entry dispatch even when
+        // no plugin was registered on the hook directly.
+        //
+        // Returning here also means a request whose path cannot be read is
+        // allowed rather than denied on such a hook. Nothing would have
+        // enforced on it either way.
+        if snapshot.has_nothing_to_dispatch(hook_name, hook_entries) {
+            // Route filtering has not run, so the route is resolved here: a
+            // contract written on a route holds whether or not this hook has a
+            // plugin on it.
+            return Dispatched {
+                matched: resolve_contract_route(snapshot, &extensions),
+                result: PipelineResult::allowed_with(
+                    payload,
+                    extensions,
+                    context_table.unwrap_or_default(),
+                ),
+                tasks: BackgroundTasks::empty(),
+                refused: None,
+            };
+        }
+
         let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, hook_entries, &extensions, hook_name)
+            .filter_entries_by_route(snapshot, hook_entries, &extensions, hook_name)
             .await
         {
             Ok(resolved) => resolved,
             Err(cause) => {
-                return (
-                    self.finish(
-                        &snapshot,
-                        Some(hook_name),
-                        None,
-                        Some(payload),
-                        PipelineResult::denied(
-                            cause.violation(),
-                            extensions,
-                            context_table.unwrap_or_default(),
-                        ),
-                    )
-                    .await,
-                    BackgroundTasks::empty(),
-                );
-            },
-        };
-        if entries.is_empty() {
-            return (
-                self.finish(
-                    &snapshot,
-                    Some(hook_name),
-                    matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        payload,
+                return Dispatched {
+                    result: PipelineResult::denied(
+                        cause.violation(),
                         extensions,
                         context_table.unwrap_or_default(),
                     ),
-                )
-                .await,
-                BackgroundTasks::empty(),
-            );
+                    tasks: BackgroundTasks::empty(),
+                    matched: None,
+                    refused: Some(payload),
+                };
+            },
+        };
+        if entries.is_empty() {
+            return Dispatched {
+                result: PipelineResult::allowed_with(
+                    payload,
+                    extensions,
+                    context_table.unwrap_or_default(),
+                ),
+                tasks: BackgroundTasks::empty(),
+                matched,
+                refused: None,
+            };
         }
 
         let (result, tasks, refused) = {
@@ -2835,17 +3149,12 @@ impl PolicyEngine {
                 )
                 .await
         };
-        (
-            self.finish(
-                &snapshot,
-                Some(hook_name),
-                matched.as_ref(),
-                refused,
-                result,
-            )
-            .await,
+        Dispatched {
+            result,
             tasks,
-        )
+            matched,
+            refused,
+        }
     }
 
     /// Invoke a typed hook.
@@ -2879,97 +3188,14 @@ impl PolicyEngine {
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
-        let snapshot = self.load_runtime();
-        let context_table =
-            self.track_rate_limit_stage(&snapshot, H::NAME, &extensions, context_table);
-        let hook_type = HookType::new(H::NAME);
-        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
-        // See `invoke_named` for why we don't short-circuit on
-        // `hook_entries.is_empty()` alone — route annotations can fire
-        // without a directly-registered plugin.
-        if snapshot.has_nothing_to_dispatch(H::NAME, hook_entries) {
-            let boxed: Box<dyn PluginPayload> = Box::new(payload);
-            let matched = resolve_contract_route(&snapshot, &extensions);
-            return (
-                self.finish(
-                    &snapshot,
-                    Some(H::NAME),
-                    matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        boxed,
-                        extensions,
-                        context_table.unwrap_or_default(),
-                    ),
-                )
-                .await,
-                BackgroundTasks::empty(),
-            );
-        }
-
-        let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, hook_entries, &extensions, H::NAME)
-            .await
-        {
-            Ok(resolved) => resolved,
-            Err(cause) => {
-                return (
-                    self.finish(
-                        &snapshot,
-                        Some(H::NAME),
-                        None,
-                        Some(Box::new(payload)),
-                        PipelineResult::denied(
-                            cause.violation(),
-                            extensions,
-                            context_table.unwrap_or_default(),
-                        ),
-                    )
-                    .await,
-                    BackgroundTasks::empty(),
-                );
-            },
-        };
-        if entries.is_empty() {
-            let boxed: Box<dyn PluginPayload> = Box::new(payload);
-            return (
-                self.finish(
-                    &snapshot,
-                    Some(H::NAME),
-                    matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        boxed,
-                        extensions,
-                        context_table.unwrap_or_default(),
-                    ),
-                )
-                .await,
-                BackgroundTasks::empty(),
-            );
-        }
-
-        let boxed: Box<dyn PluginPayload> = Box::new(payload);
-        let (result, tasks, refused) = {
-            let _boundary = self.enter_executor();
-            snapshot
-                .executor
-                .execute_audited(
-                    &entries,
-                    boxed,
-                    // Make the host's transport reachable; `filter_extensions`
-                    // applies the `perform_http` gate per plugin.
-                    self.with_host_services(extensions),
-                    context_table,
-                    &self.task_tracker,
-                )
-                .await
-        };
-        (
-            self.finish(&snapshot, Some(H::NAME), matched.as_ref(), refused, result)
-                .await,
-            tasks,
+        self.dispatch(
+            &self.load_runtime(),
+            H::NAME,
+            Box::new(payload),
+            extensions,
+            context_table,
         )
+        .await
     }
 
     /// Invoke a typed hook by explicit name.
@@ -3006,110 +3232,14 @@ impl PolicyEngine {
         extensions: Extensions,
         context_table: Option<PluginContextTable>,
     ) -> (PipelineResult, BackgroundTasks) {
-        let snapshot = self.load_runtime();
-        let context_table =
-            self.track_rate_limit_stage(&snapshot, hook_name, &extensions, context_table);
-        let hook_type = HookType::new(hook_name);
-        let hook_entries = snapshot.registry.entries_for_hook(&hook_type);
-        // No registered entries AND no route annotations → nothing to
-        // do. Allow-and-pass-through. We can't short-circuit on
-        // `hook_entries.is_empty()` alone, because route annotations
-        // (external-orchestrator handlers from APL / future Rego /
-        // Cedar-direct) can produce a single-entry dispatch even when
-        // no plugin was registered on the hook directly.
-        //
-        // Returning here also means a request whose path cannot be read is
-        // allowed rather than denied on such a hook. Nothing would have
-        // enforced on it either way.
-        if snapshot.has_nothing_to_dispatch(hook_name, hook_entries) {
-            let boxed: Box<dyn PluginPayload> = Box::new(payload);
-            let matched = resolve_contract_route(&snapshot, &extensions);
-            return (
-                self.finish(
-                    &snapshot,
-                    Some(hook_name),
-                    matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        boxed,
-                        extensions,
-                        context_table.unwrap_or_default(),
-                    ),
-                )
-                .await,
-                BackgroundTasks::empty(),
-            );
-        }
-
-        let (entries, matched) = match self
-            .filter_entries_by_route(&snapshot, hook_entries, &extensions, hook_name)
-            .await
-        {
-            Ok(resolved) => resolved,
-            Err(cause) => {
-                return (
-                    self.finish(
-                        &snapshot,
-                        Some(hook_name),
-                        None,
-                        Some(Box::new(payload)),
-                        PipelineResult::denied(
-                            cause.violation(),
-                            extensions,
-                            context_table.unwrap_or_default(),
-                        ),
-                    )
-                    .await,
-                    BackgroundTasks::empty(),
-                );
-            },
-        };
-        if entries.is_empty() {
-            let boxed: Box<dyn PluginPayload> = Box::new(payload);
-            return (
-                self.finish(
-                    &snapshot,
-                    Some(hook_name),
-                    matched.as_ref(),
-                    None,
-                    PipelineResult::allowed_with(
-                        boxed,
-                        extensions,
-                        context_table.unwrap_or_default(),
-                    ),
-                )
-                .await,
-                BackgroundTasks::empty(),
-            );
-        }
-
-        let boxed: Box<dyn PluginPayload> = Box::new(payload);
-        let (result, tasks, refused) = {
-            let _boundary = self.enter_executor();
-            snapshot
-                .executor
-                .execute_audited(
-                    &entries,
-                    boxed,
-                    // Make the host's transport reachable; `filter_extensions`
-                    // applies the `perform_http` gate per plugin.
-                    self.with_host_services(extensions),
-                    context_table,
-                    &self.task_tracker,
-                )
-                .await
-        };
-        (
-            self.finish(
-                &snapshot,
-                Some(hook_name),
-                matched.as_ref(),
-                refused,
-                result,
-            )
-            .await,
-            tasks,
+        self.dispatch(
+            &self.load_runtime(),
+            hook_name,
+            Box::new(payload),
+            extensions,
+            context_table,
         )
+        .await
     }
 
     /// Find every (`hook_name`, `HookEntry`) pair belonging to the named
@@ -3806,10 +3936,11 @@ impl PolicyEngine {
             ));
         };
 
-        // Rate-limit lists skip the cache. A fill from a request still on an
-        // older snapshot could outlive the clear a reload runs, and would then
-        // keep serving that generation's limiter instances.
-        let cacheable = !StructuralList::is_rate_limits(hook_name);
+        // Rate-limit and revocation lists skip the cache. A fill from a request
+        // still on an older snapshot could outlive the clear a reload runs, and
+        // would then keep serving that generation's limiters or checkers.
+        let cacheable =
+            !StructuralList::is_rate_limits(hook_name) && !StructuralList::is_revocation(hook_name);
 
         // Fast path: zero-allocation cache lookup with raw_entry
         let hash = {
@@ -3908,6 +4039,40 @@ impl PolicyEngine {
                 let resolved = config::resolve_identity_plugins_for_route(policy_config, matched);
                 self.resolved_entries(snapshot, entries, &resolved).await
             },
+            Some(StructuralList::Revocation) => {
+                let checkers = step_entries(
+                    snapshot,
+                    policy_config,
+                    &config::REVOCATION_BLOCK,
+                    entries,
+                    matched,
+                    Some(entity_type),
+                    hook_name,
+                )
+                .map_err(|missing| {
+                    error!(
+                        plugin = %missing.plugin,
+                        section = %missing.site.section,
+                        index = missing.site.index,
+                        "a revocation step has no checker in the running snapshot, so requests \
+                         it covers are denied with auth.revocation_unavailable until the plugin \
+                         is registered again or the configuration is reloaded",
+                    );
+                    RouteResolutionError::RevocationUnavailable
+                })?;
+                // The executor skips a disabled plugin, so a disabled kill list
+                // would deny nothing and the rest of the list would decide.
+                if let Some(disabled) = checkers.iter().find(|entry| entry.plugin_ref.is_disabled())
+                {
+                    error!(
+                        plugin = %disabled.plugin_ref.name(),
+                        "a revocation checker on this route is disabled, so requests it covers \
+                         are denied with auth.revocation_unavailable while it stays disabled",
+                    );
+                    return Err(RouteResolutionError::RevocationUnavailable);
+                }
+                checkers
+            },
             None => {
                 let resolved = config::resolve_plugins_for_entity(policy_config);
                 self.resolved_entries(snapshot, entries, &resolved).await
@@ -3996,8 +4161,8 @@ impl PolicyEngine {
     /// Falling back to the global list is the behavior a host gets today and
     /// stays that way, but doing it silently hides which list ran for a
     /// request, so the condition is diagnosable from what the engine emits.
-    /// `authentication:` and `rate_limits:` latch separately, so one list's
-    /// warning does not spend the other's.
+    /// `authentication:`, `rate_limits:` and `revocation:` latch separately,
+    /// so one list's warning does not spend another's.
     ///
     /// Which routes those are is decided when the config lands, so this reads
     /// the answer off the snapshot. Every check here is O(1), which is what
@@ -4020,6 +4185,10 @@ impl PolicyEngine {
             StructuralList::RateLimits(_) => (
                 &snapshot.http_routes_declaring_rate_limits,
                 &self.route_rate_limits_unreachable_warned,
+            ),
+            StructuralList::Revocation => (
+                &snapshot.http_routes_declaring_revocation,
+                &self.route_revocation_unreachable_warned,
             ),
         };
         if unreachable.is_empty()
@@ -4044,6 +4213,14 @@ impl PolicyEngine {
                  path at this rate-limit hook, so the global rate_limits list runs instead. \
                  The host must supply the request line on the extensions at both rate-limit \
                  hooks for a route's list to apply.",
+            ),
+            StructuralList::Revocation => warn!(
+                routes = unreachable.join(", "),
+                "An http: route declares revocation: but an HTTP request or response \
+                 carries no readable path, so only the global and entity-default revocation \
+                 checkers run for it. The host must supply the request line on the \
+                 extensions at http.request and http.response for a route's checkers to \
+                 apply.",
             ),
         }
     }
@@ -4106,8 +4283,9 @@ impl PolicyEngine {
             .then(|| resolve_http_route(policy_config, extensions))
             .flatten();
         let pre_identity = crate::ratelimit_hook::HOOK_RATELIMIT_PRE_IDENTITY;
-        let skipped: Vec<&str> = config::rate_limit_step_refs_for_route(
+        let skipped: Vec<&str> = config::step_refs_for_route(
             policy_config,
+            &config::RATE_LIMITS_BLOCK,
             http_matched.as_ref(),
             Some(ENTITY_HTTP),
         )
@@ -4517,6 +4695,8 @@ impl PolicyEngine {
             .store(false, Ordering::Release);
         self.route_rate_limits_unreachable_warned
             .store(false, Ordering::Release);
+        self.route_revocation_unreachable_warned
+            .store(false, Ordering::Release);
         self.rate_limit_stage_skipped_warned
             .store(false, Ordering::Release);
         self.rate_limit_unavailable_warned
@@ -4545,6 +4725,11 @@ impl PolicyEngine {
     /// globally-registered post-invoke plugin) would otherwise report
     /// "no hooks" and be skipped by out-of-process hosts that use this as a
     /// fast-skip gate — silently dropping the route's policy for that phase.
+    ///
+    /// Once any `revocation:` block lists a checker, every `Pre` and `Post`
+    /// hook counts too, because the engine checks revocation inside their
+    /// dispatch. A host that skipped one would release a revoked caller's
+    /// request or response unchecked.
     pub fn has_hooks_for(&self, hook_name: &str) -> bool {
         let snapshot = self.load_runtime();
         snapshot.registry.has_hooks_for(&HookType::new(hook_name))
@@ -4552,6 +4737,8 @@ impl PolicyEngine {
                 .route_annotations
                 .keys()
                 .any(|k| k.hook_name.as_str() == hook_name)
+            || (snapshot.declares_revocation
+                && crate::revocation::check_points(hook_name) != (None, None))
     }
 
     /// Look up a plugin by name. Returns an `Arc<PluginRef>` clone — works
@@ -12822,7 +13009,7 @@ mod rate_limit_dispatch_tests {
              config: {{ tag: route }}\n"
         ))
         .await;
-        engine.mutate_runtime(|snap| snap.rate_limit_overrides = Arc::new(HashMap::new()));
+        engine.mutate_runtime(|snap| snap.step_overrides = Arc::new(HashMap::new()));
 
         let result = dispatch(&engine, HOOK_RATELIMIT_POST_IDENTITY, named("tool", "t")).await;
 
