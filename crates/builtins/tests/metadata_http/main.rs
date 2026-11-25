@@ -101,6 +101,38 @@ async fn documented_source_fetches_and_publishes_before_the_next_predicate() {
 }
 
 #[tokio::test]
+async fn inactive_account_response_is_denied() {
+    let http = Arc::new(
+        FakeTransport::new().respond_with("/v1/accounts/check_account", |_| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", "application/json".parse().unwrap());
+            Ok(HttpResponse::new(
+                200,
+                Bytes::from_static(br#"{"active":false}"#),
+            )
+            .with_headers(headers))
+        }),
+    );
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(KIND, Box::new(MetadataHttpFactory));
+    register_apl(&engine, AplOptions::in_process());
+    let transport: Arc<dyn HttpTransport> = http.clone();
+    assert!(engine.set_http_transport(transport));
+    engine
+        .load_config_yaml(POLICY)
+        .expect("documented metadata HTTP policy loads");
+    engine.initialize().await.expect("engine initializes");
+
+    let (result, _background) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), extensions(), None)
+        .await;
+    assert!(
+        !result.continue_processing,
+        "inactive account blocks the predicate with expected reason"
+    );
+}
+
+#[tokio::test]
 async fn malformed_content_type_rejects_response() {
     let http = Arc::new(
         FakeTransport::new().respond_with("/v1/accounts/check_account", |_| {
