@@ -138,11 +138,14 @@ impl ResponseParser {
     }
 
     fn validate_content_type(&self, response: &HttpResponse) -> Result<(), CalloutFailure> {
-        let raw = response
-            .headers
-            .get("content-type")
+        let mut content_types = response.headers.get_all("content-type").iter();
+        let raw = content_types
+            .next()
             .and_then(|value| value.to_str().ok())
             .ok_or_else(bad_response)?;
+        if content_types.next().is_some() {
+            return Err(bad_response());
+        }
         let mut parts = raw.split(';');
         let media = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
         if parts.any(|parameter| {
@@ -496,6 +499,19 @@ mod tests {
             .expect("empty text and configured status are valid");
         assert_eq!(facts.value(), Some(&json!("")));
         assert_eq!(facts.status(), Some(404));
+    }
+
+    #[test]
+    fn duplicate_content_type_fields_are_rejected() {
+        let mut duplicate = response("application/json", 200, "{}");
+        duplicate
+            .headers
+            .append("content-type", "application/json".parse().unwrap());
+
+        assert_eq!(
+            parser().parse(&duplicate),
+            Err(CalloutFailure::new(MetadataCalloutErrorCode::BadResponse))
+        );
     }
 
     #[test]

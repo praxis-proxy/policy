@@ -120,7 +120,10 @@ headers, and requires HTTPS unless `request.insecure_http: true` is explicit.
 Each protected template reference requires its matching read capability;
 `meta.*` is unrestricted. Credential interpolation additionally requires the
 source capability, `allow_credential_interpolation: true`, and the exact target
-in `credential_fields`.
+in `credential_fields`. Raw inbound tokens use
+`raw_credentials.inbound_tokens.<role>.token`; they resolve directly from the
+filtered request extensions and never enter the general policy attribute bag.
+Missing, empty, ambiguous, or unsupported raw credential paths fail closed.
 
 Responses default to JSON and statuses 200–299. `response.type: text` accepts
 `text/plain`; configured `accepted_statuses` add statuses, and
@@ -141,4 +144,6 @@ authority, outcome and normalized code, accepted status, cache and stale state,
 credential-interpolation use, bounded response counts, and an optional breaker
 transition. It has no fields for URL paths or queries, headers, bodies, secret
 identifiers or material, response values, or raw upstream error text. Schema
-version `1` is serialized in every event.
+version `1` is serialized in every event. The builtin emits one event for each
+completed source operation through its observer, including the
+credential-interpolation marker when that escape hatch was used.

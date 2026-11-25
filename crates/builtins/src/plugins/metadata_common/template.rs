@@ -4,6 +4,8 @@
 use std::collections::BTreeSet;
 
 use praxis_policy_apl_core::{AttributeBag, AttributeValue};
+use praxis_policy_core::extensions::Extensions;
+use praxis_policy_core::extensions::raw_credentials::TokenRole;
 use serde_json::{Number, Value};
 
 use super::CalloutFailure;
@@ -72,13 +74,19 @@ impl Template {
         })
     }
 
-    pub(crate) fn render_text(&self, bag: &AttributeBag) -> Result<String, CalloutFailure> {
+    pub(crate) fn render_text(
+        &self,
+        bag: &AttributeBag,
+        extensions: &Extensions,
+    ) -> Result<String, CalloutFailure> {
         let mut rendered = String::new();
         for part in &self.parts {
             match part {
                 Part::Literal(literal) => rendered.push_str(literal),
                 Part::Reference(reference) => {
-                    rendered.push_str(&scalar_text(bag.get(reference)).ok_or_else(bad_response)?);
+                    rendered.push_str(
+                        &reference_text(reference, bag, extensions).ok_or_else(bad_response)?,
+                    );
                 },
             }
         }
@@ -99,6 +107,7 @@ impl Template {
     pub(crate) fn render_repeated(
         &self,
         bag: &AttributeBag,
+        extensions: &Extensions,
     ) -> Result<Vec<String>, CalloutFailure> {
         if let Some(reference) = &self.exact_reference
             && let Some(AttributeValue::StringSet(values)) = bag.get(reference)
@@ -107,13 +116,22 @@ impl Template {
             values.sort_unstable();
             return Ok(values);
         }
-        self.render_text(bag).map(|value| vec![value])
+        self.render_text(bag, extensions).map(|value| vec![value])
     }
 
-    pub(crate) fn render_json(&self, bag: &AttributeBag) -> Result<Value, CalloutFailure> {
+    pub(crate) fn render_json(
+        &self,
+        bag: &AttributeBag,
+        extensions: &Extensions,
+    ) -> Result<Value, CalloutFailure> {
         let Some(reference) = &self.exact_reference else {
-            return self.render_text(bag).map(Value::String);
+            return self.render_text(bag, extensions).map(Value::String);
         };
+        if reference.starts_with("raw_credentials.") {
+            return raw_credential(reference, extensions)
+                .map(Value::String)
+                .ok_or_else(bad_response);
+        }
         match bag.get(reference).ok_or_else(bad_response)? {
             AttributeValue::Bool(value) => Ok(Value::Bool(*value)),
             AttributeValue::Int(value) => Ok(Value::Number(Number::from(*value))),
@@ -130,6 +148,43 @@ impl Template {
             },
             AttributeValue::NonScalar => Err(bad_response()),
         }
+    }
+}
+
+fn reference_text(reference: &str, bag: &AttributeBag, extensions: &Extensions) -> Option<String> {
+    if reference.starts_with("raw_credentials.") {
+        raw_credential(reference, extensions)
+    } else {
+        scalar_text(bag.get(reference))
+    }
+}
+
+fn raw_credential(reference: &str, extensions: &Extensions) -> Option<String> {
+    let role = reference
+        .strip_prefix("raw_credentials.inbound_tokens.")?
+        .strip_suffix(".token")?;
+    if role.is_empty() || role.contains('.') {
+        return None;
+    }
+    let credentials = extensions.raw_credentials.as_deref()?;
+    let mut matches = credentials
+        .inbound_tokens
+        .iter()
+        .filter(|(candidate, _token)| token_role_name(candidate) == Some(role));
+    let (_, token) = matches.next()?;
+    if matches.next().is_some() || token.token.trim().is_empty() {
+        return None;
+    }
+    Some(token.token.as_str().to_owned())
+}
+
+fn token_role_name(role: &TokenRole) -> Option<&str> {
+    match role {
+        TokenRole::User => Some("user"),
+        TokenRole::Client => Some("client"),
+        TokenRole::CallerWorkload => Some("caller_workload"),
+        TokenRole::Custom(role) => Some(role),
+        _ => None,
     }
 }
 

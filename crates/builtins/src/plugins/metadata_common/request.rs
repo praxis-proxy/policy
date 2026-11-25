@@ -122,19 +122,27 @@ impl JsonTemplate {
         }
     }
 
-    fn render(&self, bag: &praxis_policy_apl_core::AttributeBag) -> Result<Value, CalloutFailure> {
+    fn render(
+        &self,
+        bag: &praxis_policy_apl_core::AttributeBag,
+        extensions: &Extensions,
+    ) -> Result<Value, CalloutFailure> {
         match self {
             Self::Array(values) => values
                 .iter()
-                .map(|value| value.render(bag))
+                .map(|value| value.render(bag, extensions))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
             Self::Object(values) => values
                 .iter()
-                .map(|(key, value)| value.render(bag).map(|value| (key.clone(), value)))
+                .map(|(key, value)| {
+                    value
+                        .render(bag, extensions)
+                        .map(|value| (key.clone(), value))
+                })
                 .collect::<Result<serde_json::Map<_, _>, _>>()
                 .map(Value::Object),
-            Self::Template(template) => template.render_json(bag),
+            Self::Template(template) => template.render_json(bag, extensions),
             Self::Literal(value) => Ok(value.clone()),
         }
     }
@@ -149,7 +157,9 @@ struct ReferenceUse {
 #[derive(Clone, Debug)]
 pub(crate) struct CompiledRequest {
     method: RequestMethod,
+    authority: http::uri::Authority,
     base_url: Url,
+    credential_interpolation: bool,
     path_segments: Vec<Template>,
     query: BTreeMap<String, Template>,
     headers: BTreeMap<String, Template>,
@@ -169,6 +179,7 @@ impl CompiledRequest {
     ) -> Result<Self, String> {
         validate_bounds(config)?;
         let base_url = validate_url(config)?;
+        let authority = authority(&base_url)?;
         let mut references = BTreeSet::new();
         let mut uses = Vec::new();
 
@@ -262,6 +273,16 @@ impl CompiledRequest {
         if config.method == RequestMethod::Get && (json.is_some() || form.is_some()) {
             return Err("GET metadata requests cannot carry `json` or `form` bodies".to_owned());
         }
+        if (json.is_some() || form.is_some())
+            && headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("content-type"))
+        {
+            return Err(
+                "`request.headers` cannot set `Content-Type` when `json` or `form` generates it"
+                    .to_owned(),
+            );
+        }
 
         validate_reference_capabilities(&references, capabilities)?;
         validate_credential_uses(
@@ -270,10 +291,13 @@ impl CompiledRequest {
             allow_credential_interpolation,
             credential_fields,
         )?;
+        let credential_interpolation = uses.iter().any(ReferenceUse::is_credential);
 
         Ok(Self {
             method: config.method,
+            authority,
             base_url,
+            credential_interpolation,
             path_segments,
             query,
             headers,
@@ -294,7 +318,7 @@ impl CompiledRequest {
         {
             let mut segments = url.path_segments_mut().map_err(|()| bad_response())?;
             for segment in &self.path_segments {
-                let rendered = segment.render_text(&bag)?;
+                let rendered = segment.render_text(&bag, extensions)?;
                 if rendered == "." || rendered == ".." {
                     return Err(CalloutFailure::new(
                         MetadataCalloutErrorCode::RejectedDestination,
@@ -306,18 +330,18 @@ impl CompiledRequest {
         if !self.query.is_empty() {
             let mut pairs = url.query_pairs_mut();
             for (name, template) in &self.query {
-                for value in template.render_repeated(&bag)? {
+                for value in template.render_repeated(&bag, extensions)? {
                     pairs.append_pair(name, &value);
                 }
             }
         }
 
         let body = if let Some(json) = &self.json {
-            serde_json::to_vec(&json.render(&bag)?).map_err(|_error| bad_response())?
+            serde_json::to_vec(&json.render(&bag, extensions)?).map_err(|_error| bad_response())?
         } else if let Some(form) = &self.form {
             let mut values = Vec::new();
             for (name, template) in form {
-                for value in template.render_repeated(&bag)? {
+                for value in template.render_repeated(&bag, extensions)? {
                     values.push((name.clone(), value));
                 }
             }
@@ -348,7 +372,7 @@ impl CompiledRequest {
                 .map_err(|_error| bad_response())?;
         }
         for (name, template) in &self.headers {
-            let value = template.render_text(&bag)?;
+            let value = template.render_text(&bag, extensions)?;
             if value.contains(['\r', '\n', '\0']) {
                 return Err(bad_response());
             }
@@ -361,6 +385,22 @@ impl CompiledRequest {
 
     pub(crate) const fn max_response_bytes(&self) -> usize {
         self.max_response_bytes
+    }
+
+    pub(crate) const fn authority(&self) -> &http::uri::Authority {
+        &self.authority
+    }
+
+    pub(crate) const fn uses_credential_interpolation(&self) -> bool {
+        self.credential_interpolation
+    }
+}
+
+impl ReferenceUse {
+    fn is_credential(&self) -> bool {
+        self.reference
+            .eq_ignore_ascii_case("http.request_headers.authorization")
+            || self.reference.starts_with("raw_credentials.")
     }
 }
 
@@ -407,6 +447,18 @@ fn validate_url(config: &RequestConfig) -> Result<Url, String> {
     Ok(url)
 }
 
+fn authority(url: &Url) -> Result<http::uri::Authority, String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| "`request.url` must have a host".to_owned())?;
+    let authority = url
+        .port()
+        .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
+    authority
+        .parse()
+        .map_err(|_error| "`request.url` has an invalid HTTP authority".to_owned())
+}
+
 fn validate_bounds(config: &RequestConfig) -> Result<(), String> {
     if config.timeout_milliseconds == 0 {
         return Err("`request.timeout_milliseconds` must be greater than zero".to_owned());
@@ -445,6 +497,9 @@ fn validate_reference_capabilities(
     capabilities: &HashSet<String>,
 ) -> Result<(), String> {
     for reference in references {
+        if reference.starts_with("raw_credentials.") {
+            validate_raw_credential_reference(reference)?;
+        }
         let required: Vec<_> = known_read_capabilities()
             .filter(|capability| {
                 capability_namespaces(capability).iter().any(|prefix| {
@@ -466,13 +521,9 @@ fn validate_reference_capabilities(
                 required.join("` or `")
             ));
         }
-        let raw_capability = if reference.starts_with("raw_credentials.inbound") {
-            Some("read_inbound_credentials")
-        } else if reference.starts_with("raw_credentials.delegated") {
-            Some("read_delegated_tokens")
-        } else {
-            None
-        };
+        let raw_capability = reference
+            .starts_with("raw_credentials.")
+            .then_some("read_inbound_credentials");
         if let Some(capability) = raw_capability
             && !capabilities.contains(capability)
         {
@@ -484,6 +535,28 @@ fn validate_reference_capabilities(
     Ok(())
 }
 
+fn validate_raw_credential_reference(reference: &str) -> Result<(), String> {
+    let Some(role) = reference
+        .strip_prefix("raw_credentials.inbound_tokens.")
+        .and_then(|reference| reference.strip_suffix(".token"))
+    else {
+        return Err(format!(
+            "template reference `{reference}` is not supported; use `raw_credentials.inbound_tokens.<role>.token`"
+        ));
+    };
+    if role.is_empty()
+        || role.contains('.')
+        || !role
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err(format!(
+            "template reference `{reference}` has an invalid inbound credential role"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_credential_uses(
     uses: &[ReferenceUse],
     capabilities: &HashSet<String>,
@@ -491,19 +564,11 @@ fn validate_credential_uses(
     destinations: &BTreeSet<String>,
 ) -> Result<(), String> {
     for use_ in uses {
-        let inbound_authorization = use_
-            .reference
-            .eq_ignore_ascii_case("http.request_headers.authorization");
-        let raw = use_.reference.starts_with("raw_credentials.");
-        if !inbound_authorization && !raw {
+        if !use_.is_credential() {
             continue;
         }
-        let source_capability = if raw {
-            if use_.reference.starts_with("raw_credentials.delegated") {
-                "read_delegated_tokens"
-            } else {
-                "read_inbound_credentials"
-            }
+        let source_capability = if use_.reference.starts_with("raw_credentials.") {
+            "read_inbound_credentials"
         } else {
             "read_headers"
         };
@@ -545,6 +610,9 @@ mod tests {
     use std::sync::Arc;
 
     use praxis_policy_core::extensions::MetaExtension;
+    use praxis_policy_core::extensions::raw_credentials::{
+        Credential, RawCredentialsExtension, RawInboundToken, TokenKind, TokenRole,
+    };
     use serde_json::json;
 
     use super::*;
@@ -659,6 +727,7 @@ mod tests {
             json!({"method": "GET", "url": "https://{meta.entity_name}.example"}),
             json!({"method": "GET", "url": "http://metadata.example"}),
             json!({"method": "GET", "url": "https://metadata.example", "headers": {"hOsT": "evil.example"}}),
+            json!({"method": "GET", "url": "https://metadata.example", "headers": {"x-value": "one\r\ntwo"}}),
         ] {
             assert!(compile(value, &["perform_http"]).is_err());
         }
@@ -685,6 +754,49 @@ mod tests {
                 if error
                     == CalloutFailure::new(MetadataCalloutErrorCode::RejectedDestination)
         ));
+
+        let request = compile(
+            json!({
+                "method": "GET",
+                "url": "https://metadata.example",
+                "headers": {"x-value": "{custom.injected}"}
+            }),
+            &["perform_http"],
+        )
+        .expect("header template compiles");
+        let injection = Extensions {
+            custom: Some(Arc::new(HashMap::from([(
+                "injected".to_owned(),
+                json!("one\r\ntwo"),
+            )]))),
+            ..Extensions::default()
+        };
+        assert!(matches!(
+            request.build(&injection),
+            Err(error) if error == bad_response()
+        ));
+    }
+
+    #[test]
+    fn generated_body_content_type_cannot_be_overridden() {
+        for body in [
+            json!({"json": {"active": true}}),
+            json!({"form": {"active": "true"}}),
+        ] {
+            let mut request = json!({
+                "method": "POST",
+                "url": "https://metadata.example",
+                "headers": {"CoNtEnT-TyPe": "text/plain"}
+            });
+            request
+                .as_object_mut()
+                .expect("request object")
+                .extend(body.as_object().expect("body object").clone());
+
+            let error = compile(request, &["perform_http"])
+                .expect_err("generated content type must be authoritative");
+            assert!(error.contains("Content-Type"), "unexpected error: {error}");
+        }
     }
 
     #[test]
@@ -747,5 +859,97 @@ mod tests {
             &BTreeSet::from([destination]),
         )
         .expect("all credential gates are present");
+    }
+
+    #[test]
+    fn raw_inbound_credential_resolves_without_entering_the_policy_bag() {
+        let request = config(json!({
+            "method": "POST",
+            "url": "https://metadata.example",
+            "json": {"token": "{raw_credentials.inbound_tokens.user.token}"}
+        }));
+        let compiled = CompiledRequest::compile(
+            &request,
+            &caps(&["perform_http", "read_inbound_credentials"]),
+            true,
+            &BTreeSet::from(["request.json.token".to_owned()]),
+        )
+        .expect("the exact raw inbound token path is permitted");
+        let mut raw = RawCredentialsExtension::default();
+        raw.inbound_tokens.insert(
+            TokenRole::User,
+            RawInboundToken::new(
+                "credential-value",
+                Credential::Header {
+                    name: "authorization".to_owned(),
+                },
+                TokenKind::Opaque,
+            ),
+        );
+        let extensions = Extensions {
+            raw_credentials: Some(Arc::new(raw)),
+            ..Extensions::default()
+        };
+
+        let outbound = compiled
+            .build(&extensions)
+            .expect("the raw credential is present");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&outbound.body).unwrap(),
+            json!({"token": "credential-value"})
+        );
+        assert!(compiled.uses_credential_interpolation());
+    }
+
+    #[test]
+    fn unsupported_and_ambiguous_raw_credential_paths_fail_closed() {
+        let invalid = config(json!({
+            "method": "POST",
+            "url": "https://metadata.example",
+            "json": {"token": "{raw_credentials.delegated_tokens.token}"}
+        }));
+        let error = CompiledRequest::compile(
+            &invalid,
+            &caps(&["perform_http", "read_delegated_tokens"]),
+            true,
+            &BTreeSet::from(["request.json.token".to_owned()]),
+        )
+        .expect_err("delegated-token selection has no stable path contract");
+        assert!(error.contains("not supported"), "unexpected error: {error}");
+
+        let request = config(json!({
+            "method": "POST",
+            "url": "https://metadata.example",
+            "json": {"token": "{raw_credentials.inbound_tokens.user.token}"}
+        }));
+        let compiled = CompiledRequest::compile(
+            &request,
+            &caps(&["perform_http", "read_inbound_credentials"]),
+            true,
+            &BTreeSet::from(["request.json.token".to_owned()]),
+        )
+        .expect("raw credential config");
+        let token = || {
+            RawInboundToken::new(
+                "credential-value",
+                Credential::Header {
+                    name: "authorization".to_owned(),
+                },
+                TokenKind::Opaque,
+            )
+        };
+        let mut raw = RawCredentialsExtension::default();
+        raw.inbound_tokens.insert(TokenRole::User, token());
+        raw.inbound_tokens
+            .insert(TokenRole::Custom("user".to_owned()), token());
+        let extensions = Extensions {
+            raw_credentials: Some(Arc::new(raw)),
+            ..Extensions::default()
+        };
+
+        assert!(matches!(
+            compiled.build(&extensions),
+            Err(error) if error == bad_response()
+        ));
     }
 }

@@ -8,7 +8,9 @@ pub(crate) mod response;
 mod template;
 
 use praxis_policy_core::extensions::{AcquiredFacts, MetadataCacheDisposition};
-use praxis_policy_core::metadata_callout::MetadataCalloutErrorCode;
+use praxis_policy_core::metadata_callout::{
+    CalloutObserver, MetadataCalloutAuditEvent, MetadataCalloutErrorCode,
+};
 
 /// A normalized runtime failure with no source-controlled detail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,5 +25,29 @@ impl CalloutFailure {
 
     pub(crate) fn facts(self) -> AcquiredFacts {
         AcquiredFacts::error(self.code, MetadataCacheDisposition::Disabled)
+    }
+
+    pub(crate) const fn code(&self) -> MetadataCalloutErrorCode {
+        self.code
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct TracingCalloutObserver;
+
+impl CalloutObserver for TracingCalloutObserver {
+    fn observe(&self, event: &MetadataCalloutAuditEvent) {
+        match serde_json::to_string(event) {
+            Ok(event) => tracing::info!(
+                target: "praxis_policy::metadata_callout",
+                audit_event = %event,
+                "metadata callout completed"
+            ),
+            Err(error) => tracing::warn!(
+                target: "praxis_policy::metadata_callout",
+                error = %error,
+                "metadata callout audit serialization failed"
+            ),
+        }
     }
 }
