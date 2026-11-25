@@ -16,6 +16,8 @@
 // rejected secret is reported the same way any other rejected value is, by
 // header name and defect, never by value.
 
+use std::borrow::Cow;
+
 use serde_json::Value;
 use tracing::warn;
 
@@ -121,15 +123,16 @@ fn render_one(
             // `preserve_order`, and a transitive dependency that does would
             // otherwise make one identity render different header bytes. Sorting
             // makes the order the same either way.
-            let mut resolved: Vec<(&String, Value)> = members
+            let mut resolved: Vec<(&String, Cow<'_, Value>)> = members
                 .iter()
                 .filter_map(|(member, path)| {
                     path.resolve_borrowed(ext, secrets)
-                        .map(|value| (member, value.into_owned()))
+                        .map(|value| (member, value))
                 })
                 .collect();
             resolved.sort_by_key(|(member, _)| *member);
-            let mut object = serde_json::Map::new();
+            let mut object: std::collections::BTreeMap<String, Cow<'_, Value>> =
+                std::collections::BTreeMap::new();
             for (member, value) in resolved {
                 object.insert(member.clone(), value);
             }
@@ -139,7 +142,7 @@ fn render_one(
                 let paths: Vec<String> = members.iter().map(|(_, p)| p.authored()).collect();
                 return Rendered::Missing(paths.join(", "));
             }
-            match serde_json::to_string(&Value::Object(object)) {
+            match serde_json::to_string(&object) {
                 Ok(text) => emit(&header.name, text),
                 Err(cause) => {
                     warn!(

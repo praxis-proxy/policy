@@ -63,6 +63,20 @@ allowed inside `parallel`.
 An attempted source can return an error record with a normalized error code in
 the reserved `metadata.*` namespace. Other code namespaces are rejected so a
 source cannot impersonate a policy denial or framework control signal.
+HTTP metadata sources use the following stable codes:
+
+| Code | Class | Meaning |
+|---|---|---|
+| `metadata.subject_required` | fatal | no authenticated subject |
+| `metadata.timeout` | recoverable | connect, attempt, or invocation timeout |
+| `metadata.upstream_error` | recoverable | transport failure or upstream 5xx |
+| `metadata.overloaded` | recoverable | per-source concurrency limit reached |
+| `metadata.circuit_open` | recoverable | source circuit breaker is open |
+| `metadata.auth_failed` | fatal | source authentication failed |
+| `metadata.response_too_large` | fatal | configured byte ceiling exceeded |
+| `metadata.bad_response` | fatal | invalid status, media type, shape, or projection |
+| `metadata.rejected_destination` | fatal | host egress policy rejected the destination |
+
 The plugin's configured `on_error` determines publication:
 
 - `fail` stops the route and publishes no record.
@@ -79,11 +93,26 @@ error record. An executor timeout, panic, or source error returns no trusted
 `AcquiredFacts`; the fetch therefore denies even under `ignore`. The same holds
 when the source denies, or returns without a record.
 
-The fetch runs inside the APL route handler, and both share
-`engine_settings.plugin_timeout`. A source adapter that maps transport failures
-to records must set its own request deadline so that it fits inside what is
-left of that budget after the route's earlier steps, with enough time to
-construct and return (for example) a `metadata.timeout` record. If the budget
-runs out first, the route times out as a whole and `ignore` does not apply. PPE
-cannot validate this ordering at load because adapter deadlines live inside
-source-specific configuration.
+The fetch runs inside the APL route handler, and both share the invocation's
+remaining deadline. The Praxis embedding must seed that budget on request-time
+`Extensions` with `Extensions::with_invocation_deadline`; Policy cannot infer a
+gateway deadline. Request-time host services then preserve the absolute deadline
+across nested dispatches and cap every HTTP attempt, connect hint, retry budget,
+and backoff before transport dispatch. An adapter may configure a stricter
+deadline but cannot extend the invocation budget. If no time remains, the host
+service returns the stable transport timeout classification without dispatching
+the request. Sources using `on_error: ignore` must set a request deadline within
+the route budget remaining after earlier steps, leaving enough time to build
+and return a trusted `metadata.timeout` record. If the route deadline expires
+before the source can return that record, the framework timeout still fails
+closed and `ignore` does not apply.
+
+## Callout audit contract
+
+`MetadataCalloutAuditEvent` is a versioned, value-free record consumed through
+`CalloutObserver`. It contains only the configured instance, parsed source
+authority, outcome and normalized code, accepted status, cache and stale state,
+credential-interpolation use, bounded response counts, and an optional breaker
+transition. It has no fields for URL paths or queries, headers, bodies, secret
+identifiers or material, response values, or raw upstream error text. Schema
+version `1` is serialized in every event.

@@ -281,6 +281,14 @@ when { ({".": true, "m": context.metadata}).m has account };
         !result.continue_processing,
         "a record field named `.` must not hide the sibling metadata read"
     );
+    assert_eq!(
+        result
+            .violation
+            .as_ref()
+            .map(|violation| violation.reason.as_str()),
+        Some("denied by Cedar policy: suspended"),
+        "the record-dot regression must be denied by the suspended forbid"
+    );
 }
 
 #[tokio::test]

@@ -4,6 +4,7 @@
 #![allow(
     missing_docs,
     clippy::expect_used,
+    clippy::panic,
     clippy::unwrap_used,
     reason = "integration test fixtures"
 )]
@@ -30,8 +31,12 @@ use praxis_policy_core::extensions::{
 };
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::{HookHandler, PluginResult, TypedHandlerAdapter};
+use praxis_policy_core::host::HostServices as _;
+use praxis_policy_core::http::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
 use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HttpHook, HttpPayload};
+use praxis_policy_core::http_retry::RetryPolicy;
 use praxis_policy_core::metadata::{MetadataFetchHook, MetadataFetchRequest};
+use praxis_policy_core::metadata_callout::MetadataCalloutErrorCode;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
 #[derive(Clone, Copy)]
@@ -43,6 +48,8 @@ enum SourceResult {
     Hang,
     NoRecord,
     Deny,
+    Panic,
+    Http,
 }
 
 struct Source {
@@ -60,7 +67,7 @@ impl HookHandler<MetadataFetchHook> for Source {
     async fn handle(
         &self,
         request: &MetadataFetchRequest,
-        _extensions: &Extensions,
+        extensions: &Extensions,
         _context: &mut PluginContext,
     ) -> PluginResult<MetadataFetchRequest> {
         let facts = match self.result {
@@ -70,6 +77,23 @@ impl HookHandler<MetadataFetchHook> for Source {
                     "account.refused",
                     "account source refused the lookup",
                 ));
+            },
+            SourceResult::Panic => panic!("metadata source panicked"),
+            SourceResult::Http => {
+                let response = extensions
+                    .http_request(
+                        HttpRequest::get("https://metadata.example/account")
+                            .timeout(Duration::from_secs(60))
+                            .connect_timeout(Duration::from_secs(50)),
+                        RetryPolicy::none(),
+                    )
+                    .await
+                    .expect("test metadata callout should succeed");
+                AcquiredFacts::success(
+                    serde_json::json!({"status": response.status}),
+                    Utc::now(),
+                    MetadataCacheDisposition::Disabled,
+                )
             },
             SourceResult::Success => AcquiredFacts::success(
                 serde_json::json!({"active": true}),
@@ -88,7 +112,7 @@ impl HookHandler<MetadataFetchHook> for Source {
                 MetadataCacheDisposition::Disabled,
             ),
             SourceResult::Error => AcquiredFacts::error(
-                "metadata.upstream_error",
+                MetadataCalloutErrorCode::UpstreamError,
                 MetadataCacheDisposition::Disabled,
             ),
             SourceResult::ReservedError => AcquiredFacts::error(
@@ -120,6 +144,22 @@ impl HookHandler<CmfHook> for Source {
 }
 
 struct SourceFactory(SourceResult);
+
+#[derive(Debug, Default)]
+struct DeadlineTransport {
+    request: std::sync::Mutex<Option<HttpRequest>>,
+}
+
+#[async_trait]
+impl HttpTransport for DeadlineTransport {
+    async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
+        *self
+            .request
+            .lock()
+            .expect("request lock should not be poisoned") = Some(request);
+        Ok(HttpResponse::new(200, Default::default()))
+    }
+}
 
 impl PluginFactory for SourceFactory {
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
@@ -963,6 +1003,90 @@ routes:
             .contains("account source refused the lookup"),
         "{violation:?}"
     );
+}
+
+#[tokio::test]
+async fn ignored_source_panic_denies() {
+    let engine = engine(
+        r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+    on_error: ignore
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        SourceResult::Panic,
+    )
+    .await;
+
+    let (result, _) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(true), extensions(), None)
+        .await;
+
+    assert!(!result.continue_processing, "a source panic must deny");
+    let violation = result.violation.expect("a source panic must deny");
+    assert_ne!(violation.code, "metadata.upstream_error");
+    assert!(
+        violation
+            .reason
+            .contains("returned no AcquiredFacts record"),
+        "{violation:?}"
+    );
+}
+
+#[tokio::test]
+async fn nested_metadata_callout_preserves_the_outer_invocation_deadline() {
+    let engine = Arc::new(PolicyEngine::default());
+    let transport = Arc::new(DeadlineTransport::default());
+    assert!(engine.set_http_transport(transport.clone()));
+    engine.register_factory("test-source", Box::new(SourceFactory(SourceResult::Http)));
+    register_apl(&engine, AplOptions::in_process());
+    engine
+        .load_config_yaml(
+            r#"
+engine_settings:
+  dispatch: policy
+  plugin_timeout: 30
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+    capabilities: [perform_http]
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        )
+        .expect("configuration should load");
+    engine.initialize().await.expect("engine should initialize");
+
+    let request_extensions = extensions().with_invocation_deadline(Duration::from_secs(10));
+    let (result, _) = engine
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            payload(true),
+            request_extensions,
+            None,
+        )
+        .await;
+
+    assert!(result.continue_processing, "metadata fetch should succeed");
+    let request = transport
+        .request
+        .lock()
+        .expect("request lock should not be poisoned")
+        .clone()
+        .expect("transport should receive one request");
+    assert!(request.timeout <= Duration::from_secs(10));
+    assert!(!request.timeout.is_zero());
+    assert_eq!(request.connect_timeout, Some(request.timeout));
 }
 
 #[tokio::test]
