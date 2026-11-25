@@ -5,17 +5,22 @@
 // at construction, and the client its hook handlers share.
 
 use praxis_policy_core::error::PluginError;
-use praxis_policy_core::plugin::{Plugin, PluginConfig};
+use praxis_policy_core::identity::HOOK_IDENTITY_RESOLVE;
+use praxis_policy_core::plugin::{OnError, Plugin, PluginConfig, PluginMode};
 
 use crate::plugins::oauth_introspection::KIND;
 use crate::plugins::oauth_introspection::client::IntrospectionClient;
 use crate::plugins::oauth_introspection::config::IntrospectionConfig;
+use crate::plugins::oauth_introspection::resolver::Resolution;
 
 /// RFC 7662 token introspection against one issuer.
 pub struct IntrospectionPlugin {
     pub(crate) config: PluginConfig,
     pub(crate) settings: IntrospectionConfig,
     pub(crate) client: IntrospectionClient,
+    /// The compiled `identity:` block, present when the plugin declares
+    /// `identity.resolve`.
+    pub(crate) identity: Option<Resolution>,
 }
 
 impl std::fmt::Debug for IntrospectionPlugin {
@@ -38,7 +43,10 @@ impl IntrospectionPlugin {
     /// Returns [`PluginError::Config`] when the `config:` block is missing or
     /// malformed, a required field is empty, the endpoint is not `https://`
     /// without `insecure_http`, the timeout is zero, caching is on with a zero
-    /// bound, or the client secret cannot be read.
+    /// bound, or the client secret cannot be read. Also when the plugin
+    /// declares `identity.resolve` without an `identity:` block, or outside
+    /// `mode: sequential` and `on_error: fail`, or has the block without the
+    /// hook, or the block does not compile.
     pub fn new(cfg: PluginConfig) -> Result<Self, Box<PluginError>> {
         let fail = |message: String| {
             PluginError::Config {
@@ -69,12 +77,38 @@ impl IntrospectionPlugin {
                     .to_owned(),
             ));
         }
+        let resolves = cfg.hooks.iter().any(|hook| hook == HOOK_IDENTITY_RESOLVE);
+        let identity = match (resolves, &settings.identity) {
+            (true, Some(block)) => {
+                if cfg.mode != PluginMode::Sequential || cfg.on_error != OnError::Fail {
+                    return Err(fail(
+                        "an identity resolver needs `mode: sequential` and `on_error: fail`"
+                            .to_owned(),
+                    ));
+                }
+                Some(Resolution::new(block, &cfg).map_err(|e| fail(format!("identity: {e}")))?)
+            },
+            (true, None) => {
+                return Err(fail(format!(
+                    "declares `{HOOK_IDENTITY_RESOLVE}` but has no `identity:` block saying \
+                     which slot the token fills"
+                )));
+            },
+            (false, Some(_)) => {
+                return Err(fail(format!(
+                    "has an `identity:` block but does not declare `{HOOK_IDENTITY_RESOLVE}`; \
+                     add it to the plugin's `hooks:` or remove the block"
+                )));
+            },
+            (false, None) => None,
+        };
         let client = IntrospectionClient::new(&settings).map_err(fail)?;
 
         Ok(Self {
             config: cfg,
             settings,
             client,
+            identity,
         })
     }
 }
@@ -186,5 +220,62 @@ mod tests {
 
         assert!(!rendered.contains("s3cret"), "{rendered}");
         assert!(!rendered.contains("Basic "), "{rendered}");
+    }
+
+    #[test]
+    fn the_identity_block_and_the_identity_hook_come_together() {
+        let build = |hooks: &[&str], identity: Option<serde_json::Value>, mode: PluginMode| {
+            let mut config = json!({
+                "issuer": ISSUER,
+                "introspection_endpoint": "https://idp.example/introspect",
+                "client_id": "ppe",
+                "client_secret_source": { "kind": "literal", "secret": "s" },
+            });
+            if let Some(identity) = identity {
+                config["identity"] = identity;
+            }
+            IntrospectionPlugin::new(PluginConfig {
+                name: "introspect".into(),
+                kind: KIND.into(),
+                hooks: hooks.iter().map(|&hook| hook.to_owned()).collect(),
+                mode,
+                config: Some(config),
+                ..Default::default()
+            })
+        };
+        let resolve = &[HOOK_IDENTITY_RESOLVE][..];
+
+        for (case, hooks, identity, mode) in [
+            ("hook without block", resolve, None, PluginMode::Sequential),
+            (
+                "block without hook",
+                &[][..],
+                Some(json!({})),
+                PluginMode::Sequential,
+            ),
+            (
+                "not sequential",
+                resolve,
+                Some(json!({})),
+                PluginMode::Transform,
+            ),
+            (
+                "no map section for the role",
+                resolve,
+                Some(json!({ "role": "client", "record_map": { "subject": { "id": "sub" } } })),
+                PluginMode::Sequential,
+            ),
+        ] {
+            let error = build(hooks, identity, mode).expect_err(case);
+            assert!(
+                matches!(*error, PluginError::Config { .. }),
+                "{case}: {error}"
+            );
+        }
+        assert!(
+            build(resolve, Some(json!({})), PluginMode::Sequential)
+                .is_ok_and(|p| p.identity.is_some()),
+            "the hook with a block, and the standard map"
+        );
     }
 }

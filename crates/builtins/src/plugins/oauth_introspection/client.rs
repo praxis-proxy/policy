@@ -4,6 +4,8 @@
 // The RFC 7662 call both hooks make: one POST to the issuer's introspection
 // endpoint, authenticated with `client_secret_basic`, behind the answer cache.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -12,6 +14,7 @@ use praxis_policy_core::host::HostServices as _;
 use praxis_policy_core::http::{HttpRequest, form_urlencode, form_urlencode_component};
 use praxis_policy_core::http_retry::RetryPolicy;
 use serde::Deserialize;
+use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::plugins::oauth_introspection::cache::{Answer, StatusCache};
@@ -28,14 +31,6 @@ const RESPONSE_MAX_BYTES: usize = 16 * 1024;
 // -----------------------------------------------------------------------------
 // Client
 // -----------------------------------------------------------------------------
-
-/// The RFC 7662 response fields read here. `exp` only bounds how long the
-/// answer is cached.
-#[derive(Deserialize)]
-struct IntrospectionResponse {
-    active: bool,
-    exp: Option<f64>,
-}
 
 /// The claims read from a token before it is sent anywhere.
 #[derive(Deserialize)]
@@ -91,8 +86,7 @@ impl IntrospectionClient {
         }
     }
 
-    /// POST the token to the introspection endpoint and read `active` and
-    /// `exp`.
+    /// POST the token to the introspection endpoint and read the response.
     async fn introspect(&self, ext: &Extensions, token: &str) -> Result<Answer, String> {
         let body = form_urlencode(&[("token", token), ("token_type_hint", "access_token")]);
         let request = HttpRequest::post(&self.endpoint, body)
@@ -109,13 +103,31 @@ impl IntrospectionClient {
         if response.status != 200 {
             return Err(format!("status {}", response.status));
         }
-        serde_json::from_slice::<IntrospectionResponse>(&response.body)
-            .map(|parsed| Answer {
-                active: parsed.active,
-                exp: parsed.exp,
-            })
-            .map_err(|e| format!("malformed response: {e}"))
+        parse(&response.body)
     }
+}
+
+/// Read an RFC 7662 response: an object with a boolean `active`, and an
+/// `exp` that is a number when present.
+fn parse(body: &[u8]) -> Result<Answer, String> {
+    let claims: HashMap<String, Value> =
+        serde_json::from_slice(body).map_err(|e| format!("malformed response: {e}"))?;
+    let active = claims
+        .get("active")
+        .and_then(Value::as_bool)
+        .ok_or("malformed response: `active` is missing or not a boolean")?;
+    let exp = match claims.get("exp") {
+        None | Some(Value::Null) => None,
+        Some(exp) => Some(
+            exp.as_f64()
+                .ok_or("malformed response: `exp` is not a number")?,
+        ),
+    };
+    Ok(Answer {
+        active,
+        exp,
+        claims: Arc::new(claims),
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -169,8 +181,6 @@ fn require_https(url: &str, insecure_http: bool) -> Result<(), String> {
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
-    use std::sync::Arc;
-
     use praxis_policy_core::http_testing::FakeTransport;
     use praxis_policy_core::revocation::IdentitySlot;
     use serde_json::json;

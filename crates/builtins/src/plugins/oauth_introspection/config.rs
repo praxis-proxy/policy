@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-// Typed configuration for the introspection checker, deserialized from
+// Typed configuration for the introspection plugin, deserialized from
 // `PluginConfig.config` once at construction. A route's step `config:` is
 // merged over this before construction, which is how a route tightens the
 // check.
@@ -9,13 +9,15 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use praxis_policy_core::extensions::raw_credentials::{Credential, TokenRole};
+use praxis_policy_core::identity::mapping::{ClaimMapConfig, ClaimsOverrides};
 use serde::{Deserialize, Serialize};
 
 /// What operators write under `plugins[<name>].config:`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IntrospectionConfig {
-    /// The issuer whose tokens this checker covers, compared exactly with a
+    /// The issuer whose tokens this plugin covers, compared exactly with a
     /// token's `iss` claim. A token from any other issuer is never sent to
     /// the introspection endpoint.
     pub issuer: String,
@@ -51,6 +53,68 @@ pub struct IntrospectionConfig {
     /// localhost or demo issuer.
     #[serde(default)]
     pub insecure_http: bool,
+
+    /// How a token this plugin authenticates becomes an identity. Required
+    /// when the plugin declares `identity.resolve`, and refused otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentitySettings>,
+}
+
+/// The `identity:` block: where the token is read, which slot it fills, and
+/// how the introspection response maps onto that slot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentitySettings {
+    /// Which identity slot this resolver fills. Default `user`.
+    #[serde(default = "default_role")]
+    pub role: TokenRole,
+
+    /// Where the token sits on the request. Default the `authorization`
+    /// header.
+    #[serde(default = "default_credential")]
+    pub credential: Credential,
+
+    /// What a value at that location must start with. An auth scheme in it
+    /// is stripped before the token is sent. Default `"Bearer "`; set `null`
+    /// to accept any value.
+    #[serde(default = "default_prefix")]
+    pub prefix: Option<String>,
+
+    /// Response fields onto the identity slot. Default: the `standard` map
+    /// `identity/jwt` uses, since an RFC 7662 response carries the same
+    /// claim names as a JWT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_map: Option<ClaimMapConfig>,
+
+    /// Which response fields the identity's claims bag keeps or drops.
+    #[serde(default)]
+    pub claims: ClaimsOverrides,
+
+    /// When set, the response's `aud` must name at least one of these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audiences: Vec<String>,
+
+    /// Clock-skew tolerance for `exp` and `nbf`, in seconds. Default 0.
+    #[serde(default)]
+    pub leeway_seconds: u64,
+}
+
+fn default_role() -> TokenRole {
+    TokenRole::User
+}
+
+fn default_credential() -> Credential {
+    Credential::Header {
+        name: "authorization".to_owned(),
+    }
+}
+
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde's default for an Option field, which `null` can clear"
+)]
+fn default_prefix() -> Option<String> {
+    Some("Bearer ".to_owned())
 }
 
 /// Where the checker's client secret is loaded from.

@@ -42,17 +42,22 @@
 // after resume, so no wall-clock check is added. `exp` is converted to a
 // duration against the wall clock once, when the answer is stored.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use praxis_policy_core::crypto::sha256;
+use serde_json::Value;
 
 /// What the issuer said about one token.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Answer {
     /// The response's `active`.
     pub(crate) active: bool,
     /// The response's `exp`, in seconds since the Unix epoch, when present.
     pub(crate) exp: Option<f64>,
+    /// The whole response, which the identity resolver maps onto a slot.
+    pub(crate) claims: Arc<HashMap<String, Value>>,
 }
 
 /// Cached answers, keyed by the token's digest.
@@ -151,7 +156,11 @@ mod tests {
     const TTL: Duration = Duration::from_secs(60);
 
     fn answer(active: bool, exp: Option<f64>) -> Answer {
-        Answer { active, exp }
+        Answer {
+            active,
+            exp,
+            claims: Arc::default(),
+        }
     }
 
     fn epoch_secs(at: SystemTime) -> f64 {

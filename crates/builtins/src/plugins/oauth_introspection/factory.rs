@@ -25,7 +25,9 @@ use praxis_policy_core::{
     error::PluginError,
     factory::{PluginFactory, PluginInstance},
     hooks::TypedHandlerAdapter,
+    identity::{HOOK_IDENTITY_RESOLVE, IdentityHook},
     plugin::PluginConfig,
+    registry::AnyHookHandler,
     revocation::{HOOK_REVOCATION_CHECK, RevocationHook},
 };
 
@@ -38,15 +40,49 @@ pub const KIND: &str = "oauth/introspection";
 pub struct IntrospectionFactory;
 
 impl PluginFactory for IntrospectionFactory {
+    /// Build the plugin, with a handler for each hook it declares: the engine
+    /// registers every handler an instance returns, so one the operator did
+    /// not ask for must not be returned.
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
         let plugin = Arc::new(IntrospectionPlugin::new(config.clone())?);
-        let handler = Arc::new(TypedHandlerAdapter::<RevocationHook, _>::new(Arc::clone(
-            &plugin,
-        )));
-        Ok(PluginInstance {
-            plugin,
-            handlers: vec![(HOOK_REVOCATION_CHECK, handler)],
-        })
+        let mut handlers: Vec<(&'static str, Arc<dyn AnyHookHandler>)> = Vec::new();
+        for hook in &config.hooks {
+            match hook.as_str() {
+                HOOK_IDENTITY_RESOLVE => handlers.push((
+                    HOOK_IDENTITY_RESOLVE,
+                    Arc::new(TypedHandlerAdapter::<IdentityHook, _>::new(Arc::clone(
+                        &plugin,
+                    ))),
+                )),
+                HOOK_REVOCATION_CHECK => handlers.push((
+                    HOOK_REVOCATION_CHECK,
+                    Arc::new(TypedHandlerAdapter::<RevocationHook, _>::new(Arc::clone(
+                        &plugin,
+                    ))),
+                )),
+                other => {
+                    return Err(PluginError::Config {
+                        message: format!(
+                            "plugin '{}' ({KIND}): serves `{HOOK_IDENTITY_RESOLVE}` and \
+                             `{HOOK_REVOCATION_CHECK}`, not `{other}`",
+                            config.name
+                        ),
+                    }
+                    .boxed());
+                },
+            }
+        }
+        if handlers.is_empty() {
+            return Err(PluginError::Config {
+                message: format!(
+                    "plugin '{}' ({KIND}): declare `{HOOK_IDENTITY_RESOLVE}`, \
+                     `{HOOK_REVOCATION_CHECK}` or both in `hooks:`",
+                    config.name
+                ),
+            }
+            .boxed());
+        }
+        Ok(PluginInstance { plugin, handlers })
     }
 }
 
@@ -56,12 +92,36 @@ mod tests {
     use super::*;
 
     // -------------------------------------------------------------------------
+    // Fixtures
+    // -------------------------------------------------------------------------
+
+    fn create(hooks: &[&str]) -> Result<PluginInstance, Box<PluginError>> {
+        IntrospectionFactory.create(&PluginConfig {
+            name: "introspect".into(),
+            kind: KIND.into(),
+            hooks: hooks.iter().map(|&hook| hook.to_owned()).collect(),
+            config: Some(serde_json::json!({
+                "issuer": "https://idp.example/realms/demo",
+                "introspection_endpoint": "https://idp.example/introspect",
+                "client_id": "ppe",
+                "client_secret_source": { "kind": "literal", "secret": "s" },
+                "identity": {},
+            })),
+            ..Default::default()
+        })
+    }
+
+    fn registered(instance: &PluginInstance) -> Vec<&'static str> {
+        instance.handlers.iter().map(|(hook, _)| *hook).collect()
+    }
+
+    // -------------------------------------------------------------------------
     // Tests
     // -------------------------------------------------------------------------
 
     #[test]
-    fn registers_one_handler_on_the_revocation_hook() {
-        let instance = IntrospectionFactory
+    fn registers_a_handler_for_each_declared_hook_and_no_other() {
+        let checker = IntrospectionFactory
             .create(&PluginConfig {
                 name: "introspect".into(),
                 kind: KIND.into(),
@@ -74,13 +134,29 @@ mod tests {
                 })),
                 ..Default::default()
             })
-            .expect("a valid config builds");
+            .expect("a checker builds");
+        let resolver = create(&[HOOK_IDENTITY_RESOLVE]).expect("a resolver builds");
+        let both = create(&[HOOK_IDENTITY_RESOLVE, HOOK_REVOCATION_CHECK]).expect("both build");
 
-        assert_eq!(instance.handlers.len(), 1, "one checker, one handler");
+        assert_eq!(registered(&checker), [HOOK_REVOCATION_CHECK], "checker");
+        assert_eq!(registered(&resolver), [HOOK_IDENTITY_RESOLVE], "resolver");
         assert_eq!(
-            instance.handlers[0].0, HOOK_REVOCATION_CHECK,
-            "the checker lands on revocation.check"
+            registered(&both),
+            [HOOK_IDENTITY_RESOLVE, HOOK_REVOCATION_CHECK],
+            "one instance, both hooks"
         );
+    }
+
+    #[test]
+    fn a_hook_it_does_not_serve_or_none_at_all_fails_the_factory() {
+        for hooks in [&["cmf.tool_pre_invoke"][..], &[][..]] {
+            let error = create(hooks).err().expect("refused");
+
+            assert!(
+                matches!(*error, PluginError::Config { .. }),
+                "{hooks:?}: {error:?}"
+            );
+        }
     }
 
     #[test]

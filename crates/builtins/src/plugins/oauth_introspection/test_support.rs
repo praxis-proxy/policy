@@ -25,8 +25,13 @@ pub(crate) const ISSUER: &str = "https://idp.example/realms/demo";
 
 /// A plugin for [`ISSUER`] with client `ppe` and secret `s3cret`, with
 /// `overrides` laid over that config.
-#[expect(clippy::expect_used, reason = "tests")]
 pub(crate) fn plugin(overrides: serde_json::Value) -> IntrospectionPlugin {
+    plugin_for(&[], overrides)
+}
+
+/// [`plugin`], declaring `hooks`.
+#[expect(clippy::expect_used, reason = "tests")]
+pub(crate) fn plugin_for(hooks: &[&str], overrides: serde_json::Value) -> IntrospectionPlugin {
     let mut config = json!({
         "issuer": ISSUER,
         "introspection_endpoint": "https://idp.example/introspect",
@@ -41,6 +46,7 @@ pub(crate) fn plugin(overrides: serde_json::Value) -> IntrospectionPlugin {
     IntrospectionPlugin::new(PluginConfig {
         name: "introspect".into(),
         kind: KIND.into(),
+        hooks: hooks.iter().map(|&hook| hook.to_owned()).collect(),
         config: Some(config),
         ..Default::default()
     })

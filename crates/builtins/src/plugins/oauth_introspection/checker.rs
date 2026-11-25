@@ -144,7 +144,7 @@ mod tests {
         ext: &Extensions,
     ) -> PluginResult<RevocationCheck> {
         let mut ctx = PluginContext::default();
-        checker.handle(check, ext, &mut ctx).await
+        HookHandler::<RevocationHook>::handle(checker, check, ext, &mut ctx).await
     }
 
     fn vouched(result: &PluginResult<RevocationCheck>) -> Vec<IdentitySlot> {
