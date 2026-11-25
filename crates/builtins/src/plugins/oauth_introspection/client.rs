@@ -108,7 +108,8 @@ impl IntrospectionClient {
 }
 
 /// Read an RFC 7662 response: an object with a boolean `active`, and an
-/// `exp` that is a number when present.
+/// `exp` and `nbf` that are numbers when present. Anything else there, `null`
+/// included, makes the response malformed rather than letting a check skip.
 fn parse(body: &[u8]) -> Result<Answer, String> {
     let claims: HashMap<String, Value> =
         serde_json::from_slice(body).map_err(|e| format!("malformed response: {e}"))?;
@@ -116,13 +117,8 @@ fn parse(body: &[u8]) -> Result<Answer, String> {
         .get("active")
         .and_then(Value::as_bool)
         .ok_or("malformed response: `active` is missing or not a boolean")?;
-    let exp = match claims.get("exp") {
-        None | Some(Value::Null) => None,
-        Some(exp) => Some(
-            exp.as_f64()
-                .ok_or("malformed response: `exp` is not a number")?,
-        ),
-    };
+    let exp = time(&claims, "exp")?;
+    time(&claims, "nbf")?;
     Ok(Answer {
         active,
         exp,
@@ -133,6 +129,19 @@ fn parse(body: &[u8]) -> Result<Answer, String> {
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+/// A time field of the response: absent, or a number of seconds since the
+/// epoch.
+fn time(claims: &HashMap<String, Value>, name: &str) -> Result<Option<f64>, String> {
+    claims
+        .get(name)
+        .map(|value| {
+            value
+                .as_f64()
+                .ok_or_else(|| format!("malformed response: `{name}` is not a number"))
+        })
+        .transpose()
+}
 
 /// The `iss` claim of a JWT, read without verifying it.
 ///
@@ -229,6 +238,23 @@ mod tests {
             "content type"
         );
         assert_eq!(request.timeout, Duration::from_millis(500), "timeout");
+    }
+
+    #[test]
+    fn a_time_field_that_is_not_a_number_makes_the_response_malformed() {
+        for body in [
+            r#"{"active":true,"exp":null}"#,
+            r#"{"active":true,"exp":"soon"}"#,
+            r#"{"active":true,"nbf":"9999999999"}"#,
+            r#"{"active":true,"nbf":null}"#,
+        ] {
+            assert!(parse(body.as_bytes()).is_err(), "{body}");
+        }
+        assert!(
+            parse(br#"{"active":true,"exp":1800000000,"nbf":1700000000}"#).is_ok(),
+            "numbers are read"
+        );
+        assert!(parse(br#"{"active":true}"#).is_ok(), "absent is fine");
     }
 
     #[tokio::test]

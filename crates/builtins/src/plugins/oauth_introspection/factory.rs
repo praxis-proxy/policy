@@ -95,18 +95,23 @@ mod tests {
     // Fixtures
     // -------------------------------------------------------------------------
 
-    fn create(hooks: &[&str]) -> Result<PluginInstance, Box<PluginError>> {
+    /// Create a plugin declaring `hooks`, with an `identity:` block when
+    /// `resolves`.
+    fn create(hooks: &[&str], resolves: bool) -> Result<PluginInstance, Box<PluginError>> {
+        let mut config = serde_json::json!({
+            "issuer": "https://idp.example/realms/demo",
+            "introspection_endpoint": "https://idp.example/introspect",
+            "client_id": "ppe",
+            "client_secret_source": { "kind": "literal", "secret": "s" },
+        });
+        if resolves {
+            config["identity"] = serde_json::json!({});
+        }
         IntrospectionFactory.create(&PluginConfig {
             name: "introspect".into(),
             kind: KIND.into(),
             hooks: hooks.iter().map(|&hook| hook.to_owned()).collect(),
-            config: Some(serde_json::json!({
-                "issuer": "https://idp.example/realms/demo",
-                "introspection_endpoint": "https://idp.example/introspect",
-                "client_id": "ppe",
-                "client_secret_source": { "kind": "literal", "secret": "s" },
-                "identity": {},
-            })),
+            config: Some(config),
             ..Default::default()
         })
     }
@@ -121,22 +126,10 @@ mod tests {
 
     #[test]
     fn registers_a_handler_for_each_declared_hook_and_no_other() {
-        let checker = IntrospectionFactory
-            .create(&PluginConfig {
-                name: "introspect".into(),
-                kind: KIND.into(),
-                hooks: vec![HOOK_REVOCATION_CHECK.to_owned()],
-                config: Some(serde_json::json!({
-                    "issuer": "https://idp.example/realms/demo",
-                    "introspection_endpoint": "https://idp.example/introspect",
-                    "client_id": "ppe",
-                    "client_secret_source": { "kind": "literal", "secret": "s" },
-                })),
-                ..Default::default()
-            })
-            .expect("a checker builds");
-        let resolver = create(&[HOOK_IDENTITY_RESOLVE]).expect("a resolver builds");
-        let both = create(&[HOOK_IDENTITY_RESOLVE, HOOK_REVOCATION_CHECK]).expect("both build");
+        let checker = create(&[HOOK_REVOCATION_CHECK], false).expect("a checker builds");
+        let resolver = create(&[HOOK_IDENTITY_RESOLVE], true).expect("a resolver builds");
+        let both =
+            create(&[HOOK_IDENTITY_RESOLVE, HOOK_REVOCATION_CHECK], true).expect("both build");
 
         assert_eq!(registered(&checker), [HOOK_REVOCATION_CHECK], "checker");
         assert_eq!(registered(&resolver), [HOOK_IDENTITY_RESOLVE], "resolver");
@@ -149,11 +142,16 @@ mod tests {
 
     #[test]
     fn a_hook_it_does_not_serve_or_none_at_all_fails_the_factory() {
-        for hooks in [&["cmf.tool_pre_invoke"][..], &[][..]] {
-            let error = create(hooks).err().expect("refused");
+        // No `identity:` block, so construction succeeds and the factory's own
+        // hook check is what refuses.
+        for (hooks, names) in [
+            (&["cmf.tool_pre_invoke"][..], "not `cmf.tool_pre_invoke`"),
+            (&[][..], "or both in `hooks:`"),
+        ] {
+            let error = create(hooks, false).err().expect("refused");
 
             assert!(
-                matches!(*error, PluginError::Config { .. }),
+                matches!(&*error, PluginError::Config { message } if message.contains(names)),
                 "{hooks:?}: {error:?}"
             );
         }

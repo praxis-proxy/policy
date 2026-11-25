@@ -117,9 +117,10 @@ fn default_prefix() -> Option<String> {
     Some("Bearer ".to_owned())
 }
 
-/// Where the checker's client secret is loaded from.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+/// Where the plugin's client secret is loaded from. `Debug` hides a literal
+/// secret.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientSecretSource {
     /// Read from an environment variable.
     EnvVar {
@@ -136,6 +137,19 @@ pub enum ClientSecretSource {
         /// The secret inline.
         secret: String,
     },
+}
+
+impl std::fmt::Debug for ClientSecretSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EnvVar { name } => f.debug_struct("EnvVar").field("name", name).finish(),
+            Self::File { path } => f.debug_struct("File").field("path", path).finish(),
+            Self::Literal { .. } => f
+                .debug_struct("Literal")
+                .field("secret", &"<elided>")
+                .finish(),
+        }
+    }
 }
 
 const fn default_timeout_ms() -> u64 {
@@ -232,5 +246,30 @@ mod tests {
             error.contains("_PPE_INTROSPECTION_SECRET_NOT_SET_"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn debug_hides_a_literal_secret() {
+        let config: IntrospectionConfig = serde_json::from_value(json!({
+            "issuer": "https://idp.example/realms/demo",
+            "introspection_endpoint": "https://idp.example/introspect",
+            "client_id": "ppe",
+            "client_secret_source": { "kind": "literal", "secret": "s3cret" },
+        }))
+        .unwrap();
+
+        let rendered = format!("{config:?}");
+
+        assert!(!rendered.contains("s3cret"), "{rendered}");
+        assert!(rendered.contains("Literal"), "{rendered}");
+    }
+
+    #[test]
+    fn a_misspelled_secret_source_key_is_rejected() {
+        let parsed = serde_json::from_value::<ClientSecretSource>(
+            json!({ "kind": "env_var", "name": "PPE_SECRET", "nmae": "typo" }),
+        );
+
+        assert!(parsed.is_err(), "an unknown key must not be ignored");
     }
 }

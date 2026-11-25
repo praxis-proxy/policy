@@ -339,6 +339,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_request_with_no_route_metadata_is_refused_when_only_revocation_is_configured() {
+        let (engine, _) = engine(&format!(
+            "{}global:\n  revocation: [kc]\n",
+            checker("kc", "{ vouch: [subject, client] }")
+        ))
+        .await;
+        engine.unregister("kc");
+        let identified_but_unrouted = Extensions {
+            security: both_slots().security,
+            ..Extensions::default()
+        };
+
+        let denied = check(&engine, identified_but_unrouted)
+            .await
+            .expect("with its checker gone, the request must not pass on the unrouted path");
+
+        assert_eq!(
+            denied.code,
+            crate::engine::VIOLATION_UNIDENTIFIED_REQUEST,
+            "refused like any request a policy cannot route"
+        );
+    }
+
+    #[tokio::test]
     async fn a_disabled_checker_denies_as_unavailable() {
         let (engine, calls) = engine(&format!(
             "{}{}engine_settings:\n  require_revocation: true\nglobal:\n  revocation: [kc, \

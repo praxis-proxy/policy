@@ -169,6 +169,10 @@ fn declares_http_route(config: &PolicyConfig) -> bool {
 /// Route annotations count because a `global.authorization:` block is an APL
 /// term praxis-policy-core does not model: what praxis-policy-core sees of it
 /// is the handler the orchestrator installed.
+///
+/// `global.revocation` counts too: otherwise a request with no route metadata
+/// in a revocation-only config skips route resolution, and with it the refusal
+/// of a missing or disabled checker.
 fn declares_a_policy(config: &PolicyConfig, snapshot: &RuntimeSnapshot) -> bool {
     !config.routes.is_empty()
         || !config.groups.is_empty()
@@ -176,6 +180,7 @@ fn declares_a_policy(config: &PolicyConfig, snapshot: &RuntimeSnapshot) -> bool 
         || !config.global.defaults.is_empty()
         || config.global.authentication.is_some()
         || config.global.rate_limits.is_some()
+        || config.global.revocation.is_some()
         || !snapshot.route_annotations.is_empty()
 }
 

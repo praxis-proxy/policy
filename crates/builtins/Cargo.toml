@@ -27,6 +27,7 @@ features = [
   "oauth",
   "delegator-vault",
   "elicitation-ciba",
+  "oauth-introspection",
   "experimental-quota",
   "experimental-ratelimit",
   "cedar",
@@ -279,7 +280,7 @@ hmac = { workspace = true, optional = true }
 #
 # The Vault delegator's credential cache and the introspection checker's
 # answer cache rely on the same two guarantees.
-moka ={ version = "0.12", optional = true, features = ["future"] }
+moka = { workspace = true, optional = true }
 
 # --- cedar -------------------------------------------------------------------
 

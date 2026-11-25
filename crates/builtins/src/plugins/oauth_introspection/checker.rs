@@ -9,6 +9,7 @@
 use futures::future::join_all;
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::error::PluginViolation;
+use praxis_policy_core::extensions::raw_credentials::TokenKind;
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::hooks::trait_def::{HookHandler, PluginResult};
 use praxis_policy_core::revocation::{
@@ -37,7 +38,8 @@ impl IntrospectionPlugin {
     /// The issuer the authenticating resolver recorded decides, so an opaque
     /// token it vouched for is covered, and a JWT it recorded for another
     /// issuer is not sent here whatever its `iss` says. With nothing
-    /// recorded, a JWT's `iss` decides, and an opaque token is left alone.
+    /// recorded, a token stored as a JWT is ours when its `iss` matches, and
+    /// any other kind is left alone without being parsed.
     fn token_for<'ext>(&self, ext: &'ext Extensions, slot: IdentitySlot) -> Option<&'ext str> {
         let token = ext
             .raw_credentials
@@ -46,7 +48,10 @@ impl IntrospectionPlugin {
             .get(&slot.token_role())?;
         let ours = match token.issuer.as_deref() {
             Some(recorded) => recorded == self.settings.issuer,
-            None => issuer_of(&token.token).as_deref() == Some(self.settings.issuer.as_str()),
+            None => {
+                matches!(token.kind, TokenKind::Jwt | TokenKind::SpiffeJwt)
+                    && issuer_of(&token.token).as_deref() == Some(self.settings.issuer.as_str())
+            },
         };
         ours.then_some(token.token.as_str())
     }
@@ -119,7 +124,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use praxis_policy_core::extensions::raw_credentials::TokenKind;
     use praxis_policy_core::http::HttpTransportError;
     use praxis_policy_core::http_testing::FakeTransport;
     use praxis_policy_core::revocation::CheckPoint;
@@ -329,6 +333,20 @@ mod tests {
         let result = run(&checker(json!({})), &asked(&[IdentitySlot::Subject]), &ext).await;
 
         assert!(vouched(&result).is_empty(), "recorded for another issuer");
+        assert_eq!(transport.call_count(), 0, "the token never left");
+    }
+
+    #[tokio::test]
+    async fn an_opaque_token_with_no_recorded_issuer_is_never_parsed_or_sent() {
+        let transport =
+            Arc::new(FakeTransport::new().json("/introspect", 200, r#"{"active":true}"#));
+        // Opaque by kind, although its bytes would decode to this issuer.
+        let token = inbound(&jwt(ISSUER), TokenKind::Opaque);
+        let ext = ext_with(&transport, &[(IdentitySlot::Subject, token)]);
+
+        let result = run(&checker(json!({})), &asked(&[IdentitySlot::Subject]), &ext).await;
+
+        assert!(vouched(&result).is_empty(), "not ours to check");
         assert_eq!(transport.call_count(), 0, "the token never left");
     }
 
