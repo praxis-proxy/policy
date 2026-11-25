@@ -74,6 +74,7 @@ delegator uses:
 | record both the user *and* the calling agent in the token | `subject: user`, `actor: caller_workload` | RFC 8693 `actor_token` |
 | forward a token the caller already obtained | no `delegate`, pass the header through | — |
 | authenticate a caller holding an opaque API key | `identity/api-key` → directory lookup | — |
+| authenticate an OAuth token PPE cannot verify itself, such as an opaque one | `oauth/introspection` with an `identity:` block, [Recipe 12](#recipe-12-an-opaque-oauth-token-authenticated-by-introspection) | RFC 7662 |
 | require the agent to prove it holds the key its token is bound to | `dpop` on the trusted issuer, then [Recipe 11](#recipe-11-an-agent-with-a-dpop-bound-token) | RFC 9449 |
 
 ---
@@ -1025,6 +1026,103 @@ because `client.key_binding` is set only after a proof verifies.
 Tested: inbound verification against Keycloak 26.8 (`dpop_live`, see
 [Testing](testing.md)); the delegation legs are those of Recipes 1 and 3.
 
+### Recipe 12: An opaque OAuth token, authenticated by introspection
+
+Use `oauth/introspection` as a resolver when callers present OAuth access
+tokens PPE cannot verify by itself, such as opaque reference tokens. On each
+request it asks the issuer about the token through
+[RFC 7662](https://www.rfc-editor.org/rfc/rfc7662) introspection and maps the
+answer onto an identity slot with the same claim mapper `identity/jwt` uses.
+The same plugin can also be the route's [revocation checker](#revocation).
+
+```yaml
+plugins:
+  - name: kc-introspect
+    kind: oauth/introspection
+    hooks: [identity.resolve, revocation.check]
+    capabilities: [perform_http, read_inbound_credentials]
+    config:
+      issuer: https://keycloak.example/realms/demo
+      introspection_endpoint: https://keycloak.example/realms/demo/protocol/openid-connect/token/introspect
+      client_id: ppe-introspect
+      client_secret_source: { kind: env_var, name: PPE_INTROSPECT_SECRET }
+      cache_ttl_seconds: 10
+      identity:
+        role: user
+        audiences: [mcp-gateway]
+
+global:
+  authentication: [kc-introspect]
+  revocation: [kc-introspect]
+```
+
+The `identity:` block is what makes the plugin a resolver. The load fails if
+the plugin declares `identity.resolve` without the block, or has the block
+without declaring the hook. As a resolver, the plugin has to run with
+`mode: sequential` and `on_error: fail`. The connection settings are the
+checker's; see [The introspection checker](#the-introspection-checker).
+
+| Key under `identity:` | Default | Meaning |
+|---|---|---|
+| `role` | `user` | the slot the token fills: `user`, `client` or `workload` |
+| `credential` | `{ kind: header, name: authorization }` | where the token sits; a `query_param` location needs the `read_query` capability |
+| `prefix` | `"Bearer "` | what the value must start with; the auth scheme is removed before the token is sent. `null` accepts any value |
+| `record_map` | `identity/jwt`'s `standard` map | response fields onto the slot, as in [Reading claims](#reading-claims-the-way-your-idp-writes-them) |
+| `claims` | keep all | which response fields the identity's claims bag keeps |
+| `audiences` | none | when set, the response's `aud` must name one of them |
+| `leeway_seconds` | `0` | clock-skew tolerance for `exp` and `nbf` |
+
+The resolver accepts the token only if the issuer answers `active: true`,
+`exp` has not passed, and `nbf` has been reached. An `iss` in the answer must
+match `issuer`, and an `aud` must name one of `audiences` when they are set.
+The standard map reads `sub` into `subject.id` and `scope` into
+`subject.permissions`, and `client_id` into `client.client_id` for
+`role: client`.
+
+The resolver declines a value without the configured prefix, and a JWT whose
+`iss` names a different issuer, so another resolver can take it. Neither is
+sent to the endpoint. Every other value at the location is sent, opaque or
+not. If two IdPs issue opaque tokens to the same header, each one's tokens
+reach the other's endpoint, so give each its own route or credential
+location.
+
+The token is kept for later plugins under its role, with `issuer` recorded
+as the issuer that vouched for it. A delegator can exchange it, and the
+checker can cover it even though an opaque token carries no `iss`. Listing
+the plugin under both `authentication:` and `revocation:` with a cache
+means the check right after authentication reuses the same answer. The
+checks before dispatch and before release ask again once that answer
+expires.
+
+`cache_ttl_seconds` is the window for both uses. A token revoked at the
+issuer keeps authenticating until its cached answer expires, and never past
+the answer's `exp`. The default, `0`, asks the issuer on every request.
+
+A route's `authentication:` list runs every resolver in order, and
+`identity/jwt` denies a token that is not a JWT. So this resolver and
+`identity/jwt` cannot read the same header on one route yet: whichever runs
+second sees the other's tokens. Put them on separate routes or credential
+locations until [#379](https://github.com/praxis-proxy/policy/issues/379)
+adds a way to pick one method per request.
+
+#### Introspection denial codes
+
+| Code | Means |
+|---|---|
+| `auth.missing_credential` | nothing at the configured location |
+| `auth.empty_credential` | the location held an empty value |
+| `auth.malformed_credential` | the location held a value that could not be read |
+| `auth.token_inactive` | the issuer says the token is not active: unknown, expired or revoked, which RFC 7662 does not distinguish |
+| `auth.token_expired` | the answer's `exp` has passed |
+| `auth.token_not_yet_valid` | the answer's `nbf` has not been reached |
+| `auth.untrusted_issuer` | the answer names another issuer |
+| `auth.audience_mismatch` | the answer's `aud` names none of `audiences` |
+| `auth.introspection_unavailable` | the endpoint timed out, failed, answered other than 200, or sent a body that is not an RFC 7662 answer |
+| `auth.mapping_failed` | the map produced no identity from the answer |
+
+Tested: unit tests against a fake transport only. The recipe has not been run
+against a live IdP.
+
 ## Reading claims the way your IdP writes them
 
 The JWT identity plugin infers a subject from a token's claims. Which
@@ -1496,6 +1594,7 @@ any status other than 200, or a response body it cannot parse denies with
 | `cache_ttl_seconds` | `0` | how long an active or inactive answer is reused |
 | `cache_max_entries` | `10000` | cache size; must be nonzero when caching |
 | `insecure_http` | `false` | allow `http://`, for a local or demo issuer only |
+| `identity` | none | makes the plugin an identity resolver too; see [Recipe 12](#recipe-12-an-opaque-oauth-token-authenticated-by-introspection) |
 
 The plugin needs two capabilities: `perform_http` to reach the endpoint
 through the host's HTTP transport, and `read_inbound_credentials` to read
@@ -1516,9 +1615,10 @@ of `0`, each check makes its own call. A failed lookup is never cached. A
 route that overrides the plugin's `config:` gets its own instance, with its
 own cache.
 
-The IdP has to issue JWT access tokens, since the checker leaves opaque
-tokens alone, and has to offer RFC 7662 introspection to a confidential
-client. Keycloak, Okta, Ping and ForgeRock, Curity, WSO2, Gluu, Ory Hydra, Zitadel,
+The IdP has to offer RFC 7662 introspection to a confidential client. For
+tokens another resolver authenticated, such as `identity/jwt`, it also has to
+issue JWT access tokens, since the checker leaves an opaque token alone
+unless this plugin authenticated it. Keycloak, Okta, Ping and ForgeRock, Curity, WSO2, Gluu, Ory Hydra, Zitadel,
 Authentik, Duende IdentityServer and Spring Authorization Server all do.
 Microsoft Entra ID, Auth0, Amazon Cognito and Google do not offer it for
 access tokens, and OpenShift and Kubernetes use TokenReview instead. Those
@@ -1551,7 +1651,8 @@ standards, not any one vendor. Per layer:
 | Service token (`client_credentials`) | RFC 6749 §4.4 | Keycloak | broadly supported |
 | On-behalf-of exchange | RFC 8693 | Keycloak (STE v2) | IdPs vary in RFC 8693 support; verify per target |
 | SVID as client credential | RFC 7523 + `draft-ietf-oauth-spiffe-client-auth` | Keycloak 26.6 (`spiffe:v1`) | emerging; an IETF OAuth WG draft, other IdPs not yet confirmed |
-| Revocation check | RFC 7662 | not yet; only unit-tested against a fake transport | Keycloak, Okta, Ping, Curity, or any IdP that issues JWT access tokens and has an introspection endpoint; see [Revocation](#revocation) |
+| Revocation check | RFC 7662 | not yet; only unit-tested against a fake transport | Keycloak, Okta, Ping, Curity, or any IdP with an introspection endpoint, for JWT access tokens or tokens the same plugin authenticated; see [Revocation](#revocation) |
+| Opaque token authentication | RFC 7662 | not yet; only unit-tested against a fake transport | Keycloak, Okta, Ping, Curity, or any IdP with an introspection endpoint; see [Recipe 12](#recipe-12-an-opaque-oauth-token-authenticated-by-introspection) |
 
 If the IdP does not support SPIFFE, PPE can still validate
 the SVID *itself* (it already fetches SPIRE's JWKS in `identity.resolve`),

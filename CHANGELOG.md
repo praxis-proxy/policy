@@ -43,6 +43,19 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   Policy's shared hashing, so the feature works under `fips`. It
   authenticates with `client_secret_basic`, form-encoding the client ID and
   secret first as RFC 6749 section 2.3.1 requires.
+- **`oauth/introspection` identity resolver.** With an `identity:` block
+  and the `identity.resolve` hook, the same plugin authenticates a bearer
+  token, typically an opaque one, by introspecting it. An active answer is
+  checked against `exp`, `nbf`, `iss` and, when configured, `audiences`,
+  then mapped onto the slot `identity.role` names through the shared claim
+  mapper, by default with `identity/jwt`'s `standard` map. The token is kept
+  with its issuer recorded, so the same plugin under `revocation:` covers
+  it, and both hooks share one cache. A JWT naming another issuer is
+  declined without being sent. New denial codes: `auth.token_inactive` and
+  `auth.introspection_unavailable`. A route cannot yet combine it with
+  `identity/jwt` on one header; see
+  [#379](https://github.com/praxis-proxy/policy/issues/379).
+  ([#378](https://github.com/praxis-proxy/policy/issues/378))
 - **`form_urlencode_component`.** `praxis_policy_core::http` exposes the
   per-value encoder `form_urlencode` already used, for callers building an
   RFC 6749 Basic credential.

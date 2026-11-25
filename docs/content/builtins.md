@@ -14,7 +14,7 @@ name it by `kind`.
 | `delegator/oauth` | delegator | `oauth` | RFC 8693 token exchange, with optional caching. See [Delegation](apl/delegation.md). |
 | `delegator/vault` | delegator | `delegator-vault` | Resolve caller-scoped or workload-owned downstream credentials from Vault KV v2. See [Vault delegation recipes](identity-delegation.md#recipe-8-a-users-vault-stored-credential). |
 | `elicitation/ciba` | elicitation | `elicitation-ciba` | OIDC CIBA human approval. See [Elicitation](apl/elicitation.md). |
-| `oauth/introspection` | revocation checker | `oauth-introspection` | Ask the issuer through RFC 7662 introspection whether each resolved identity's token is still active. Listed under `revocation:`. |
+| `oauth/introspection` | identity resolver, revocation checker | `oauth-introspection` | Ask the issuer through RFC 7662 introspection about a token: authenticate it, typically an opaque one, under `authentication:`, or check each resolved identity's token is still active under `revocation:`. See [Recipe 12](identity-delegation.md#recipe-12-an-opaque-oauth-token-authenticated-by-introspection). |
 | `cedar-direct` | decision point | `cedar` | Evaluate Cedar policy (dialect `cedar`). |
 | `cel` | decision point | `cel` | Evaluate CEL expressions (dialect `cel`). |
 | `opa` | decision point | `opa` | Evaluate Rego, embedded (dialect `opa`). |
