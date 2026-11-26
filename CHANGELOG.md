@@ -19,6 +19,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Kubernetes SubjectAccessReview decision point.** The `kubernetes-sar`
+  feature adds a `kind: kubernetes-sar` PDP. A `pdp(kubernetes-sar):` step
+  sends a SubjectAccessReview to the API server and allows only when the
+  cluster's authorizer chain allows. Both resource and non-resource reviews
+  are supported, and every field, including the subject, is a CEL expression
+  over the attribute bag. A failed expression always denies; `on_error`
+  governs only an API server that gives no answer. It shares the API server
+  and reviewer token configuration with `identity/kubernetes-token-review`,
+  and needs the host HTTP transport.
+  ([#214](https://github.com/praxis-proxy/policy/issues/214))
+
 - **Bounded metadata callout contracts.** `HostServices::remaining_invocation_time`
   and `Extensions::with_invocation_deadline` let the embedding propagate the
   gateway invocation budget through nested metadata dispatch. Stable metadata

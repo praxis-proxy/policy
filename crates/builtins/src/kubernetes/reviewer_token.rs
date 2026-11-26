@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
-use crate::plugins::identity_kubernetes::config::ReviewerTokenSource;
+use crate::kubernetes::ReviewerTokenSource;
 
 /// Reads a token from its source.
 type Reader = Arc<dyn Fn(&ReviewerTokenSource) -> Result<Zeroizing<String>, String> + Send + Sync>;

@@ -31,6 +31,7 @@ features = [
   "experimental-ratelimit",
   "cedar",
   "cel",
+  "kubernetes-sar",
   "opa",
   "valkey",
   "secrets-vault",
@@ -63,9 +64,9 @@ jwt-openssl-fips = ["_jwt", "dep:openssl"]
 api-key = ["_engine-core", "_plugins", "_token_lookup"]
 kubernetes-token-review = [
   "_engine-core",
+  "_kubernetes",
   "_plugins",
   "_token_lookup",
-  "_validation",
   "dep:base64",
 ]
 # RFC 7617 Basic authentication. `base64` decodes the credential and
@@ -122,6 +123,9 @@ cedar = [
 # the feature would shadow the implicit optional-dependency feature instead of
 # enabling the crate.
 cel = ["_engine-apl-core", "_engine-apl-runtime", "_pdps", "dep:cel"]
+# Builds its review from CEL expressions over the bag, through the `cel`
+# module's activation, so it implies `cel`.
+kubernetes-sar = ["_engine-core", "_kubernetes", "cel"]
 opa = ["_engine-apl-core", "_engine-apl-runtime", "_pdps", "dep:regorus"]
 valkey = [
   "_engine-apl-runtime",
@@ -154,6 +158,9 @@ _jwt = ["_engine-core", "_plugins", "dep:jsonwebtoken", "dep:base64"]
 _token_lookup = ["_engine-core"]
 # Config checks more than one builtin needs. Crate-private.
 _validation = ["dep:url"]
+# The API server connection and reviewer token shared by the builtins that call
+# Kubernetes. Crate-private: each builtin re-exports what it makes public.
+_kubernetes = ["_validation"]
 
 [dependencies]
 # Engine crates, optional so a consumer resolves only the layer it asked for.
@@ -492,6 +499,11 @@ required-features = ["cedar"]
 name = "cel"
 path = "tests/cel/main.rs"
 required-features = ["cel"]
+
+[[test]]
+name = "kubernetes_sar"
+path = "tests/kubernetes_sar/main.rs"
+required-features = ["kubernetes-sar"]
 
 [[test]]
 name = "opa"

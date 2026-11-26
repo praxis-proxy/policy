@@ -64,7 +64,7 @@ External PDP policy can still go stale until the TTL expires. See
 
 ## Supported dialects
 
-APL recognizes a fixed set of PDP dialects. Three ship as builtin resolvers; the
+APL recognizes a fixed set of PDP dialects. Four ship as builtin resolvers; the
 rest are recognized by APL and dispatched to a resolver you provide on the host.
 
 | Dialect | Status |
@@ -72,6 +72,7 @@ rest are recognized by APL and dispatched to a resolver you provide on the host.
 | `cedar` | Ships as the `cedar-direct` builtin resolver. |
 | `cel` | Ships as the `cel` builtin resolver (safe, bounded expressions). |
 | `opa` | Ships as the `opa` builtin resolver (embedded Rego via regorus, no sidecar). |
+| `pdp(kubernetes-sar)` | Ships as the `kubernetes-sar` builtin resolver; asks the Kubernetes API server. See [Kubernetes authorization](#kubernetes-authorization). |
 | `authzen` | Recognized dialect; wire a host resolver (AuthZEN protocol). |
 | `nemo` | Recognized dialect; wire a host resolver (NeMo Guardrails). |
 
@@ -442,6 +443,113 @@ passing the attribute bag, the structured input, and the call's arguments, and
 routes the `Allow` / `Deny` decision through `on_allow` / `on_deny`. The
 decision and its diagnostics are recorded in the audit log. See
 [Effects](effects.md) for how PDP reactions sequence with the rest of a policy.
+
+## Kubernetes authorization
+
+The `kubernetes-sar` decision point defers to the cluster. It sends a
+[SubjectAccessReview] to the API server and allows only when an authorizer
+in the cluster's chain (RBAC, Node, or a webhook) allows. Pair it with
+`identity/kubernetes-token-review`, so the subject it asks about is the
+`ServiceAccount` the cluster already knows.
+
+```yaml
+global:
+  pdp:
+    - kind: kubernetes-sar
+      api_server:
+        url: https://kubernetes.default.svc
+        reviewer_token:
+          kind: file
+          path: /var/run/secrets/kubernetes.io/serviceaccount/token
+      on_error: deny
+routes:
+  - tool: search_issues
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+        - pdp(kubernetes-sar):
+            non_resource_attributes:
+              path: "'/tools/' + meta.entity_name"
+              verb: "'post'"
+  - tool: deploy_service
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+        - pdp(kubernetes-sar):
+            resource_attributes:
+              group: "'mcp.example.com'"
+              resource: "'tools'"
+              name: meta.entity_name
+              namespace: args.environment
+              verb: "args.dry_run == true ? 'get' : 'invoke'"
+```
+
+RBAC then decides which caller may use which tool. The resource and group
+names are matched as strings, so `mcp.example.com/tools` does not have to
+exist as an API resource:
+
+<!-- validate: fragment -->
+```yaml
+kind: ClusterRole
+rules:
+  - nonResourceURLs: ["/tools/search_issues"]
+    verbs: ["post"]
+---
+kind: Role                # in namespace "staging"
+rules:
+  - apiGroups: ["mcp.example.com"]
+    resources: ["tools"]
+    resourceNames: ["deploy_service"]
+    verbs: ["get", "invoke"]
+```
+
+How a step is built and decided:
+
+- Every attribute is a CEL expression over the attribute bag, as in a
+  `cel:` step, so a literal needs inner quotes (`"'post'"`). Only the values
+  the expressions produce are sent; tool arguments stay in PPE unless an
+  expression names one.
+- A step sets exactly one of `resource_attributes` (`group`, `version`,
+  `resource`, `subresource`, `name`, `namespace`, `verb`) and
+  `non_resource_attributes` (`path`, `verb`). An unset resource field is
+  omitted, which Kubernetes reads as "any".
+- `subject` names who is reviewed: `user` defaults to `subject.id` and
+  `groups` to `subject.roles`; `uid` and `extra` are sent only when set. Set
+  any of them on the `global.pdp` block, or on one step to review a
+  different subject.
+- The API server takes the subject on PPE's word: it answers as if the
+  user were in the groups sent, without checking. The default suits
+  `identity/kubernetes-token-review`, whose groups are the cluster's own
+  answer. For any other identity, such as a JWT's roles, set `groups`
+  explicitly, to `"[]"` or with a prefix the way the API server's
+  `--oidc-groups-prefix` does (`"subject.roles.map(r, 'oidc:' + r)"`), so
+  an identity provider's role name can never match a cluster binding by
+  accident.
+- A review naming the `system:masters` group is never sent and the step
+  denies. That group skips authorization entirely, and no
+  `ServiceAccount` token carries it.
+- An expression that fails, yields the wrong type, or leaves `user` empty
+  denies without asking the API server, whatever `on_error` says.
+  `on_error` (`deny` by default) decides only when the API server gives no
+  answer: unreachable, refusing PPE's credential, or answering with
+  something that is not a review.
+- An answer where no authorizer had an opinion denies, as it does in the
+  API server itself.
+- A value taken from the request, such as `namespace: args.environment`
+  above, lets the caller choose whose RBAC is consulted. That is right when
+  the value is what is being protected; take it from identity or a literal
+  when it is meant to be a fixed tenant.
+
+The host must call `set_http_transport` before `load_config_yaml`; a policy
+declaring `kind: kubernetes-sar` without one fails to load. TLS trust for
+the API server belongs to that transport. The reviewer token's identity
+needs `create` on `subjectaccessreviews`, which the `system:auth-delegator`
+ClusterRole grants together with `tokenreviews`.
+
+The `cache:` option above applies, and it keys on the whole bag. While an
+answer is cached, an RBAC change waits out its `ttl_seconds`.
+
+[SubjectAccessReview]: https://kubernetes.io/docs/reference/kubernetes-api/authorization-resources/subject-access-review-v1/
 
 ## Next
 

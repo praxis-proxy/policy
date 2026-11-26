@@ -15,8 +15,8 @@ use praxis_policy_core::http_retry::RetryPolicy;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::plugins::identity_kubernetes::config::ApiServerConfig;
-use crate::plugins::identity_kubernetes::reviewer_token::ReviewerToken;
+use crate::kubernetes::ApiServerConfig;
+use crate::kubernetes::reviewer_token::ReviewerToken;
 use crate::token_lookup::directory::{DirectoryError, KeyDirectory, KeyRecord, PresentedKey};
 
 /// The backend's name, for diagnostics.
@@ -68,7 +68,7 @@ impl TokenReviewDirectory {
         Ok(Self {
             audiences,
             connect_timeout: api_server.connect_timeout_secs.map(Duration::from_secs),
-            endpoint: format!("{}{REVIEW_PATH}", api_server.url.trim_end_matches('/')),
+            endpoint: api_server.endpoint(REVIEW_PATH),
             reviewer,
             timeout: Duration::from_secs(api_server.timeout_secs),
         })
