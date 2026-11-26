@@ -18,10 +18,11 @@ use praxis_policy_core::extensions::raw_credentials::{Credential, TokenRole};
 use serde::{Deserialize, Serialize};
 
 use praxis_policy_core::host::{HostServices, HttpRequestError};
-use praxis_policy_core::http::HttpRequest;
+use praxis_policy_core::http::{HttpRequest, HttpResponse};
 use praxis_policy_core::http_retry::RetryPolicy;
 
-use crate::plugins::identity_jwt::trusted_issuer::{KeyStore, TrustedIssuer};
+use crate::plugins::identity_jwt::discovery::OidcDiscoveryConfig;
+use crate::plugins::identity_jwt::trusted_issuer::{KeyStore, RefreshGate, TrustedIssuer};
 use praxis_policy_core::identity::mapping::ClaimMapConfig;
 
 /// Top-level plugin config — what operators write under
@@ -134,11 +135,11 @@ fn default_role() -> TokenRole {
 /// Thirty seconds bounds two things at once: how much load invented
 /// `kid`s can drive at an `IdP`, and how long a transient boot failure
 /// denies an issuer before the next verify retries.
-const fn default_min_refresh_interval_secs() -> u64 {
+pub(super) const fn default_min_refresh_interval_secs() -> u64 {
     30
 }
 
-fn default_refresh_secs() -> u64 {
+pub(super) const fn default_refresh_secs() -> u64 {
     600
 }
 
@@ -165,7 +166,12 @@ pub struct TrustedIssuerConfig {
     pub skip_audience_validation: bool,
 
     /// Algorithms accepted for signature verification (e.g.,
-    /// `RS256`, `ES256`). At least one required.
+    /// `RS256`, `ES256`). At least one required, except for an
+    /// [`OidcDiscovery`] source, where the provider's advertised algorithms
+    /// apply and a non-empty list narrows them.
+    ///
+    /// [`OidcDiscovery`]: DecodingKeySource::OidcDiscovery
+    #[serde(default)]
     pub algorithms: Vec<Algorithm>,
 
     /// Source of the decoding key. See [`DecodingKeySource`].
@@ -384,6 +390,17 @@ pub enum DecodingKeySource {
         min_refresh_interval_secs: u64,
     },
 
+    /// [OpenID Connect Discovery 1.0]: the issuer's provider configuration
+    /// document names its JWKS and the algorithms it signs with, so only the
+    /// issuer URL needs configuring. See [`OidcDiscoveryConfig`].
+    ///
+    /// Refreshes on the verify path like `jwks_url`, re-reading the document
+    /// once it is `refresh_secs` old, so a moved JWKS or a changed algorithm
+    /// set is picked up without a restart.
+    ///
+    /// [OpenID Connect Discovery 1.0]: https://openid.net/specs/openid-connect-discovery-1_0.html
+    OidcDiscovery(OidcDiscoveryConfig),
+
     /// Symmetric HMAC secret (HS256 / HS384 / HS512 only). Not
     /// recommended for production; signature verifiers need the
     /// same secret, which makes key distribution painful.
@@ -416,6 +433,9 @@ impl std::fmt::Debug for DecodingKeySource {
                 .field("refresh_secs", refresh_secs)
                 .field("min_refresh_interval_secs", min_refresh_interval_secs)
                 .finish(),
+            Self::OidcDiscovery(discovery) => {
+                f.debug_tuple("OidcDiscovery").field(discovery).finish()
+            },
             Self::Secret { .. } => f
                 .debug_struct("Secret")
                 .field("secret", &"<redacted>")
@@ -429,17 +449,18 @@ impl DecodingKeySource {
     /// `JwtIdentityResolver` to decide between eager (sync) build at
     /// `new()` and deferred (async) build at `Plugin::initialize()`.
     pub fn needs_async(&self) -> bool {
-        matches!(self, Self::JwksUrl { .. })
+        matches!(self, Self::JwksUrl { .. } | Self::OidcDiscovery(_))
     }
 
     /// How long this source's keys stay fresh before a verify should
-    /// re-fetch them. `Some(_)` for `JwksUrl` (the only refreshable
-    /// variant), `None` for inline sources whose key material is
+    /// re-fetch them. `Some(_)` for `JwksUrl` and `OidcDiscovery` (the
+    /// refreshable variants), `None` for inline sources whose key material is
     /// static for the resolver's lifetime — and `None` is also what
     /// tells the verify path not to attempt a refresh at all.
     pub fn refresh_interval(&self) -> Option<std::time::Duration> {
         match self {
-            Self::JwksUrl { refresh_secs, .. } => {
+            Self::JwksUrl { refresh_secs, .. }
+            | Self::OidcDiscovery(OidcDiscoveryConfig { refresh_secs, .. }) => {
                 Some(std::time::Duration::from_secs(*refresh_secs))
             },
             _ => None,
@@ -452,7 +473,11 @@ impl DecodingKeySource {
             Self::JwksUrl {
                 min_refresh_interval_secs,
                 ..
-            } => std::time::Duration::from_secs(*min_refresh_interval_secs),
+            }
+            | Self::OidcDiscovery(OidcDiscoveryConfig {
+                min_refresh_interval_secs,
+                ..
+            }) => std::time::Duration::from_secs(*min_refresh_interval_secs),
             _ => std::time::Duration::MAX,
         }
     }
@@ -472,8 +497,9 @@ impl DecodingKeySource {
     /// # Errors
     ///
     /// Returns a message when the key material does not parse, when a PEM file
-    /// cannot be read, or when the source is `jwks_url`, which needs
-    /// [`build_async`].
+    /// cannot be read, when the source is `jwks_url`, which needs
+    /// [`build_async`], or when it is `oidc_discovery`, which the resolver
+    /// resolves.
     ///
     /// [`build_async`]: Self::build_async
     pub fn build(&self) -> Result<KeyStore, String> {
@@ -491,6 +517,7 @@ impl DecodingKeySource {
                     "JwksUrl source '{url}' requires async resolution — call build_async()"
                 ));
             },
+            Self::OidcDiscovery(_) => return Err(OIDC_DISCOVERY_NEEDS_ISSUER.to_owned()),
             Self::Secret { secret } => DecodingKey::from_secret(secret.as_bytes()),
         };
         check_key(&key)?;
@@ -558,8 +585,9 @@ impl DecodingKeySource {
     /// # Errors
     ///
     /// [`Fatal`] when the URL is one the config forbids, when no transport
-    /// is installed, or when the plugin lacks `perform_http` — none of which
-    /// a later attempt resolves. [`Recoverable`] when the endpoint is
+    /// is installed, when the plugin lacks `perform_http`, or when the source
+    /// is `oidc_discovery`, which needs the issuer it belongs to — none of
+    /// which a later attempt resolves. [`Recoverable`] when the endpoint is
     /// unreachable, answers with an unusable status, or returns a document
     /// with no usable signature key.
     ///
@@ -575,145 +603,21 @@ impl DecodingKeySource {
             Self::JwksUrl {
                 url, insecure_http, ..
             } => {
-                // Reject http:// by default. Fetching JWKS over
-                // plaintext lets anyone on the network path swap the
-                // signing keys and forge JWTs the gateway accepts.
-                //
-                // Fatal, and decided without touching the network: the
-                // URL either satisfies the config or it does not, and an
-                // `IdP` that genuinely serves plaintext is reached by
-                // setting `insecure_http`, not by retrying.
-                require_https(url, *insecure_http).map_err(KeySourceError::Fatal)?;
-
-                // Bounds travel on the request rather than on a
-                // client we own: PPE performs no HTTP itself, so the
-                // host's transport does the work and only the caller
-                // knows what this particular call can afford. Without
-                // both bounds a slow or half-open JWKS endpoint hangs
-                // `initialize()` indefinitely.
-                let req = HttpRequest::get(url)
-                    .timeout(budget.timeout())
-                    .connect_timeout(JWKS_CONNECT_TIMEOUT)
-                    // A ceiling reqwest never gave us. The document is
-                    // a few kilobytes; anything approaching this is a
-                    // hostile or broken endpoint, and buffering it
-                    // would be the whole point of the limit.
-                    .max_response_bytes(JWKS_MAX_BYTES);
-
-                // An unusable validator is dropped rather than failing the
-                // fetch. The worst that costs is a full document, whereas
-                // refusing to refresh over a header the peer itself gave
-                // us would be the more expensive mistake.
-                let req = match if_none_match {
-                    None => req,
-                    Some(validator) => match req.clone().header("if-none-match", validator) {
-                        Ok(conditional) => conditional,
-                        Err(e) => {
-                            tracing::debug!(
-                                url = %url,
-                                error = %e,
-                                "dropping an unusable ETag; refetching in full"
-                            );
-                            req
-                        },
-                    },
-                };
-
-                let resp = svc.http_request(req, budget.retry()).await.map_err(|e| {
-                    let msg = format!("JWKS GET {url} failed: {e}");
-                    match e {
-                        // No transport wired, or `perform_http` not
-                        // granted. The call never left the process and
-                        // never will until someone changes config or
-                        // host wiring, so this must not look like an
-                        // `IdP` that might come back.
-                        HttpRequestError::Unavailable(_) => KeySourceError::Fatal(msg),
-                        // The transport ran and the call failed.
-                        HttpRequestError::Transport(_) => KeySourceError::Recoverable(msg),
-                    }
-                })?;
-
-                // Before the 2xx check, not after: `304` sits outside the
-                // 2xx range, so the reflexive `!is_success()` below would
-                // turn every successful revalidation into a fetch failure
-                // — and for this plugin that failure is fail-closed.
-                if resp.is_not_modified() {
-                    return Ok(JwksFetch::NotModified);
-                }
-
-                if !resp.is_success() {
-                    return Err(KeySourceError::Recoverable(format!(
-                        "JWKS GET {url} returned non-2xx: {}",
-                        resp.status
-                    )));
-                }
-
-                // Read before the body is consumed below.
-                let etag = resp.etag().map(ToOwned::to_owned);
-
-                // An `IdP` mid-rotation can transiently serve a document
-                // we cannot read, so a body we cannot parse is the `IdP`
-                // being unhelpful now rather than a settled fault.
-                let body = std::str::from_utf8(&resp.body).map_err(|e| {
-                    KeySourceError::Recoverable(format!("JWKS GET {url} body is not UTF-8: {e}"))
-                })?;
-
-                let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_str(body).map_err(|e| {
-                    KeySourceError::Recoverable(format!("JWKS {url} body is not a JWKSet: {e}"))
-                })?;
-
-                // Iterate every signature-use key (or every key, if
-                // none declared `use: sig`) and index by `kid`.
-                // OIDC spec requires JWKS entries to carry a `kid`;
-                // any entry missing one is dropped with a clear
-                // diagnostic appended to the error string. If NO
-                // usable keys remain, treat that as a config error.
-                let mut entries: Vec<(String, DecodingKey)> = Vec::new();
-                let mut skipped_no_kid: usize = 0;
-                let mut skipped_unusable: Vec<String> = Vec::new();
-                for k in &jwks.keys {
-                    // Filter to sig-use when the IdP labels it; if no
-                    // key declares `use`, accept everything (some
-                    // older IdPs publish JWKS without the field).
-                    let use_field = k.common.public_key_use.as_ref();
-                    if use_field
-                        .map(|u| *u != jsonwebtoken::jwk::PublicKeyUse::Signature)
-                        .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    let kid = match k.common.key_id.as_deref() {
-                        Some(kid) if !kid.is_empty() => kid.to_owned(),
-                        _ => {
-                            skipped_no_kid += 1;
-                            continue;
-                        },
-                    };
-                    match DecodingKey::from_jwk(k)
-                        .map_err(|e| e.to_string())
-                        .and_then(|key| check_key(&key).map(|()| key))
-                    {
-                        Ok(key) => entries.push((kid, key)),
-                        Err(e) => skipped_unusable.push(format!("{kid}: {e}")),
-                    }
-                }
-                if entries.is_empty() {
-                    // Recoverable, though it reads like a config fault: an
-                    // `IdP` mid-rotation can briefly publish a document we
-                    // cannot index, and that fixes itself.
-                    return Err(KeySourceError::Recoverable(format!(
-                        "JWKS at {url} contained no usable signature keys \
-                         (skipped {skipped_no_kid} entries with no kid; \
-                         {} entries failed to parse: [{}])",
-                        skipped_unusable.len(),
-                        skipped_unusable.join(", "),
-                    )));
-                }
-                Ok(JwksFetch::Fetched {
-                    keys: KeyStore::from_jwks_entries(entries),
-                    etag,
-                })
+                fetch_jwks(
+                    url,
+                    *insecure_http,
+                    false,
+                    svc,
+                    budget.bounds(),
+                    if_none_match,
+                )
+                .await
             },
+            // The document's `issuer` is checked against the trusted issuer's,
+            // which this enum does not know; the resolver drives this source.
+            Self::OidcDiscovery(_) => Err(KeySourceError::Fatal(
+                OIDC_DISCOVERY_NEEDS_ISSUER.to_owned(),
+            )),
             // Non-network variants delegate to the sync path; they
             // don't await anything, so the cost is zero vs. a direct
             // sync call. Every way they fail is a key that does not
@@ -726,6 +630,194 @@ impl DecodingKeySource {
                 .map_err(KeySourceError::Fatal),
         }
     }
+}
+
+/// Why an `oidc_discovery` source cannot be resolved on its own.
+const OIDC_DISCOVERY_NEEDS_ISSUER: &str = "an oidc_discovery source is resolved by the JWT \
+                                           identity resolver, which checks the discovery \
+                                           document against the trusted issuer";
+
+/// Fetch a JWKS document and index its signature keys by `kid`.
+///
+/// Shared by `jwks_url` and by the JWKS hop of `oidc_discovery`.
+/// `drop_symmetric` skips `oct` keys, for a discovered issuer whose keys must
+/// come from a public key set: a shared secret published there would let
+/// anyone who read it mint tokens.
+pub(super) async fn fetch_jwks(
+    url: &str,
+    insecure_http: bool,
+    drop_symmetric: bool,
+    svc: &dyn HostServices,
+    bounds: FetchBounds,
+    if_none_match: Option<&str>,
+) -> Result<JwksFetch, KeySourceError> {
+    // Reject http:// by default. Fetching JWKS over plaintext lets anyone on
+    // the network path swap the signing keys and forge JWTs the gateway
+    // accepts.
+    //
+    // Fatal, and decided without touching the network: the URL either
+    // satisfies the config or it does not, and an `IdP` that genuinely serves
+    // plaintext is reached by setting `insecure_http`, not by retrying.
+    require_https("JWKS URL", url, insecure_http).map_err(KeySourceError::Fatal)?;
+
+    // A ceiling reqwest never gave us. The document is a few kilobytes;
+    // anything approaching this is a hostile or broken endpoint, and
+    // buffering it would be the whole point of the limit.
+    let resp = conditional_get("JWKS", url, svc, bounds, JWKS_MAX_BYTES, if_none_match).await?;
+
+    // Before the 2xx check, not after: `304` sits outside the 2xx range, so
+    // the reflexive `!is_success()` below would turn every successful
+    // revalidation into a fetch failure — and for this plugin that failure
+    // is fail-closed.
+    if resp.is_not_modified() {
+        return Ok(JwksFetch::NotModified);
+    }
+
+    if !resp.is_success() {
+        return Err(KeySourceError::Recoverable(format!(
+            "JWKS GET {url} returned non-2xx: {}",
+            resp.status
+        )));
+    }
+
+    // Read before the body is consumed below.
+    let etag = resp.etag().map(ToOwned::to_owned);
+
+    // An `IdP` mid-rotation can transiently serve a document we cannot read,
+    // so a body we cannot parse is the `IdP` being unhelpful now rather than
+    // a settled fault.
+    let body = std::str::from_utf8(&resp.body).map_err(|e| {
+        KeySourceError::Recoverable(format!("JWKS GET {url} body is not UTF-8: {e}"))
+    })?;
+
+    let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_str(body).map_err(|e| {
+        KeySourceError::Recoverable(format!("JWKS {url} body is not a JWKSet: {e}"))
+    })?;
+
+    // Iterate every signature-use key (or every key, if none declared
+    // `use: sig`) and index by `kid`. OIDC spec requires JWKS entries to
+    // carry a `kid`; any entry missing one is dropped with a clear diagnostic
+    // appended to the error string. If NO usable keys remain, treat that as a
+    // config error.
+    let mut entries: Vec<(String, DecodingKey)> = Vec::new();
+    let mut skipped_no_kid: usize = 0;
+    let mut skipped_symmetric: usize = 0;
+    let mut skipped_unusable: Vec<String> = Vec::new();
+    for k in &jwks.keys {
+        // Filter to sig-use when the IdP labels it; if no key declares
+        // `use`, accept everything (some older IdPs publish JWKS without the
+        // field).
+        let use_field = k.common.public_key_use.as_ref();
+        if use_field
+            .map(|u| *u != jsonwebtoken::jwk::PublicKeyUse::Signature)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if drop_symmetric
+            && matches!(
+                k.algorithm,
+                jsonwebtoken::jwk::AlgorithmParameters::OctetKey(_)
+            )
+        {
+            skipped_symmetric += 1;
+            continue;
+        }
+        let kid = match k.common.key_id.as_deref() {
+            Some(kid) if !kid.is_empty() => kid.to_owned(),
+            _ => {
+                skipped_no_kid += 1;
+                continue;
+            },
+        };
+        match DecodingKey::from_jwk(k)
+            .map_err(|e| e.to_string())
+            .and_then(|key| check_key(&key).map(|()| key))
+        {
+            Ok(key) => entries.push((kid, key)),
+            Err(e) => skipped_unusable.push(format!("{kid}: {e}")),
+        }
+    }
+    if entries.is_empty() {
+        // Recoverable, though it reads like a config fault: an `IdP`
+        // mid-rotation can briefly publish a document we cannot index, and
+        // that fixes itself.
+        return Err(KeySourceError::Recoverable(format!(
+            "JWKS at {url} contained no usable signature keys \
+             (skipped {skipped_no_kid} entries with no kid and \
+             {skipped_symmetric} symmetric entries; \
+             {} entries failed to parse: [{}])",
+            skipped_unusable.len(),
+            skipped_unusable.join(", "),
+        )));
+    }
+    Ok(JwksFetch::Fetched {
+        keys: KeyStore::from_jwks_entries(entries),
+        etag,
+    })
+}
+
+/// `GET` a trust document, conditional on `if_none_match` when given.
+///
+/// `what` names the document in error messages. The status is the caller's
+/// to interpret.
+///
+/// Bounds travel on the request rather than on a client we own: PPE performs
+/// no HTTP itself, so the host's transport does the work and only the caller
+/// knows what this particular call can afford. Without them a slow or
+/// half-open endpoint hangs `initialize()` indefinitely.
+///
+/// # Errors
+///
+/// [`Fatal`] when no transport is installed or the plugin lacks
+/// `perform_http`. [`Recoverable`] when the transport ran and the call
+/// failed, including a body over `max_response_bytes`.
+///
+/// [`Fatal`]: KeySourceError::Fatal
+/// [`Recoverable`]: KeySourceError::Recoverable
+pub(super) async fn conditional_get(
+    what: &str,
+    url: &str,
+    svc: &dyn HostServices,
+    bounds: FetchBounds,
+    max_response_bytes: usize,
+    if_none_match: Option<&str>,
+) -> Result<HttpResponse, KeySourceError> {
+    let req = HttpRequest::get(url)
+        .timeout(bounds.timeout)
+        .connect_timeout(JWKS_CONNECT_TIMEOUT)
+        .max_response_bytes(max_response_bytes);
+
+    // An unusable validator is dropped rather than failing the fetch. The
+    // worst that costs is a full document, whereas refusing to refresh over a
+    // header the peer itself gave us would be the more expensive mistake.
+    let req = match if_none_match {
+        None => req,
+        Some(validator) => match req.clone().header("if-none-match", validator) {
+            Ok(conditional) => conditional,
+            Err(e) => {
+                tracing::debug!(
+                    url = %url,
+                    error = %e,
+                    "dropping an unusable ETag; refetching in full"
+                );
+                req
+            },
+        },
+    };
+
+    svc.http_request(req, bounds.retry).await.map_err(|e| {
+        let msg = format!("{what} GET {url} failed: {e}");
+        match e {
+            // No transport wired, or `perform_http` not granted. The call
+            // never left the process and never will until someone changes
+            // config or host wiring, so this must not look like an `IdP`
+            // that might come back.
+            HttpRequestError::Unavailable(_) => KeySourceError::Fatal(msg),
+            // The transport ran and the call failed.
+            HttpRequestError::Transport(_) => KeySourceError::Recoverable(msg),
+        }
+    })
 }
 
 /// Ceiling on a JWKS response body.
@@ -808,6 +900,43 @@ impl JwksFetchBudget {
                 .with_total_budget(JWKS_REQUEST_FETCH_TIMEOUT),
         }
     }
+
+    /// The bounds for a `jwks_url` fetch.
+    pub(super) const fn bounds(self) -> FetchBounds {
+        FetchBounds {
+            timeout: self.timeout(),
+            retry: self.retry(),
+        }
+    }
+
+    /// The bounds for each of the two fetches an `oidc_discovery` refresh
+    /// makes, the document and then its JWKS.
+    ///
+    /// At startup the retry loop, the attempt in flight included, is capped
+    /// at [`STARTUP_HOP_BUDGET`], so both fetches together fit inside a
+    /// host's initialization deadline (Praxis allows 30 seconds by default)
+    /// even against a stalled `IdP`. On the request path one attempt each,
+    /// as for `jwks_url`.
+    pub(super) const fn hop_bounds(self) -> FetchBounds {
+        match self {
+            Self::Startup => FetchBounds {
+                timeout: JWKS_FETCH_TIMEOUT,
+                retry: RetryPolicy::idempotent().with_total_budget(STARTUP_HOP_BUDGET),
+            },
+            Self::RequestPath => self.bounds(),
+        }
+    }
+}
+
+/// How long one boot fetch of an `oidc_discovery` issuer may take, retries
+/// included, so the document plus its JWKS take at most ten seconds.
+const STARTUP_HOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The deadline and retry policy for one trust-document fetch.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FetchBounds {
+    timeout: std::time::Duration,
+    retry: RetryPolicy,
 }
 
 /// PEM helper used by both `Pem` and `PemFile`. Tries RSA, then EC, then
@@ -924,16 +1053,21 @@ impl TrustedIssuerConfig {
     /// network I/O is attempted.
     /// # Errors
     ///
-    /// Returns a message when `issuer` is empty, `algorithms` is empty, or
-    /// audience checking is neither configured nor explicitly skipped. An
-    /// issuer with no accepted algorithm can verify nothing; an issuer
-    /// with no audiences and no skip flag accepts a token minted for
-    /// any app.
+    /// Returns a message when `issuer` is empty, `algorithms` is empty for a
+    /// source other than `oidc_discovery`, audience checking is neither
+    /// configured nor explicitly skipped, or an `oidc_discovery` source fails
+    /// [`OidcDiscoveryConfig::validate`]. An issuer with no accepted
+    /// algorithm can verify nothing; an issuer with no audiences and no skip
+    /// flag accepts a token minted for any app.
     pub fn validate(&self) -> Result<(), String> {
         if self.issuer.trim().is_empty() {
             return Err("trusted_issuer.issuer must be non-empty".into());
         }
-        if self.algorithms.is_empty() {
+        let discovery = match &self.decoding_key {
+            DecodingKeySource::OidcDiscovery(discovery) => Some(discovery),
+            _ => None,
+        };
+        if self.algorithms.is_empty() && discovery.is_none() {
             return Err(format!(
                 "trusted_issuer '{}' must list at least one algorithm",
                 self.issuer
@@ -952,6 +1086,9 @@ impl TrustedIssuerConfig {
                  with audiences; pick one",
                 self.issuer
             ));
+        }
+        if let Some(discovery) = discovery {
+            discovery.validate(&self.issuer, &self.algorithms)?;
         }
         #[cfg(feature = "jwt-openssl-fips")]
         self.validate_fips()?;
@@ -996,17 +1133,7 @@ impl TrustedIssuerConfig {
                 self.issuer
             )
         })?;
-        Ok(TrustedIssuer {
-            issuer: self.issuer,
-            audiences: self.audiences,
-            skip_audience_validation: self.skip_audience_validation,
-            keys: std::sync::Arc::new(std::sync::RwLock::new(keys)),
-            algorithms: self.algorithms,
-            leeway_seconds: self.leeway_seconds,
-            dpop: self.dpop,
-            source: self.decoding_key,
-            refresh: crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default(),
-        })
+        Ok(self.into_trusted_issuer(keys))
     }
 
     /// Asynchronously build a `TrustedIssuer`, handling every
@@ -1044,9 +1171,15 @@ impl TrustedIssuerConfig {
                 )));
             },
         };
-        let refresh = crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default();
-        refresh.set_etag(etag);
-        Ok(TrustedIssuer {
+        let issuer = self.into_trusted_issuer(keys);
+        issuer.refresh.set_etag(etag);
+        Ok(issuer)
+    }
+
+    /// The runtime issuer for this config, holding `keys`, with a fresh
+    /// refresh gate. Validation is the caller's.
+    pub(super) fn into_trusted_issuer(self, keys: KeyStore) -> TrustedIssuer {
+        TrustedIssuer {
             issuer: self.issuer,
             audiences: self.audiences,
             skip_audience_validation: self.skip_audience_validation,
@@ -1055,8 +1188,8 @@ impl TrustedIssuerConfig {
             leeway_seconds: self.leeway_seconds,
             dpop: self.dpop,
             source: self.decoding_key,
-            refresh,
-        })
+            refresh: RefreshGate::default(),
+        }
     }
 }
 
@@ -1064,8 +1197,8 @@ impl TrustedIssuerConfig {
 /// material. `https://` is always allowed; `http://` is allowed only
 /// when `insecure_http` is `true`. Anything else (missing scheme,
 /// data URLs, ...) returns Ok and lets the underlying parser surface
-/// its own error.
-fn require_https(url: &str, insecure_http: bool) -> Result<(), String> {
+/// its own error. `what` names the URL in the message.
+pub(super) fn require_https(what: &str, url: &str, insecure_http: bool) -> Result<(), String> {
     let lowered = url.trim_start().to_ascii_lowercase();
     if lowered.starts_with("https://") {
         return Ok(());
@@ -1075,7 +1208,7 @@ fn require_https(url: &str, insecure_http: bool) -> Result<(), String> {
             return Ok(());
         }
         return Err(format!(
-            "JWKS URL must use https:// (got '{url}'). Set `insecure_http: true` \
+            "{what} must use https:// (got '{url}'). Set `insecure_http: true` \
              to allow plaintext for localhost/dev only — never production."
         ));
     }
@@ -1098,19 +1231,19 @@ mod tests {
 
     #[test]
     fn jwks_https_accepted() {
-        require_https("https://idp.example/realms/x/jwks", false).unwrap();
+        require_https("JWKS URL", "https://idp.example/realms/x/jwks", false).unwrap();
     }
 
     #[test]
     fn jwks_http_rejected_by_default() {
-        let err = require_https("http://localhost:8081/jwks", false).unwrap_err();
+        let err = require_https("JWKS URL", "http://localhost:8081/jwks", false).unwrap_err();
         assert!(err.contains("https"), "{}", err);
         assert!(err.contains("insecure_http"), "{}", err);
     }
 
     #[test]
     fn jwks_http_with_explicit_opt_in_allowed() {
-        require_https("http://localhost:8081/jwks", true).unwrap();
+        require_https("JWKS URL", "http://localhost:8081/jwks", true).unwrap();
     }
 
     #[tokio::test]

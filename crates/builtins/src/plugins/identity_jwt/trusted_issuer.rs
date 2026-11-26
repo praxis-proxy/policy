@@ -9,6 +9,9 @@ use std::collections::HashMap;
 
 use jsonwebtoken::{Algorithm, DecodingKey};
 
+use crate::plugins::identity_jwt::config::DecodingKeySource;
+use crate::plugins::identity_jwt::discovery_refresh::DiscoveryState;
+
 /// A bundle of decoding keys for one trust anchor, supporting
 /// `kid`-driven selection at verify time.
 ///
@@ -49,6 +52,12 @@ use jsonwebtoken::{Algorithm, DecodingKey};
 pub struct KeyStore {
     by_kid: HashMap<String, DecodingKey>,
     fallback: Option<DecodingKey>,
+    /// The algorithms these keys verify with, when they came from a source
+    /// that names them (OIDC discovery) rather than from the issuer's config.
+    ///
+    /// Carried with the keys so a refresh replaces both in one write: a
+    /// verify never sees new keys with the old algorithms, or the reverse.
+    algorithms: Option<Vec<Algorithm>>,
 }
 
 impl KeyStore {
@@ -58,6 +67,7 @@ impl KeyStore {
         Self {
             by_kid: HashMap::new(),
             fallback: None,
+            algorithms: None,
         }
     }
 
@@ -68,6 +78,7 @@ impl KeyStore {
         Self {
             by_kid: HashMap::new(),
             fallback: Some(key),
+            algorithms: None,
         }
     }
 
@@ -84,7 +95,30 @@ impl KeyStore {
         Self {
             by_kid: entries.into_iter().collect(),
             fallback: None,
+            algorithms: None,
         }
+    }
+
+    /// Bind the algorithms these keys verify with, overriding the issuer's
+    /// configured list. See [`Self::algorithms`].
+    #[must_use]
+    pub fn with_algorithms(mut self, algorithms: Vec<Algorithm>) -> Self {
+        self.algorithms = Some(algorithms);
+        self
+    }
+
+    /// The algorithms bound to these keys, when their source named them.
+    ///
+    /// `None` means the issuer's configured `algorithms` apply. A discovered
+    /// issuer's keys carry the set derived from its provider configuration.
+    pub fn algorithms(&self) -> Option<&[Algorithm]> {
+        self.algorithms.as_deref()
+    }
+
+    /// Replace the bound algorithms without touching the keys, for a
+    /// discovery document that changed its algorithms but not its JWKS.
+    pub(super) fn set_algorithms(&mut self, algorithms: Vec<Algorithm>) {
+        self.algorithms = Some(algorithms);
     }
 
     /// Look up the key for a token's header `kid`. Returns:
@@ -126,6 +160,7 @@ impl std::fmt::Debug for KeyStore {
         f.debug_struct("KeyStore")
             .field("kids", &kids)
             .field("has_fallback", &self.fallback.is_some())
+            .field("algorithms", &self.algorithms)
             .finish()
     }
 }
@@ -177,6 +212,10 @@ pub struct TrustedIssuer {
     /// deployments stick to one (RS256 most commonly), but
     /// supporting multiple lets the `IdP` rotate to a new algo
     /// without us redeploying.
+    ///
+    /// Overridden by [`KeyStore::algorithms`] when the keys carry their own,
+    /// as a discovered issuer's do; for such an issuer this is the configured
+    /// list that narrows what its provider advertises, and may be empty.
     pub algorithms: Vec<Algorithm>,
 
     /// Clock-skew tolerance for `exp` / `nbf` claims, in seconds.
@@ -258,6 +297,10 @@ pub struct RefreshGate {
     /// alternative is re-downloading and re-parsing a document that has
     /// not changed, on a request that already had its answer.
     etag: std::sync::Mutex<Option<String>>,
+
+    /// What the last accepted discovery document said. Unused by sources
+    /// other than OIDC discovery.
+    discovery: std::sync::Mutex<DiscoveryState>,
 }
 
 impl RefreshGate {
@@ -285,6 +328,13 @@ impl RefreshGate {
     /// Record that a fetch replaced the key set.
     pub(super) fn mark_success(&self) {
         self.mark_current();
+        self.bump_generation();
+    }
+
+    /// Record that what a verify checks against changed, without vouching
+    /// for the keys' freshness: a discovery document narrowed the algorithms
+    /// while the JWKS fetch failed.
+    pub(super) fn bump_generation(&self) {
         self.generation
             .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
@@ -351,9 +401,57 @@ impl RefreshGate {
             .last_success
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match last {
-            None => true,
-            Some(t) => std::time::Instant::now().duration_since(t) >= max_age,
+        older_than(last, max_age)
+    }
+
+    /// A copy of the discovery state, to work from without holding a lock
+    /// across the fetches.
+    pub(super) fn discovery(&self) -> DiscoveryState {
+        self.discovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Install the discovery state a refresh settled on.
+    pub(super) fn set_discovery(&self, state: DiscoveryState) {
+        *self
+            .discovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+    }
+
+    /// Whether the discovery document is older than `max_age`, or was never
+    /// read.
+    fn discovery_is_stale(&self, max_age: std::time::Duration) -> bool {
+        let discovered_at = self
+            .discovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .discovered_at;
+        older_than(discovered_at, max_age)
+    }
+}
+
+/// Whether `at` is `max_age` or more in the past. Never is always too old.
+pub(super) fn older_than(at: Option<std::time::Instant>, max_age: std::time::Duration) -> bool {
+    at.is_none_or(|t| t.elapsed() >= max_age)
+}
+
+impl TrustedIssuer {
+    /// Whether a verify should refresh this issuer even though the token in
+    /// hand validated: its keys, or for a discovered issuer its discovery
+    /// document, are older than `refresh_secs`.
+    pub(super) fn is_stale(&self) -> bool {
+        let max_age = self.source.refresh_interval();
+        if self.refresh.is_stale(max_age) {
+            return true;
+        }
+        match (&self.source, max_age) {
+            (DecodingKeySource::OidcDiscovery(_), Some(max_age)) => {
+                self.refresh.discovery_is_stale(max_age)
+            },
+            _ => false,
         }
     }
 }
