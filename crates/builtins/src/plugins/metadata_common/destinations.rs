@@ -471,4 +471,40 @@ mod tests {
         assert!(!scope.allows_address("fc00::1"));
         assert!(!scope.allows_address("fd00::1"));
     }
+
+    #[test]
+    fn allows_address_all_restrictions() {
+        let config = DestinationScopeConfig {
+            private_allow: vec!["10.0.0.0/8".to_owned()],
+            allow_cloud_metadata: true,
+            allow_loopback: true,
+        };
+        let scope = CompiledDestinationScope::compile(config);
+
+        // All types allowed when configured
+        assert!(scope.allows_address("8.8.8.8")); // Public
+        assert!(scope.allows_address("10.0.0.0")); // Private in range
+        assert!(scope.allows_address("10.255.255.255")); // Private in range
+        assert!(scope.allows_address("169.254.1.1")); // Cloud metadata
+        assert!(scope.allows_address("127.0.0.1")); // Loopback
+        assert!(scope.allows_address("::1")); // IPv6 loopback
+        assert!(scope.allows_address("fe80::1")); // IPv6 cloud metadata
+        assert!(scope.allows_address("2001:db8::1")); // IPv6 public
+    }
+
+    #[test]
+    fn allows_address_public_always_allowed() {
+        let config = DestinationScopeConfig {
+            private_allow: vec![],
+            allow_cloud_metadata: false,
+            allow_loopback: false,
+        };
+        let scope = CompiledDestinationScope::compile(config);
+
+        // Public addresses always allowed
+        assert!(scope.allows_address("8.8.8.8"));
+        assert!(scope.allows_address("1.1.1.1"));
+        assert!(scope.allows_address("2001:db8::1"));
+        assert!(scope.allows_address("2606:4700:4700::1111"));
+    }
 }
