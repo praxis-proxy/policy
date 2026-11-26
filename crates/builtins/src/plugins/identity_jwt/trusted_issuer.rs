@@ -102,7 +102,7 @@ impl KeyStore {
     /// Bind the algorithms these keys verify with, overriding the issuer's
     /// configured list. See [`Self::algorithms`].
     #[must_use]
-    pub fn with_algorithms(mut self, algorithms: Vec<Algorithm>) -> Self {
+    pub(super) fn with_algorithms(mut self, algorithms: Vec<Algorithm>) -> Self {
         self.algorithms = Some(algorithms);
         self
     }
@@ -111,7 +111,7 @@ impl KeyStore {
     ///
     /// `None` means the issuer's configured `algorithms` apply. A discovered
     /// issuer's keys carry the set derived from its provider configuration.
-    pub fn algorithms(&self) -> Option<&[Algorithm]> {
+    pub(super) fn algorithms(&self) -> Option<&[Algorithm]> {
         self.algorithms.as_deref()
     }
 
