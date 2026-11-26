@@ -156,22 +156,20 @@ impl CompiledCacheConfig {
 
             // Validate scope fields if present
             if let Some(scope) = &config.scope {
-                if let Some(principal) = &scope.principal {
-                    if principal.trim().is_empty() {
-                        return Err("cache.scope.principal: must not be empty".to_owned());
-                    }
+                if let Some(principal) = &scope.principal
+                    && principal.trim().is_empty()
+                {
+                    return Err("cache.scope.principal: must not be empty".to_owned());
                 }
-                if let Some(tenant) = &scope.tenant {
-                    if tenant.path.trim().is_empty() {
-                        return Err("cache.scope.tenant.path: must not be empty".to_owned());
-                    }
+                if let Some(tenant) = &scope.tenant
+                    && tenant.path.trim().is_empty()
+                {
+                    return Err("cache.scope.tenant.path: must not be empty".to_owned());
                 }
-                if let Some(credential) = &scope.credential {
-                    if credential.trim().is_empty() {
-                        return Err(
-                            "cache.scope.credential: must not be empty".to_owned(),
-                        );
-                    }
+                if let Some(credential) = &scope.credential
+                    && credential.trim().is_empty()
+                {
+                    return Err("cache.scope.credential: must not be empty".to_owned());
                 }
             }
         }

@@ -78,7 +78,7 @@ impl SecretGenerations {
     }
 
     /// Get the current generation for a secret, initializing if needed.
-    /// Returns error if secret_name is empty (invalid configuration).
+    /// Returns error if `secret_name` is empty (invalid configuration).
     #[allow(dead_code, reason = "Phase 2: Generation tracking")]
     pub(crate) fn get_or_init(&mut self, secret_name: &str) -> Result<GenerationId, String> {
         if secret_name.trim().is_empty() {

@@ -8,7 +8,7 @@
 //! the host's configured allow-list.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::str::FromStr;
+use std::str::FromStr as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -156,21 +156,26 @@ impl CompiledDestinationScope {
             return false;
         }
 
-        match (IpAddr::from_str(parts[0]), parts[1].parse::<u32>()) {
+        #[allow(clippy::indexing_slicing)]
+        match (parts[0].parse::<IpAddr>(), parts[1].parse::<u32>()) {
             (Ok(IpAddr::V4(net)), Ok(prefix)) if prefix <= 32 => {
                 if let IpAddr::V4(addr_v4) = addr {
-                    self.ipv4_in_cidr(addr_v4, net, prefix as u8)
+                    #[allow(clippy::cast_possible_truncation)]
+                    let prefix_u8 = prefix as u8;
+                    self.ipv4_in_cidr(addr_v4, net, prefix_u8)
                 } else {
                     false
                 }
-            }
+            },
             (Ok(IpAddr::V6(net)), Ok(prefix)) if prefix <= 128 => {
                 if let IpAddr::V6(addr_v6) = addr {
-                    self.ipv6_in_cidr(addr_v6, net, prefix as u8)
+                    #[allow(clippy::cast_possible_truncation)]
+                    let prefix_u8 = prefix as u8;
+                    self.ipv6_in_cidr(addr_v6, net, prefix_u8)
                 } else {
                     false
                 }
-            }
+            },
             _ => false, // Invalid CIDR
         }
     }
