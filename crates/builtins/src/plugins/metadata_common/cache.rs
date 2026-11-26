@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub(crate) struct CacheConfig {
     /// Request attributes that determine the cache key.
-    /// Every request attribute used in templates MUST appear here or in key_exempt.
+    /// Every request attribute used in templates MUST appear here or in `key_exempt`.
     #[serde(default)]
     pub(crate) key: Vec<String>,
 
@@ -79,12 +79,12 @@ pub(crate) struct KeyExemption {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ScopeConfig {
-    /// Principal partition (e.g., subject.id).
+    /// Principal partition (e.g., `subject.id`).
     /// Missing principal → cache bypass (security-sensitive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) principal: Option<String>,
 
-    /// Tenant partition (e.g., subject.organization_id).
+    /// Tenant partition (e.g., `subject.organization_id`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) tenant: Option<TenantPartition>,
 
@@ -119,7 +119,7 @@ pub(crate) enum CacheDisposition {
     Miss,
     /// Returned from cache.
     Hit,
-    /// ETag revalidation hit (Phase 2).
+    /// `ETag` revalidation hit (Phase 2).
     Revalidated,
     /// Permitted stale value served (Phase 2).
     Stale,
@@ -134,6 +134,10 @@ pub(crate) struct CompiledCacheConfig {
 
 impl CompiledCacheConfig {
     /// Compile and validate cache configuration.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "Phase 2: Will return Err on validation failure"
+    )]
     pub(crate) fn compile(config: CacheConfig) -> Result<Self, String> {
         // Phase 1: Basic validation
         // - key and key_exempt must reference known attributes
@@ -175,7 +179,8 @@ impl CompiledCacheConfig {
 /// Phase 1: Struct definition and configuration only.
 #[derive(Clone, Debug)]
 pub(crate) struct CacheStore {
-    _config: Arc<CompiledCacheConfig>,
+    #[allow(dead_code, reason = "Phase 2: Will be used in cache operations")]
+    config: Arc<CompiledCacheConfig>,
     // Phase 2: Will contain moka::future::Cache<CacheKey, CachedResponse>
     // Phase 2: Will contain Arc<AtomicUsize> for byte tracking
 }
@@ -183,16 +188,17 @@ pub(crate) struct CacheStore {
 impl CacheStore {
     /// Create a new cache store from compiled config.
     pub(crate) fn new(config: Arc<CompiledCacheConfig>) -> Self {
-        Self { _config: config }
+        Self { config }
     }
 
     /// Check if cache is enabled.
     pub(crate) fn is_enabled(&self) -> bool {
-        self._config.is_enabled()
+        self.config.is_enabled()
     }
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -222,7 +228,7 @@ mod tests {
     #[test]
     fn compiled_cache_config_enables_when_key_configured() {
         let config = CacheConfig {
-            key: vec!["subject.id".to_string()],
+            key: vec!["subject.id".to_owned()],
             key_exempt: None,
             scope: None,
             ttl_seconds: 300,
@@ -256,7 +262,10 @@ mod tests {
             "credential": "secret.entitlement-api-token"
         });
         let scope: ScopeConfig = serde_json::from_value(json).expect("parse scope");
-        assert_eq!(scope.principal, Some("subject.id".to_string()));
-        assert_eq!(scope.credential, Some("secret.entitlement-api-token".to_string()));
+        assert_eq!(scope.principal, Some("subject.id".to_owned()));
+        assert_eq!(
+            scope.credential,
+            Some("secret.entitlement-api-token".to_owned())
+        );
     }
 }

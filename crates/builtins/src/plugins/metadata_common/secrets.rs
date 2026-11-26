@@ -124,6 +124,7 @@ pub(crate) struct SecretGenerationEvent {
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -189,12 +190,18 @@ mod tests {
 
         let all: Vec<_> = gens
             .all_generations()
-            .map(|(name, generation)| (name.to_string(), generation.as_u64()))
+            .map(|(name, generation)| (name.to_owned(), generation.as_u64()))
             .collect();
 
         assert_eq!(all.len(), 2);
-        let token1_gen = all.iter().find(|(name, _)| name.as_str() == "token1").map(|(_, g)| *g);
-        let token2_gen = all.iter().find(|(name, _)| name.as_str() == "token2").map(|(_, g)| *g);
+        let token1_gen = all
+            .iter()
+            .find(|(name, _)| name.as_str() == "token1")
+            .map(|(_, g)| *g);
+        let token2_gen = all
+            .iter()
+            .find(|(name, _)| name.as_str() == "token2")
+            .map(|(_, g)| *g);
 
         assert_eq!(token1_gen, Some(3), "token1 should be gen 3 after rotate");
         assert_eq!(token2_gen, Some(2), "token2 should be gen 2");

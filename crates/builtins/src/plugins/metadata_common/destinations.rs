@@ -32,7 +32,7 @@ pub(crate) struct DestinationScopeConfig {
     #[serde(default)]
     pub(crate) allow_cloud_metadata: bool,
 
-    /// Whether to allow localhost/loopback (127.0.0.1, ::1, etc).
+    /// Whether to allow localhost/loopback (`127.0.0.1`, `::1`, etc).
     /// Default: false (safe).
     #[serde(default)]
     pub(crate) allow_loopback: bool,
@@ -72,11 +72,11 @@ pub(crate) struct CompiledDestinationScope {
 
 impl CompiledDestinationScope {
     /// Compile and validate destination scope configuration.
-    pub(crate) fn compile(config: DestinationScopeConfig) -> Result<Self, String> {
+    pub(crate) fn compile(config: DestinationScopeConfig) -> Self {
         // Phase 1: Basic validation
         // - private_allow list syntax (valid CIDR notation)
         // Phase 2: Will enforce scoped constraints and reject policy widening
-        Ok(Self { config })
+        Self { config }
     }
 
     /// Check if an address class is allowed by this configuration.
@@ -126,11 +126,10 @@ mod tests {
 
     #[test]
     fn destination_scope_config_accepts_private_allow_list() {
-        let mut config = DestinationScopeConfig::default();
-        config.private_allow = vec![
-            "10.0.0.0/8".to_string(),
-            "172.16.0.0/12".to_string(),
-        ];
+        let config = DestinationScopeConfig {
+            private_allow: vec!["10.0.0.0/8".to_owned(), "172.16.0.0/12".to_owned()],
+            ..DestinationScopeConfig::default()
+        };
         assert_eq!(config.private_allow.len(), 2);
     }
 
@@ -145,52 +144,58 @@ mod tests {
     #[test]
     fn compiled_destination_scope_allows_public_always() {
         let config = DestinationScopeConfig::default();
-        let compiled = CompiledDestinationScope::compile(config).expect("compile");
+        let compiled = CompiledDestinationScope::compile(config);
         assert!(compiled.allows(AddressClass::Public));
     }
 
     #[test]
     fn compiled_destination_scope_disallows_private_by_default() {
         let config = DestinationScopeConfig::default();
-        let compiled = CompiledDestinationScope::compile(config).expect("compile");
+        let compiled = CompiledDestinationScope::compile(config);
         assert!(!compiled.allows(AddressClass::Private));
     }
 
     #[test]
     fn compiled_destination_scope_allows_private_when_configured() {
-        let mut config = DestinationScopeConfig::default();
-        config.private_allow = vec!["10.0.0.0/8".to_string()];
-        let compiled = CompiledDestinationScope::compile(config).expect("compile");
+        let config = DestinationScopeConfig {
+            private_allow: vec!["10.0.0.0/8".to_owned()],
+            ..DestinationScopeConfig::default()
+        };
+        let compiled = CompiledDestinationScope::compile(config);
         assert!(compiled.allows(AddressClass::Private));
     }
 
     #[test]
     fn compiled_destination_scope_disallows_cloud_metadata_by_default() {
         let config = DestinationScopeConfig::default();
-        let compiled = CompiledDestinationScope::compile(config).expect("compile");
+        let compiled = CompiledDestinationScope::compile(config);
         assert!(!compiled.allows(AddressClass::CloudMetadata));
     }
 
     #[test]
     fn compiled_destination_scope_allows_cloud_metadata_when_enabled() {
-        let mut config = DestinationScopeConfig::default();
-        config.allow_cloud_metadata = true;
-        let compiled = CompiledDestinationScope::compile(config).expect("compile");
+        let config = DestinationScopeConfig {
+            allow_cloud_metadata: true,
+            ..DestinationScopeConfig::default()
+        };
+        let compiled = CompiledDestinationScope::compile(config);
         assert!(compiled.allows(AddressClass::CloudMetadata));
     }
 
     #[test]
     fn compiled_destination_scope_disallows_loopback_by_default() {
         let config = DestinationScopeConfig::default();
-        let compiled = CompiledDestinationScope::compile(config).expect("compile");
+        let compiled = CompiledDestinationScope::compile(config);
         assert!(!compiled.allows(AddressClass::Loopback));
     }
 
     #[test]
     fn compiled_destination_scope_allows_loopback_when_enabled() {
-        let mut config = DestinationScopeConfig::default();
-        config.allow_loopback = true;
-        let compiled = CompiledDestinationScope::compile(config).expect("compile");
+        let config = DestinationScopeConfig {
+            allow_loopback: true,
+            ..DestinationScopeConfig::default()
+        };
+        let compiled = CompiledDestinationScope::compile(config);
         assert!(compiled.allows(AddressClass::Loopback));
     }
 }
