@@ -2,10 +2,6 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Response caching for metadata HTTP callouts.
-#![allow(
-    dead_code,
-    reason = "Phase 1: Cache configuration and types defined. Phase 2: Integrate moka storage and key hashing."
-)]
 //!
 //! Implements a bounded in-process LRU cache with:
 //! - Dynamic cache keys from request attributes and credentials
@@ -13,6 +9,7 @@
 //! - Single-flight coalescing for concurrent identical misses
 //! - Credential-scoped partitioning for safe invalidation
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -110,6 +107,7 @@ pub(crate) struct TenantPartition {
 }
 
 /// Cache disposition tracking for audit.
+#[allow(dead_code, reason = "Phase 2: Cache store integration")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CacheDisposition {
@@ -126,6 +124,7 @@ pub(crate) enum CacheDisposition {
 }
 
 /// Compiled cache configuration with validation.
+#[allow(dead_code, reason = "Phase 2: Cache store integration")]
 #[derive(Clone, Debug)]
 pub(crate) struct CompiledCacheConfig {
     config: CacheConfig,
@@ -134,42 +133,83 @@ pub(crate) struct CompiledCacheConfig {
 
 impl CompiledCacheConfig {
     /// Compile and validate cache configuration.
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "Phase 2: Will return Err on validation failure"
-    )]
     pub(crate) fn compile(config: CacheConfig) -> Result<Self, String> {
-        // Phase 1: Basic validation
-        // - key and key_exempt must reference known attributes
-        // - scope dimensions must be valid paths
-        // Phase 2: Will enforce scoped validity
+        // If cache is enabled, validate key and scope configuration
+        if !config.key.is_empty() {
+            // Validate that at least one key remains after exemptions
+            let exempted: HashSet<&str> = config
+                .key_exempt
+                .as_ref()
+                .map(|ex| ex.iter().map(|e| e.path.as_str()).collect())
+                .unwrap_or_default();
+            let remaining_keys: Vec<_> = config
+                .key
+                .iter()
+                .filter(|k| !exempted.contains(k.as_str()))
+                .collect();
+            if remaining_keys.is_empty() {
+                return Err(
+                    "cache.key: all attributes are exempted; at least one key must remain"
+                        .to_owned(),
+                );
+            }
+
+            // Validate scope fields if present
+            if let Some(scope) = &config.scope {
+                if let Some(principal) = &scope.principal {
+                    if principal.trim().is_empty() {
+                        return Err("cache.scope.principal: must not be empty".to_owned());
+                    }
+                }
+                if let Some(tenant) = &scope.tenant {
+                    if tenant.path.trim().is_empty() {
+                        return Err("cache.scope.tenant.path: must not be empty".to_owned());
+                    }
+                }
+                if let Some(credential) = &scope.credential {
+                    if credential.trim().is_empty() {
+                        return Err(
+                            "cache.scope.credential: must not be empty".to_owned(),
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(Self { config })
     }
 
+    #[allow(dead_code, reason = "Phase 2: Cache store integration")]
     pub(crate) fn is_enabled(&self) -> bool {
         !self.config.key.is_empty()
     }
 
+    #[allow(dead_code, reason = "Phase 2: Cache store integration")]
     pub(crate) fn ttl(&self) -> Duration {
         Duration::from_secs(self.config.ttl_seconds)
     }
 
+    #[allow(dead_code, reason = "Phase 2: Cache store integration")]
     pub(crate) fn max_entries(&self) -> u64 {
         self.config.max_entries
     }
 
+    #[allow(dead_code, reason = "Phase 2: Cache store integration")]
     pub(crate) fn max_bytes(&self) -> usize {
         self.config.max_bytes
     }
 
+    #[allow(dead_code, reason = "Phase 2: Cache store integration")]
     pub(crate) fn is_volatile(&self) -> bool {
         self.config.volatile
     }
 
+    #[allow(dead_code, reason = "Phase 2: Cache store integration")]
     pub(crate) fn key_attributes(&self) -> &[String] {
         &self.config.key
     }
 
+    #[allow(dead_code, reason = "Phase 2: Cache store integration")]
     pub(crate) fn scope_config(&self) -> Option<&ScopeConfig> {
         self.config.scope.as_ref()
     }
@@ -177,6 +217,7 @@ impl CompiledCacheConfig {
 
 /// In-process response cache store (Phase 2).
 /// Phase 1: Struct definition and configuration only.
+#[allow(dead_code, reason = "Phase 2: Cache store implementation")]
 #[derive(Clone, Debug)]
 pub(crate) struct CacheStore {
     #[allow(dead_code, reason = "Phase 2: Will be used in cache operations")]
@@ -187,11 +228,13 @@ pub(crate) struct CacheStore {
 
 impl CacheStore {
     /// Create a new cache store from compiled config.
+    #[allow(dead_code, reason = "Phase 2: Cache store implementation")]
     pub(crate) fn new(config: Arc<CompiledCacheConfig>) -> Self {
         Self { config }
     }
 
     /// Check if cache is enabled.
+    #[allow(dead_code, reason = "Phase 2: Cache store implementation")]
     pub(crate) fn is_enabled(&self) -> bool {
         self.config.is_enabled()
     }

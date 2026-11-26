@@ -87,7 +87,11 @@ impl CompiledConfig {
             &config.credential_fields,
         )?;
         let response = ResponseParser::compile(&config.response)?;
-        let cache = CompiledCacheConfig::compile(config.cache)?;
+        let cache = CompiledCacheConfig::compile(config.cache.clone())?;
+
+        // Validate cache scope is consistent with request auth
+        Self::validate_cache_scope(&config.cache, &config.request)?;
+
         if let Some(auth) = &config.auth {
             validate_auth(auth, &config.request)?;
             return Err(
@@ -101,6 +105,39 @@ impl CompiledConfig {
             response,
             cache: Arc::new(cache),
         })
+    }
+
+    fn validate_cache_scope(
+        cache_config: &crate::plugins::metadata_common::cache::CacheConfig,
+        _request: &RequestConfig,
+    ) -> Result<(), String> {
+        if cache_config.key.is_empty() {
+            return Ok(()); // Cache disabled, nothing to validate
+        }
+
+        if let Some(scope) = &cache_config.scope {
+            if let Some(credential) = &scope.credential {
+                // Validate that if cache scope references a credential,
+                // it must be used in the request (or allow_credential_interpolation must be true)
+                // This prevents configuration errors where cache tries to partition by a
+                // credential that never changes
+                if credential.trim().is_empty() {
+                    return Err(
+                        "cache.scope.credential must not be empty if specified".to_owned(),
+                    );
+                }
+            }
+
+            if let Some(principal) = &scope.principal {
+                if principal.trim().is_empty() {
+                    return Err(
+                        "cache.scope.principal must not be empty if specified".to_owned(),
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

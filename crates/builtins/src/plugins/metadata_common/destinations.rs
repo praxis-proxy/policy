@@ -2,14 +2,13 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Scoped private destination allow-lists for metadata HTTP callouts.
-#![allow(
-    dead_code,
-    reason = "Phase 1: Destination configuration and types defined. Phase 2: Integrate address validation."
-)]
 //!
 //! Prevents policy from widening access to private addresses beyond what
 //! the host has explicitly allowed. Validates that resolved addresses match
 //! the host's configured allow-list.
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +38,7 @@ pub(crate) struct DestinationScopeConfig {
 }
 
 /// Address classification for security policy enforcement.
+#[allow(dead_code, reason = "Phase 2: Address validation and filtering")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AddressClass {
     /// Public routable address (allowed by default).
@@ -53,13 +53,46 @@ pub(crate) enum AddressClass {
 
 impl AddressClass {
     /// Classify an IP address (v4 or v6).
-    /// Phase 2: Will parse and classify actual addresses.
-    /// Phase 1: Returns Public (safe default).
-    pub(crate) fn classify(_address: &str) -> Self {
-        // Phase 1: Stub implementation
-        // Phase 2: Will parse IPv4/IPv6 and classify:
-        // - 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 → Private
-        // - 169.254.0.0/16, 127.0.0.0/8, ::1 → Special
+    #[allow(dead_code, reason = "Phase 2: Address validation")]
+    pub(crate) fn classify(address: &str) -> Self {
+        match IpAddr::from_str(address) {
+            Ok(IpAddr::V4(addr)) => Self::classify_v4(addr),
+            Ok(IpAddr::V6(addr)) => Self::classify_v6(addr),
+            Err(_) => Self::Public, // Invalid address defaults to public (safe)
+        }
+    }
+
+    #[allow(dead_code, reason = "Phase 2: Address validation")]
+    fn classify_v4(addr: Ipv4Addr) -> Self {
+        // RFC 1918 private ranges
+        if addr.is_private() {
+            return Self::Private;
+        }
+        // Link-local 169.254.0.0/16 (cloud metadata)
+        if addr.is_link_local() {
+            return Self::CloudMetadata;
+        }
+        // Loopback 127.0.0.0/8
+        if addr.is_loopback() {
+            return Self::Loopback;
+        }
+        Self::Public
+    }
+
+    #[allow(dead_code, reason = "Phase 2: Address validation")]
+    fn classify_v6(addr: Ipv6Addr) -> Self {
+        // Unique local (fc00::/7) - IPv6 equivalent of private
+        if addr.is_unique_local() {
+            return Self::Private;
+        }
+        // Link-local fe80::/10
+        if addr.is_unicast_link_local() {
+            return Self::CloudMetadata;
+        }
+        // Loopback ::1
+        if addr.is_loopback() {
+            return Self::Loopback;
+        }
         Self::Public
     }
 }
@@ -72,6 +105,7 @@ pub(crate) struct CompiledDestinationScope {
 
 impl CompiledDestinationScope {
     /// Compile and validate destination scope configuration.
+    #[allow(dead_code, reason = "Phase 2: Address validation")]
     pub(crate) fn compile(config: DestinationScopeConfig) -> Self {
         // Phase 1: Basic validation
         // - private_allow list syntax (valid CIDR notation)
@@ -79,7 +113,90 @@ impl CompiledDestinationScope {
         Self { config }
     }
 
-    /// Check if an address class is allowed by this configuration.
+    /// Check if an address is allowed by this configuration.
+    #[allow(dead_code, reason = "Phase 2: Address validation")]
+    pub(crate) fn allows_address(&self, address: &str) -> bool {
+        let class = AddressClass::classify(address);
+        match class {
+            AddressClass::Public => true, // Always allowed
+            AddressClass::Private => self.allows_private_address(address),
+            AddressClass::CloudMetadata => self.config.allow_cloud_metadata,
+            AddressClass::Loopback => self.config.allow_loopback,
+        }
+    }
+
+    /// Check if a private address is in the allowed CIDR ranges.
+    #[allow(dead_code, reason = "Phase 2: Address validation")]
+    fn allows_private_address(&self, address: &str) -> bool {
+        if self.config.private_allow.is_empty() {
+            return false;
+        }
+        // Parse address and check against CIDR ranges
+        match IpAddr::from_str(address) {
+            Ok(addr) => self.is_in_private_allow_list(addr),
+            Err(_) => false, // Invalid address not allowed
+        }
+    }
+
+    #[allow(dead_code, reason = "Phase 2: Address validation")]
+    fn is_in_private_allow_list(&self, addr: IpAddr) -> bool {
+        for cidr in &self.config.private_allow {
+            if self.address_in_cidr(addr, cidr) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[allow(dead_code, reason = "Phase 2: Address validation")]
+    fn address_in_cidr(&self, addr: IpAddr, cidr: &str) -> bool {
+        // Parse CIDR notation (e.g., "10.0.0.0/8", "2001:db8::/32")
+        let parts: Vec<&str> = cidr.split('/').collect();
+        if parts.len() != 2 {
+            return false;
+        }
+
+        match (IpAddr::from_str(parts[0]), parts[1].parse::<u32>()) {
+            (Ok(IpAddr::V4(net)), Ok(prefix)) if prefix <= 32 => {
+                if let IpAddr::V4(addr_v4) = addr {
+                    self.ipv4_in_cidr(addr_v4, net, prefix as u8)
+                } else {
+                    false
+                }
+            }
+            (Ok(IpAddr::V6(net)), Ok(prefix)) if prefix <= 128 => {
+                if let IpAddr::V6(addr_v6) = addr {
+                    self.ipv6_in_cidr(addr_v6, net, prefix as u8)
+                } else {
+                    false
+                }
+            }
+            _ => false, // Invalid CIDR
+        }
+    }
+
+    #[allow(dead_code, reason = "Phase 2: Address validation")]
+    fn ipv4_in_cidr(&self, addr: Ipv4Addr, net: Ipv4Addr, prefix: u8) -> bool {
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
+        (u32::from(addr) & mask) == (u32::from(net) & mask)
+    }
+
+    #[allow(dead_code, reason = "Phase 2: Address validation")]
+    fn ipv6_in_cidr(&self, addr: Ipv6Addr, net: Ipv6Addr, prefix: u8) -> bool {
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u128::MAX << (128 - prefix)
+        };
+        (u128::from(addr) & mask) == (u128::from(net) & mask)
+    }
+
+    /// Check if an address class is allowed (legacy method for tests).
+    #[allow(dead_code, reason = "Phase 2: Address validation")]
     pub(crate) fn allows(&self, address_class: AddressClass) -> bool {
         match address_class {
             AddressClass::Public => true, // Always allowed
