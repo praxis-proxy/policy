@@ -268,4 +268,47 @@ mod tests {
             Some("secret.entitlement-api-token".to_owned())
         );
     }
+
+    #[test]
+    fn compiled_cache_config_accessors() {
+        let config = CacheConfig {
+            key: vec!["subject.id".to_owned()],
+            key_exempt: None,
+            scope: Some(ScopeConfig {
+                principal: Some("subject.id".to_owned()),
+                tenant: None,
+                credential: None,
+            }),
+            ttl_seconds: 600,
+            max_entries: 5_000,
+            max_bytes: 32 * 1024 * 1024,
+            volatile: true,
+        };
+        let compiled = CompiledCacheConfig::compile(config).expect("compile");
+        assert_eq!(compiled.ttl().as_secs(), 600);
+        assert_eq!(compiled.max_entries(), 5_000);
+        assert_eq!(compiled.max_bytes(), 32 * 1024 * 1024);
+        assert!(compiled.is_volatile());
+        assert_eq!(compiled.key_attributes(), &["subject.id".to_owned()]);
+        assert!(compiled.scope_config().is_some());
+    }
+
+    #[test]
+    fn cache_store_new() {
+        let config = CacheConfig::default();
+        let compiled = CompiledCacheConfig::compile(config).expect("compile");
+        let store = CacheStore::new(Arc::new(compiled));
+        assert!(!store.is_enabled()); // empty key means disabled
+    }
+
+    #[test]
+    fn cache_store_enabled() {
+        let config = CacheConfig {
+            key: vec!["subject.id".to_owned()],
+            ..CacheConfig::default()
+        };
+        let compiled = CompiledCacheConfig::compile(config).expect("compile");
+        let store = CacheStore::new(Arc::new(compiled));
+        assert!(store.is_enabled());
+    }
 }

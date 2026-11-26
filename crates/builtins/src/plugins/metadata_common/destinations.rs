@@ -198,4 +198,32 @@ mod tests {
         let compiled = CompiledDestinationScope::compile(config);
         assert!(compiled.allows(AddressClass::Loopback));
     }
+
+    #[test]
+    fn compiled_destination_scope_accessors() {
+        let config = DestinationScopeConfig {
+            private_allow: vec!["10.0.0.0/8".to_owned(), "172.16.0.0/12".to_owned()],
+            allow_cloud_metadata: true,
+            allow_loopback: false,
+        };
+        let compiled = CompiledDestinationScope::compile(config);
+        assert_eq!(compiled.private_allow().len(), 2);
+        assert!(compiled.allow_cloud_metadata());
+        assert!(!compiled.allow_loopback());
+    }
+
+    #[test]
+    fn address_class_phase1_stub() {
+        // Phase 1: classify() is a stub that returns Public for everything
+        // Phase 2: Will implement actual IPv4/IPv6 classification
+        assert_eq!(AddressClass::classify("127.0.0.1"), AddressClass::Public);
+        assert_eq!(AddressClass::classify("example.com"), AddressClass::Public);
+    }
+
+    #[test]
+    fn address_class_invalid_hostname() {
+        // Hostnames parse as Public (safe default for Phase 1)
+        assert_eq!(AddressClass::classify("example.com"), AddressClass::Public);
+        assert_eq!(AddressClass::classify("localhost"), AddressClass::Public);
+    }
 }

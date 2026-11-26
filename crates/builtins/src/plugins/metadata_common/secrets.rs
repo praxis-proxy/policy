@@ -123,6 +123,17 @@ pub(crate) struct SecretGenerationEvent {
     pub(crate) rotated: bool,
 }
 
+impl SecretGenerationEvent {
+    /// Create a generation event for audit trails.
+    pub(crate) fn new(secret: String, generation: GenerationId, rotated: bool) -> Self {
+        Self {
+            secret,
+            generation,
+            rotated,
+        }
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests")]
 mod tests {
@@ -212,5 +223,27 @@ mod tests {
         let generation = GenerationId::new(42);
         let json = serde_json::to_string(&generation).expect("serialize");
         assert_eq!(json, "42");
+    }
+
+    #[test]
+    fn generation_id_deserializes() {
+        let generation: GenerationId = serde_json::from_str("99").expect("deserialize");
+        assert_eq!(generation.as_u64(), 99);
+    }
+
+    #[test]
+    fn secret_generations_rotate_advances_counter() {
+        let mut gens = SecretGenerations::new();
+        let gen1 = gens.get_or_init("token");
+        let gen2 = gens.rotate("token");
+        assert!(gen2.as_u64() > gen1.as_u64());
+    }
+
+    #[test]
+    fn secret_generation_event_construction() {
+        let event = SecretGenerationEvent::new("token".to_owned(), GenerationId::new(5), true);
+        assert_eq!(event.secret, "token");
+        assert_eq!(event.generation.as_u64(), 5);
+        assert!(event.rotated);
     }
 }
