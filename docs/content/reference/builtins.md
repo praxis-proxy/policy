@@ -588,7 +588,9 @@ one is dropped with the engine that held it.
   than `refresh_secs`, or when the token's `kid` is not in the held key set (a
   provider that rotated keys). A refresh is at most one document fetch and one
   key set fetch, and at most one runs per `min_refresh_interval_secs` per
-  issuer. Concurrent requests wait for the one in flight.
+  issuer. Requests whose key is missing wait for the refresh in flight. Requests
+  that already verify against the held keys do not wait, and see the new keys
+  and algorithms once the refresh commits.
 - On the request path each fetch gets a 2 second budget and one attempt, so a
   stalled IdP delays one request by at most about 4 seconds.
 - Fetches are conditional. An unchanged document or key set answered with
