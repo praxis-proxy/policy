@@ -520,6 +520,250 @@ first-wins or last-wins.
 > notice at startup when a resolver uses `query_param` so the operator
 > can scrub raw query strings from infrastructure logging.
 
+### OIDC Discovery (`identity/jwt`)
+
+A trusted issuer whose provider publishes an
+[OpenID Connect Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html)
+document can name only its issuer URL. PPE finds the signing keys and the
+accepted algorithms from the provider itself, instead of the operator copying
+a JWKS URL and an algorithm list into the policy and keeping them current.
+
+```yaml
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    capabilities: [read_headers, perform_http]
+    config:
+      trusted_issuers:
+        - issuer: "https://idp.example.com/realms/agents"
+          audiences: ["ppe-gateway"]
+          decoding_key:
+            kind: oidc_discovery
+```
+
+That is the whole minimal configuration: the issuer URL and an audience
+decision, as for any trusted issuer. PPE then:
+
+1. Reads `<issuer>/.well-known/openid-configuration`. A trailing `/` on the
+   issuer is dropped before the path is appended.
+2. Requires the document's `issuer` to equal the configured issuer, byte for
+   byte.
+3. Fetches the key set at the document's `jwks_uri`.
+4. Derives the accepted signature algorithms from
+   `id_token_signing_alg_values_supported`.
+5. Verifies tokens against those keys, and re-reads both on a schedule.
+
+The plugin must declare `perform_http`, as for `jwks_url`. Nothing in the
+document can change the issuer, the audiences, the leeway, DPoP or any other
+setting: it chooses keys and narrows algorithms, nothing else.
+
+#### Options
+
+`decoding_key` takes the following settings besides `kind: oidc_discovery`. All
+are optional. The issuer's own `algorithms` list is covered under
+[Algorithm policy](#algorithm-policy).
+
+| Field | Default | Meaning |
+|---|---|---|
+| `refresh_secs` | `600` | How old the discovery document and the key set may get before a verification refreshes them. |
+| `min_refresh_interval_secs` | `30` | Floor between refresh attempts for this issuer. Bounds the load a stream of invented `kid`s can put on the IdP. Must be at least 1, and `refresh_secs` must not be below it. |
+| `discovery_url` | derived | The document's full URL, used verbatim, query included. For an IdP reached at an address other than the issuer it names in its tokens. |
+| `discovery_issuer` | the `issuer` | The `issuer` the document must advertise when that differs from the tokens' `iss`. Only valid together with `discovery_url`. Still compared exactly. |
+| `insecure_http` | `false` | Permits `http://` for the document and for the `jwks_uri` it names. Local development only. |
+
+Unknown fields are refused when the policy loads.
+
+#### Refresh and TTL
+
+Refresh runs on the verify path. PPE starts no background task, timer or
+thread for it, so there is nothing to stop or clean up when a policy reloads:
+a changed policy builds a new plugin instance with fresh state, and the old
+one is dropped with the engine that held it.
+
+- At startup each discovered issuer fetches its document and key set once,
+  concurrently with the other issuers. The retries of one issuer fit in about
+  10 seconds in total (5 seconds for each of the two fetches).
+- A verification refreshes the issuer when the document or the key set is older
+  than `refresh_secs`, or when the token's `kid` is not in the held key set (a
+  provider that rotated keys). A refresh is at most one document fetch and one
+  key set fetch, and at most one runs per `min_refresh_interval_secs` per
+  issuer. Concurrent requests wait for the one in flight.
+- On the request path each fetch gets a 2 second budget and one attempt, so a
+  stalled IdP delays one request by at most about 4 seconds.
+- Fetches are conditional. An unchanged document or key set answered with
+  `304 Not Modified` costs no parsing and no new state.
+- The document is re-read once it is `refresh_secs` old, so a moved `jwks_uri`
+  or a changed algorithm set is picked up without a restart. A `jwks_uri` that
+  changed is adopted only together with a successful fetch of the new key set.
+  If that fetch fails, the previous keys stay and the document is read again on
+  the next attempt.
+- Keys and algorithms are replaced together, so a verification never pairs new
+  keys with old algorithms. Key sets are replaced whole, never merged, so the
+  memory an issuer holds is bounded by one document, one key set and a few
+  strings.
+
+#### Algorithm policy
+
+The accepted algorithms come from `id_token_signing_alg_values_supported`,
+restricted to the asymmetric algorithms the build verifies: `RS256`, `RS384`,
+`RS512`, `PS256`, `PS384`, `PS512`, `ES256`, `ES384` and `EdDSA` (no `EdDSA`
+under `jwt-openssl-fips`). Everything else the provider lists, including
+`HS*`, `none` and names PPE does not know, is ignored and logged, and does not
+fail the document. `oct` keys in the key set are dropped, so a shared secret
+published there never becomes a verification key.
+
+The issuer's `algorithms` list is optional here, where it is required for other
+key sources. When set, it can only narrow what the provider advertises:
+
+<!-- validate: fragment -->
+```yaml
+trusted_issuers:
+  - issuer: "https://idp.example.com/realms/agents"
+    audiences: ["ppe-gateway"]
+    algorithms: [ES256]
+    decoding_key:
+      kind: oidc_discovery
+```
+
+A document that advertises no algorithms falls back to the configured list, or
+to `RS256`, which the specification requires every provider to support. A
+document whose advertised algorithms and the configured list share none is
+refused, and the last good configuration stays in force. An `algorithms` list
+holding `HS256`, `HS384` or `HS512` fails when the policy loads.
+
+`id_token_signing_alg_values_supported` describes ID tokens. A provider that
+signs access tokens with an algorithm missing from that list cannot be widened
+with `algorithms`, because the list only intersects. Use `kind: jwks_url` for
+such a provider.
+
+A token whose `alg` is outside the effective set is denied with
+`auth.algorithm_mismatch`.
+
+#### Security notes
+
+- **HTTPS.** The discovery URL must be `https://`, checked when the policy
+  loads, and so must the `jwks_uri` the document names, checked when it is
+  fetched. `insecure_http: true` relaxes both, for local development only.
+  Over plaintext anyone on the network path can swap the keys and forge tokens
+  the gateway accepts.
+- **Issuer match.** The document's `issuer` must equal the expected issuer
+  exactly, with no normalization: `https://idp.example.com/` and
+  `https://idp.example.com` differ. A mismatch is refused, because otherwise a
+  document could vouch for an issuer it is not. Use `discovery_issuer` only when
+  the IdP genuinely describes itself by another address than the one tokens
+  carry.
+- **No redirects.** A `3xx` answer is refused rather than followed. Point
+  `discovery_url` at the final location.
+- **Ceilings.** Documents over 64 KiB, key sets over 256 KiB and a `jwks_uri`
+  over 2 KiB are refused. Responses, tokens and keys never reach logs. A
+  string quoted from the provider is clipped and has control characters
+  escaped.
+- **URL shape.** The issuer, `discovery_url`, `discovery_issuer` and the
+  `jwks_uri` must be absolute `http(s)` URLs, in ASCII, with a host and no
+  userinfo or fragment (the issuer and `discovery_issuer` also no query). The
+  host of `jwks_uri` may differ from the issuer's.
+- **Egress allowlist.** PPE does not bypass the host's outbound policy, and it
+  applies to both fetches. Where the host refuses private addresses by default,
+  an in-cluster IdP must be allowed for the discovery host *and* for the host of
+  the `jwks_uri` it advertises. With Praxis, list both in the `policy` filter's
+  `trusted_private_endpoints`. Allow only hosts the operator controls: a
+  document served from an allowed host can point `jwks_uri` at any other
+  allowed host. When the host refuses a call, the issuer denies every token
+  with `auth.jwks_unavailable`.
+
+#### Failure behaviour
+
+| Situation | Result |
+|---|---|
+| Invalid settings: bad or non-ASCII URL, `http://` without `insecure_http`, `discovery_issuer` without `discovery_url`, a symmetric algorithm in `algorithms`, `min_refresh_interval_secs` of 0 or above `refresh_secs` | The policy fails to load, naming the issuer and the setting. No request is made. |
+| No HTTP transport installed, or `perform_http` not declared | The engine fails to initialize, naming the plugin and the missing capability. |
+| IdP unreachable, slow, or serving an invalid document at startup | The plugin loads. Tokens for that issuer are denied with `auth.jwks_unavailable` until a refresh succeeds. The first token after a failed startup retries at once, without waiting for the floor. |
+| Refresh fails while keys are held (outage, bad document, issuer mismatch, `5xx`) | The last good keys and algorithms stay in force and tokens signed with held keys keep verifying. The failure is logged, and a document that needs an operator's change is logged at error level. |
+| Lasting discovery outage | The issuer stays stale. One request per `min_refresh_interval_secs` waits out the failing fetch, up to about 4 seconds, while held keys keep verifying. |
+| Token with an unknown `kid` | One refresh, at most one per floor. Still unknown afterwards: `auth.unknown_kid`. |
+| Token signed with a key the provider has retired | Verifies until the next refresh replaces the key set, then is denied. |
+
+#### Migrating from Kuadrant AuthPolicy `jwt.issuerUrl`
+
+Kuadrant's `AuthPolicy` authenticates with `rules.authentication.<name>.jwt`, and
+Authorino discovers the provider's keys from `issuerUrl`. The PPE equivalent
+keeps the same inputs, plus the plugin envelope PPE needs.
+
+<!-- validate: fragment -->
+```yaml
+# Kuadrant AuthPolicy
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: api-auth
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: api
+  rules:
+    authentication:
+      keycloak:
+        jwt:
+          issuerUrl: https://idp.example.com/realms/agents
+          ttl: 300
+```
+
+```yaml
+# PPE policy
+plugins:
+  - name: keycloak
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    capabilities: [read_headers, perform_http]
+    config:
+      trusted_issuers:
+        - issuer: https://idp.example.com/realms/agents
+          audiences: [ppe-gateway]     # or skip_audience_validation: true, see below
+          decoding_key:
+            kind: oidc_discovery
+            refresh_secs: 300
+
+global:
+  authentication:
+    - keycloak
+```
+
+| AuthPolicy | PPE |
+|---|---|
+| `jwt.issuerUrl: U` | `issuer: U` with `decoding_key: { kind: oidc_discovery }`. The well-known path is derived the same way. |
+| `jwt.ttl: N` | `decoding_key.refresh_secs: N`. PPE has no "never refresh" setting (`0` or unset in AuthPolicy), so omit it for the 600 second default. |
+| `jwt.issuer: I`, different from `issuerUrl` | `issuer: I` with `decoding_key.discovery_url` set to the document's URL, and `discovery_issuer` if the document advertises something other than `I`. |
+| `jwt.audiences` | `audiences`, accepted when any one matches. |
+| no `audiences` | PPE refuses to load without an audience decision. Set `audiences` (recommended), or `skip_audience_validation: true` for the same behaviour as before. |
+| `jwt.jwksUrl: J` | `decoding_key: { kind: jwks_url, url: J }` with `algorithms`. |
+| `jwt.timeout`, `jwt.maxResponseBytes` | Not configurable. Fixed bounds apply (see above). |
+| `credentials.*` | `credential: { kind: header, name: ... }`, `cookie` or `query_param`. |
+| `authorization`, `response`, `when` | The APL policy. See [APL](../apl/index.md). |
+
+Differences to be aware of:
+
+- PPE always checks the token's `iss` against `issuer`. Authorino did so only
+  when `jwt.issuer` was set.
+- PPE never accepts `HS*` or `none`, and `algorithms` lets you narrow what the
+  provider advertises.
+- PPE does not follow redirects, and its host decides which private addresses
+  it may reach. A cluster-internal IdP needs allowing: without it every token is
+  denied with `auth.jwks_unavailable`. For Praxis:
+
+  <!-- validate: fragment -->
+  ```yaml
+  filters:
+    - filter: policy
+      config_path: /etc/praxis/policy.yaml
+      trusted_private_endpoints:
+        - idp.example.svc.cluster.local
+  ```
+
+- Refresh happens while verifying tokens, not on a timer. A gateway with no
+  traffic makes no calls to the IdP.
+
 ## Next
 
 - [Testing](../guides/testing.md): test policy and plugin behavior through the runtime.

@@ -125,6 +125,37 @@ A plugin that reaches outside the process must declare `perform_http`.
 Withholding it stops the call rather than degrading it, because a
 plugin that quietly skipped its IdP call would fail open.
 
+### Decoding key source
+
+Each entry of an `identity/jwt` plugin's `trusted_issuers:` names where its
+verification keys come from in `decoding_key:`. The usual choice for an IdP is
+one of the two published-key sources:
+
+<!-- validate: fragment -->
+```yaml
+# OIDC Discovery: the issuer URL is all PPE needs
+decoding_key:
+  kind: oidc_discovery
+  refresh_secs: 600               # optional, default 600
+  min_refresh_interval_secs: 30   # optional, default 30
+```
+
+<!-- validate: fragment -->
+```yaml
+# A JWKS URL, with the algorithms spelled out
+algorithms: [RS256]
+decoding_key:
+  kind: jwks_url
+  url: "https://idp.example.com/realms/agents/protocol/openid-connect/certs"
+```
+
+`oidc_discovery` finds the key set and the accepted algorithms from the
+provider's discovery document, and the issuer's `algorithms` becomes optional,
+narrowing what the provider advertises. Both sources fetch over HTTP, so the
+plugin must declare `perform_http`. All settings, the refresh rules, the
+security notes and the failure behaviour are in
+[Builtins — OIDC Discovery](builtins.md#oidc-discovery-identityjwt).
+
 ### Credential location
 
 The `identity/jwt` plugin reads one inbound credential per instance.

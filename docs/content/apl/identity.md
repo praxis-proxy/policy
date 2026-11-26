@@ -40,6 +40,34 @@ The token is verified against the issuer's JWKS. Only after verification do its
 claims become attributes. An unverified or expired token resolves to no subject,
 and `require(authenticated)` denies.
 
+### Letting the issuer describe itself
+
+When the identity provider publishes an OpenID Connect discovery document, name
+only the issuer. PPE reads `<issuer>/.well-known/openid-configuration`, follows
+its `jwks_uri` to the signing keys, takes the accepted algorithms from the
+provider, and refreshes all of it on a configurable TTL:
+
+```yaml
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    capabilities: [read_headers, perform_http]
+    config:
+      trusted_issuers:
+        - issuer: "https://idp.example.com/realms/agents"
+          audiences: ["ppe-gateway"]
+          decoding_key:
+            kind: oidc_discovery
+```
+
+A key rotation at the provider reaches PPE without a restart or a policy edit.
+The options (`refresh_secs`, `algorithms`, `discovery_url` and others), the
+security rules and what happens when the provider is down are in
+[Builtins — OIDC Discovery](../reference/builtins.md#oidc-discovery-identityjwt),
+which also has a section for
+[migrating from Kuadrant's AuthPolicy `jwt.issuerUrl`](../reference/builtins.md#migrating-from-kuadrant-authpolicy-jwtissuerurl).
+
 `identity/api-key` looks up an opaque key in a file or HTTP directory and maps
 its record into the same attributes. Policies such as `require(role.hr)` work
 with either resolver. See [Recipe 7](../guides/identity-delegation.md#recipe-7-an-opaque-api-key-resolved-against-a-directory)
