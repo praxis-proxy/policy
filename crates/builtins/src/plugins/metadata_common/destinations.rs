@@ -335,11 +335,25 @@ mod tests {
     }
 
     #[test]
-    fn address_class_phase1_stub() {
-        // Phase 1: classify() is a stub that returns Public for everything
-        // Phase 2: Will implement actual IPv4/IPv6 classification
-        assert_eq!(AddressClass::classify("127.0.0.1"), AddressClass::Public);
+    fn address_class_classification() {
+        // IPv4 classifications
+        assert_eq!(AddressClass::classify("127.0.0.1"), AddressClass::Loopback);
+        assert_eq!(AddressClass::classify("10.0.0.1"), AddressClass::Private);
+        assert_eq!(AddressClass::classify("192.168.1.1"), AddressClass::Private);
+        assert_eq!(AddressClass::classify("172.16.0.1"), AddressClass::Private);
+        assert_eq!(AddressClass::classify("169.254.1.1"), AddressClass::CloudMetadata);
+        assert_eq!(AddressClass::classify("8.8.8.8"), AddressClass::Public);
+
+        // IPv6 classifications
+        assert_eq!(AddressClass::classify("::1"), AddressClass::Loopback);
+        assert_eq!(AddressClass::classify("fc00::1"), AddressClass::Private);
+        assert_eq!(AddressClass::classify("fe80::1"), AddressClass::CloudMetadata);
+        assert_eq!(AddressClass::classify("2001:db8::1"), AddressClass::Public);
+
+        // Invalid addresses default to Public (safe)
         assert_eq!(AddressClass::classify("example.com"), AddressClass::Public);
+        assert_eq!(AddressClass::classify("localhost"), AddressClass::Public);
+        assert_eq!(AddressClass::classify("not-an-ip"), AddressClass::Public);
     }
 
     #[test]
