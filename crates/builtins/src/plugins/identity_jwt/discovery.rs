@@ -559,9 +559,15 @@ pub(super) fn authority(url: &str) -> Option<&str> {
 /// Why `url` is not an absolute `http`/`https` URL with a host and no
 /// userinfo or fragment (nor query, unless `allow_query`), or `None` when it
 /// is one. The reason reads after "it".
+///
+/// RFC 3986 URIs are ASCII, so anything else is refused: an accepted URL is
+/// then safe to log as is.
 fn url_fault(url: &str, allow_query: bool) -> Option<&'static str> {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Some("contains whitespace or control characters");
+    }
+    if !url.is_ascii() {
+        return Some("contains non-ASCII characters (percent-encode them, punycode the host)");
     }
     let Some((scheme, rest)) = url.split_once("://") else {
         return Some("is not an absolute URL");
@@ -608,12 +614,17 @@ pub(super) fn clip(s: &str) -> String {
     out
 }
 
-/// Whether `c` could end a log line or reorder how one displays.
+/// Whether `c` could end a log line, reorder how one displays, or hide in
+/// it (directional marks and zero-width characters).
 fn breaks_log_lines(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{feff}'
         )
 }
 
@@ -732,6 +743,7 @@ mod tests {
             ("spiffe://example.org/ns/a", "scheme"),
             ("idp.example/realms/a", "absolute"),
             ("https://idp.example/realms a", "whitespace"),
+            ("https://idp.ex\u{430}mple/realms/a", "non-ASCII"),
         ];
         for (issuer, reason) in cases {
             let err = OidcDiscoveryConfig::default()
@@ -953,6 +965,23 @@ mod tests {
     }
 
     #[test]
+    fn a_non_ascii_jwks_uri_is_refused() {
+        for uri in [
+            "https://idp.example/certs?v=\u{202e}txt.exe",
+            "https://idp.ex\u{430}mple/certs",
+        ] {
+            let r = parse(json!({ "issuer": ISSUER, "jwks_uri": uri })).expect_err(uri);
+            assert!(!r.config_fault, "{uri}: {}", r.reason);
+            assert!(r.reason.contains("non-ASCII"), "{uri}: {}", r.reason);
+            assert!(
+                !r.reason.contains('\u{202e}'),
+                "echoed escaped: {}",
+                r.reason
+            );
+        }
+    }
+
+    #[test]
     fn a_cross_origin_jwks_uri_is_accepted() {
         let doc = parse(
             json!({ "issuer": ISSUER, "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs" }),
@@ -1050,6 +1079,11 @@ mod tests {
             clip("a\u{2028}b\u{202e}c"),
             r"a\u{2028}b\u{202e}c",
             "line separators and bidi overrides"
+        );
+        assert_eq!(
+            clip("k\u{200e}i\u{200b}d\u{061c}-\u{feff}1"),
+            r"k\u{200e}i\u{200b}d\u{61c}-\u{feff}1",
+            "directional marks and zero-width characters"
         );
         assert_eq!(
             clip("Ünïcödé kid-1 \"q\""),
