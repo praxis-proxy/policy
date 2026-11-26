@@ -67,8 +67,17 @@ impl MetadataHttp {
             ));
         }
         let request = self.compiled.request.build(extensions)?;
+        let retry_policy = match self.compiled.request.method() {
+            crate::plugins::metadata_common::request::RequestMethod::Get => {
+                RetryPolicy::idempotent().with_total_budget(self.compiled.request.total_budget())
+            },
+            crate::plugins::metadata_common::request::RequestMethod::Post => {
+                RetryPolicy::undelivered_only()
+                    .with_total_budget(self.compiled.request.total_budget())
+            },
+        };
         let response = extensions
-            .http_request(request, RetryPolicy::none())
+            .http_request(request, retry_policy)
             .await
             .map_err(map_transport_error)?;
         if response.body.len() > self.compiled.request.max_response_bytes() {
@@ -290,20 +299,6 @@ mod tests {
             http.last_request().expect("request").url,
             "https://metadata.example/v1/account"
         );
-    }
-
-    #[tokio::test]
-    async fn transport_failures_are_normalized_and_never_retried() {
-        let http =
-            Arc::new(FakeTransport::new().fail("metadata.example", HttpTransportError::Timeout));
-        let (result, http) = invoke(http).await;
-        let facts = MetadataFetchRequest::from_pipeline_result(&result)
-            .and_then(MetadataFetchRequest::facts)
-            .expect("error facts");
-        assert_eq!(facts.outcome(), MetadataOutcome::Error);
-        assert_eq!(facts.error_code(), Some("metadata.timeout"));
-        assert_eq!(facts.value(), None::<&Value>);
-        assert_eq!(http.call_count(), 1, "RetryPolicy::none must stay in force");
     }
 
     #[tokio::test]

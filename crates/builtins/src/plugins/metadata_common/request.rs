@@ -18,8 +18,12 @@ use praxis_policy_core::metadata_callout::MetadataCalloutErrorCode;
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 pub(crate) const HARD_MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
-fn default_timeout_milliseconds() -> u64 {
+fn default_attempt_timeout_milliseconds() -> u64 {
     1_500
+}
+
+fn default_total_timeout_milliseconds() -> u64 {
+    5_000
 }
 
 fn default_connect_timeout_milliseconds() -> u64 {
@@ -52,8 +56,13 @@ pub(crate) struct RequestConfig {
     pub(crate) json: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) form: Option<BTreeMap<String, String>>,
-    #[serde(default = "default_timeout_milliseconds")]
-    pub(crate) timeout_milliseconds: u64,
+    #[serde(
+        default = "default_attempt_timeout_milliseconds",
+        alias = "timeout_milliseconds"
+    )]
+    pub(crate) attempt_timeout_milliseconds: u64,
+    #[serde(default = "default_total_timeout_milliseconds")]
+    pub(crate) total_timeout_milliseconds: u64,
     #[serde(default = "default_connect_timeout_milliseconds")]
     pub(crate) connect_timeout_milliseconds: u64,
     #[serde(default = "default_max_response_bytes")]
@@ -168,6 +177,7 @@ pub(crate) struct CompiledRequest {
     timeout: Duration,
     connect_timeout: Duration,
     max_response_bytes: usize,
+    total_budget: Duration,
 }
 
 impl CompiledRequest {
@@ -303,9 +313,10 @@ impl CompiledRequest {
             headers,
             json,
             form,
-            timeout: Duration::from_millis(config.timeout_milliseconds),
+            timeout: Duration::from_millis(config.attempt_timeout_milliseconds),
             connect_timeout: Duration::from_millis(config.connect_timeout_milliseconds),
             max_response_bytes: config.max_response_bytes,
+            total_budget: Duration::from_millis(config.total_timeout_milliseconds),
         })
     }
 
@@ -399,6 +410,14 @@ impl CompiledRequest {
     pub(crate) const fn uses_credential_interpolation(&self) -> bool {
         self.credential_interpolation
     }
+
+    pub(crate) const fn total_budget(&self) -> Duration {
+        self.total_budget
+    }
+
+    pub(crate) const fn method(&self) -> RequestMethod {
+        self.method
+    }
 }
 
 impl ReferenceUse {
@@ -465,14 +484,23 @@ fn authority(url: &Url) -> Result<http::uri::Authority, String> {
 }
 
 fn validate_bounds(config: &RequestConfig) -> Result<(), String> {
-    if config.timeout_milliseconds == 0 {
-        return Err("`request.timeout_milliseconds` must be greater than zero".to_owned());
+    if config.attempt_timeout_milliseconds == 0 {
+        return Err("`request.attempt_timeout_milliseconds` must be greater than zero".to_owned());
+    }
+    if config.total_timeout_milliseconds == 0 {
+        return Err("`request.total_timeout_milliseconds` must be greater than zero".to_owned());
+    }
+    if config.total_timeout_milliseconds < config.attempt_timeout_milliseconds {
+        return Err(
+            "`request.total_timeout_milliseconds` must be at least as large as `attempt_timeout_milliseconds`"
+                .to_owned(),
+        );
     }
     if config.connect_timeout_milliseconds == 0
-        || config.connect_timeout_milliseconds > config.timeout_milliseconds
+        || config.connect_timeout_milliseconds > config.attempt_timeout_milliseconds
     {
         return Err(
-            "`request.connect_timeout_milliseconds` must be greater than zero and no larger than the request timeout"
+            "`request.connect_timeout_milliseconds` must be greater than zero and no larger than the attempt timeout"
                 .to_owned(),
         );
     }
