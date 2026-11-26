@@ -2,12 +2,10 @@
 // Copyright (c) 2026 Praxis Contributors
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use praxis_policy_core::plugin::PluginConfig;
 use serde::{Deserialize, Serialize};
 
-use crate::plugins::metadata_common::cache::{CacheConfig, CompiledCacheConfig};
 use crate::plugins::metadata_common::request::{CompiledRequest, RequestConfig};
 use crate::plugins::metadata_common::response::{ResponseConfig, ResponseParser};
 
@@ -50,16 +48,12 @@ struct MetadataHttpConfig {
     credential_fields: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auth: Option<AuthConfig>,
-    #[serde(default)]
-    cache: CacheConfig,
 }
 
 pub(super) struct CompiledConfig {
     pub(super) require_authenticated: bool,
     pub(super) request: CompiledRequest,
     pub(super) response: ResponseParser,
-    #[allow(dead_code, reason = "Phase 2: Cache integration")]
-    pub(super) cache: Arc<CompiledCacheConfig>,
 }
 
 impl CompiledConfig {
@@ -87,7 +81,6 @@ impl CompiledConfig {
             &config.credential_fields,
         )?;
         let response = ResponseParser::compile(&config.response)?;
-        let cache = CompiledCacheConfig::compile(config.cache)?;
         if let Some(auth) = &config.auth {
             validate_auth(auth, &config.request)?;
             return Err(
@@ -99,7 +92,6 @@ impl CompiledConfig {
             require_authenticated: config.require_authenticated,
             request,
             response,
-            cache: Arc::new(cache),
         })
     }
 }

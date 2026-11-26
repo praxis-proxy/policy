@@ -3,11 +3,8 @@
 
 //! Private mechanics shared by HTTP-backed builtin adapters.
 
-pub(crate) mod cache;
-pub(crate) mod destinations;
 pub(crate) mod request;
 pub(crate) mod response;
-pub(crate) mod secrets;
 mod template;
 
 use praxis_policy_core::extensions::{AcquiredFacts, MetadataCacheDisposition};
