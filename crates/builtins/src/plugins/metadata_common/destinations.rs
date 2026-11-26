@@ -417,7 +417,6 @@ mod tests {
         assert!(!scope.allows_address("127.0.0.1"));
     }
 
-
     #[test]
     fn allows_address_mixed_restrictions() {
         let config = DestinationScopeConfig {
