@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **OIDC Discovery for `identity/jwt`.** A trusted issuer can set `decoding_key: { kind: oidc_discovery }` and configure only its issuer URL. PPE reads `<issuer>/.well-known/openid-configuration` (or an explicit `discovery_url`), requires the document's `issuer` to match exactly, fetches the JWKS its `jwks_uri` names, and derives the accepted algorithms from `id_token_signing_alg_values_supported`. Symmetric algorithms, `none` and `oct` keys are never accepted, and an optional `algorithms` list can only narrow what the provider advertises. Discovery and keys refresh on the verify path every `refresh_secs` (default 600), at most once per `min_refresh_interval_secs` (default 30), with no background task. An unreachable or invalid document keeps the last good configuration, and an outage at startup soft-fails like `jwks_url`. The resolver needs the `perform_http` capability. New public type: `identity_jwt::OidcDiscoveryConfig`. ([#290](https://github.com/praxis-proxy/policy/issues/290))
+
 - **Bounded metadata callout contracts.** `HostServices::remaining_invocation_time`
   and `Extensions::with_invocation_deadline` let the embedding propagate the
   gateway invocation budget through nested metadata dispatch. Stable metadata
@@ -90,6 +92,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **`identity/jwt` algorithm checks.** For every key source (`jwks_url`, `oidc_discovery` and static keys), a token whose `alg` belongs to another key family than the key its `kid` selects (for example an ES256 token naming an RSA key) now denies with `auth.algorithm_mismatch` instead of `auth.token_invalid`. The token was denied before too. An issuer whose `algorithms` list spans key families (for example `[RS256, ES256]`) now accepts a valid token of each family, where every token was previously denied. ([#290](https://github.com/praxis-proxy/policy/issues/290))
+
 - **Deadline-aware HTTP retries.** Public `execute_with_retry` now bounds each
   attempt, shrinks later attempt budgets, and returns
   `HttpTransportError::Timeout` when an attempt or retry budget expires.
@@ -128,6 +132,8 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   ([#242](https://github.com/praxis-proxy/policy/issues/242))
 
 ### Security
+
+- **`identity/jwt` JWKS responses no longer reach logs.** A JWKS that fails to parse is reported by error category, line and column, without quoting the body. Unusable keys are named by at most 16 `kid`s, each clipped, with control characters escaped so a hostile key set cannot write log lines of its own. The 256 KiB JWKS ceiling is also checked by PPE on the returned body, so a host transport that ignores `max_response_bytes` cannot hand a larger body to the parser. ([#290](https://github.com/praxis-proxy/policy/issues/290))
 
 - **CEL acquired-metadata diagnostics are redacted.** Denials retain useful
   expression and type information without serializing metadata values,
