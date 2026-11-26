@@ -22,6 +22,7 @@ mod claim_map_e2e;
 mod dpop_e2e;
 mod jwks_url_e2e;
 mod jwt_e2e;
+mod oidc_discovery_docs;
 mod oidc_discovery_e2e;
 mod standard_preset_equivalence;
 
