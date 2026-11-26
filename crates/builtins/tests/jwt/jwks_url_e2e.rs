@@ -1482,3 +1482,111 @@ async fn a_refresh_revalidates_conditionally_and_a_304_keeps_the_keys() {
         r2.violation
     );
 }
+
+#[tokio::test]
+async fn a_token_naming_a_key_of_another_family_is_an_algorithm_mismatch() {
+    use p256::pkcs8::EncodePrivateKey as _;
+    use rsa::pkcs8::DecodePublicKey as _;
+
+    let public = RsaPublicKey::from_public_key_pem(&crate::common::keypair().public_pem)
+        .expect("public PEM");
+    let http = Arc::new(FakeTransport::new().json(
+        CERTS_PATH,
+        200,
+        &build_jwks_with_kid(&public, "rsa-key").to_string(),
+    ));
+    let mut cfg = resolver_config(&jwks_url());
+    cfg.config.as_mut().unwrap()["trusted_issuers"][0]["algorithms"] = json!(["RS256", "ES256"]);
+    let resolver = Arc::new(JwtIdentityResolver::new(cfg.clone()).expect("constructs"));
+    let mgr = Arc::new(PolicyEngine::default());
+    mgr.register_handler_for_names::<IdentityHook, _>(resolver, cfg, &[HOOK_IDENTITY_RESOLVE])
+        .unwrap();
+    install(&mgr, &http);
+    mgr.initialize().await.expect("initialize");
+
+    let ec_pem = p256::ecdsa::SigningKey::from_slice(&[0x42; 32])
+        .expect("a valid P-256 scalar")
+        .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
+        .expect("PEM");
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some("rsa-key".into());
+    let token = encode(
+        &header,
+        &json!({ "sub": "alice", "iss": ISS, "aud": AUD, "exp": now_unix() + 300 }),
+        &EncodingKey::from_ec_pem(ec_pem.as_bytes()).expect("EC key"),
+    )
+    .expect("sign JWT");
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("Authorization".into(), format!("Bearer {token}"));
+    let payload = IdentityPayload::new(token, TokenSource::Bearer)
+        .with_source_header("Authorization")
+        .with_headers(headers);
+
+    let (r, _) = mgr
+        .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, Extensions::default(), None)
+        .await;
+
+    assert!(
+        !r.continue_processing,
+        "an ES256 token cannot verify against an RSA key"
+    );
+    assert_eq!(
+        r.violation.expect("violation reported").code,
+        "auth.algorithm_mismatch",
+        "ES256 is accepted by the issuer, but not with the RSA key its kid names"
+    );
+}
+
+#[tokio::test]
+async fn an_oversized_jwks_refresh_keeps_the_last_good_keys() {
+    use rsa::pkcs8::DecodePublicKey as _;
+
+    let keys = crate::common::keypair();
+    let public = RsaPublicKey::from_public_key_pem(&keys.public_pem).expect("public PEM");
+    let mut oversized = build_jwks_with_kid(&public, "never-published");
+    oversized["padding"] = json!("p".repeat(300_000));
+    let http = Arc::new(
+        FakeTransport::new()
+            .json(CERTS_PATH, 200, &build_jwks(&public).to_string())
+            .json(CERTS_PATH, 200, &oversized.to_string()),
+    );
+    let mgr = engine_for(&http).await;
+    mgr.initialize().await.expect("initialize");
+
+    let (refused, _) = mgr
+        .invoke_named::<IdentityHook>(
+            HOOK_IDENTITY_RESOLVE,
+            unknown_kid_payload(&keys.private_pem),
+            Extensions::default(),
+            None,
+        )
+        .await;
+    let (held, _) = mgr
+        .invoke_named::<IdentityHook>(
+            HOOK_IDENTITY_RESOLVE,
+            valid_payload(&keys.private_pem),
+            Extensions::default(),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        http.call_count_for(CERTS_PATH),
+        2,
+        "the unknown kid fetched the oversized body"
+    );
+    assert_eq!(
+        http.last_request().expect("a request").max_response_bytes,
+        262_144,
+        "the 256 KiB ceiling still travels on the request"
+    );
+    assert!(
+        !refused.continue_processing,
+        "the kid published only in the refused body stays unknown"
+    );
+    assert!(
+        held.continue_processing,
+        "the refused body leaves the last good keys in place: {:?}",
+        held.violation
+    );
+}

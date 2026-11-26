@@ -1568,6 +1568,17 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_jwks_over_the_ceiling_is_refused_even_when_the_transport_ignores_it() {
+        let mut big = json!({ "keys": [rsa_jwk()] });
+        big["padding"] = json!("p".repeat(JWKS_MAX_BYTES));
+
+        let e = jwks_err(&big.to_string(), 200).await;
+
+        assert!(e.contains("ceiling"), "the refusal names the ceiling: {e}");
+        assert!(e.contains(&JWKS_MAX_BYTES.to_string()), "and its size: {e}");
+    }
+
     // ---- the other key sources --------------------------------------------
 
     /// `JwksUrl` cannot be resolved synchronously, and the error says which call
