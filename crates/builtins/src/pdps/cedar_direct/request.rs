@@ -62,17 +62,31 @@ use praxis_policy_apl_core::step::{PdpCall, PdpError};
 use serde_json::{Map, Value, json};
 
 /// Context keys that carry structured input, so the operator may not set them.
-const RESERVED_CONTEXT_KEYS: &[&str] = &["llm", "args"];
+const RESERVED_CONTEXT_KEYS: &[&str] = &["llm", "args", "metadata", "metadata_provenance"];
 
 /// Object keys Cedar's JSON form reads as escapes rather than record fields.
 const CEDAR_ESCAPE_KEYS: &[&str] = &["__entity", "__extn", "__expr"];
 
 /// Structured input converted to Cedar-safe JSON. Deliberately not `Debug`,
 /// so its values cannot reach a log line.
-#[derive(Default)]
 pub struct CedarStructured {
     llm_request: Option<Value>,
     args: Option<Value>,
+    metadata: Value,
+    metadata_provenance: Value,
+    include_metadata: bool,
+}
+
+impl Default for CedarStructured {
+    fn default() -> Self {
+        Self {
+            llm_request: None,
+            args: None,
+            metadata: Value::Object(Map::new()),
+            metadata_provenance: Value::Object(Map::new()),
+            include_metadata: true,
+        }
+    }
 }
 
 /// Structured input held back because it contains a Cedar escape key.
@@ -85,14 +99,73 @@ pub struct Withheld;
 ///
 /// Returns [`Withheld`] when any object in either entry has a Cedar escape key.
 pub fn sanitize_structured(structured: &StructuredInput) -> Result<CedarStructured, Withheld> {
+    sanitize_selected(structured, true, true)
+}
+
+/// Sanitize payload input without inspecting acquired metadata.
+///
+/// # Errors
+///
+/// Returns [`Withheld`] when payload input contains a Cedar escape key.
+pub fn sanitize_payload(structured: &StructuredInput) -> Result<CedarStructured, Withheld> {
+    sanitize_selected(structured, true, false)
+}
+
+fn sanitize_selected(
+    structured: &StructuredInput,
+    include_payload: bool,
+    include_metadata: bool,
+) -> Result<CedarStructured, Withheld> {
     let convert = |entry: Option<&std::sync::Arc<Value>>| match entry {
         Some(value) => sanitize(value),
         None => Ok(None),
     };
     Ok(CedarStructured {
-        llm_request: convert(structured.llm_request())?,
-        args: convert(structured.args())?,
+        llm_request: include_payload
+            .then(|| convert(structured.llm_request()))
+            .transpose()?
+            .flatten(),
+        args: include_payload
+            .then(|| convert(structured.args()))
+            .transpose()?
+            .flatten(),
+        metadata: include_metadata
+            .then(|| structured.cedar_metadata())
+            .flatten()
+            .map_or_else(
+                || Ok(Value::Object(Map::new())),
+                |value| {
+                    sanitize(value).map(|value| value.unwrap_or_else(|| Value::Object(Map::new())))
+                },
+            )?,
+        metadata_provenance: include_metadata
+            .then(|| structured.metadata_provenance())
+            .flatten()
+            .map_or_else(
+                || Ok(Value::Object(Map::new())),
+                |value| {
+                    sanitize(value).map(|value| value.unwrap_or_else(|| Value::Object(Map::new())))
+                },
+            )?,
+        include_metadata,
     })
+}
+
+/// Sanitize only acquired metadata when payload input is disabled by schema.
+///
+/// # Errors
+///
+/// Returns [`Withheld`] when acquired metadata contains a Cedar escape key.
+pub fn sanitize_metadata(structured: &StructuredInput) -> Result<CedarStructured, Withheld> {
+    sanitize_selected(structured, false, true)
+}
+
+/// Produce an empty projection without inspecting any structured input.
+pub fn omit_structured() -> CedarStructured {
+    CedarStructured {
+        include_metadata: false,
+        ..CedarStructured::default()
+    }
 }
 
 /// Sanitize one JSON value. `None` means the value was `null` and is dropped.
@@ -249,6 +322,13 @@ pub fn parse<'a>(
         return Err(PdpError::Dispatch(reserved_key_message(key)));
     }
     if let Value::Object(root) = &mut merged {
+        if structured.include_metadata {
+            root.insert("metadata".to_owned(), structured.metadata);
+            root.insert(
+                "metadata_provenance".to_owned(),
+                structured.metadata_provenance,
+            );
+        }
         if let Some(request) = structured.llm_request {
             let llm = root.entry("llm").or_insert_with(|| json!({}));
             if let Value::Object(fields) = llm {
@@ -482,6 +562,8 @@ mod tests {
     fn absent_entries_stay_absent() {
         let out = sanitize_structured(&StructuredInput::default()).unwrap();
         assert!(out.llm_request.is_none() && out.args.is_none());
+        assert_eq!(out.metadata, json!({}));
+        assert_eq!(out.metadata_provenance, json!({}));
     }
 
     fn call(args: &str) -> PdpCall {

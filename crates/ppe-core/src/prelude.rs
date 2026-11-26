@@ -78,6 +78,10 @@ pub use crate::hooks::{Extensions, HookHandler, HookTypeDef, PluginPayload, Plug
 pub use crate::metadata::{
     HOOK_METADATA_FETCH, MetadataFetchHook, MetadataFetchRequest, MetadataFetchResult,
 };
+pub use crate::metadata_callout::{
+    CalloutObserver, MetadataCalloutAuditEvent, MetadataCalloutErrorClass,
+    MetadataCalloutErrorCode, MetadataCircuitBreakerTransition,
+};
 
 // Construction. A plugin implements `PluginFactory` and returns a
 // `PluginInstance`; `TypedHandlerAdapter` is how a typed `HookHandler` is

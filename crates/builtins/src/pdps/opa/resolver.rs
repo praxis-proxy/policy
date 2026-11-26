@@ -61,7 +61,7 @@ use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, P
 use crate::pdps::opa::decision::{Mapped, map_query_result};
 use crate::pdps::opa::error::BuildError;
 use crate::pdps::opa::input::build_rego_input;
-use crate::pdps::opa::metadata::{last_module_references_metadata, source_references_metadata};
+use crate::pdps::opa::metadata::MetadataDependencies;
 use crate::pdps::stack;
 
 /// What to do when a query errors at runtime or yields a value that carries no
@@ -118,8 +118,8 @@ pub struct OpaResolver {
     /// Upper bound on `inline_cache`. New entries past this are rejected (never
     /// evicted), per the workspace cache convention.
     max_cache_entries: usize,
-    /// Whether any configured global module may read `input.metadata`.
-    global_requires_metadata: bool,
+    /// Per-rule metadata dependencies across configured global modules.
+    metadata_dependencies: MetadataDependencies,
 }
 
 impl OpaResolver {
@@ -200,7 +200,6 @@ impl OpaResolver {
 
         let mut engine = Engine::new();
         let mut policy_sources = HashSet::from([INLINE_MODULE_NAME.to_owned()]);
-        let mut global_requires_metadata = false;
 
         // 1. Global modules — inline texts first, then files. Each gets a
         //    unique virtual name so same-package modules merge (Rego
@@ -213,7 +212,6 @@ impl OpaResolver {
                     name: name.clone(),
                     cause: e.to_string(),
                 })?;
-            global_requires_metadata |= last_module_references_metadata(&mut engine);
             policy_sources.insert(name);
         }
         for path in read_string_seq(map, "module_files")? {
@@ -227,7 +225,6 @@ impl OpaResolver {
                     name: path.clone(),
                     cause: e.to_string(),
                 })?;
-            global_requires_metadata |= last_module_references_metadata(&mut engine);
             policy_sources.insert(path);
         }
         // `add_policy` returns a lossy dot-joined string, so compare decoded
@@ -263,6 +260,8 @@ impl OpaResolver {
             merge_data(&mut engine, &path, &parsed)?;
         }
 
+        let metadata_dependencies = MetadataDependencies::from_engine(&mut engine);
+
         Ok(Self {
             dialect: PdpDialect::Opa,
             on_error,
@@ -273,7 +272,7 @@ impl OpaResolver {
             inline_cache: RwLock::new(HashMap::new()),
             max_cache_entries: read_usize(map, "max_cache_entries")?
                 .unwrap_or(DEFAULT_MAX_CACHE_ENTRIES),
-            global_requires_metadata,
+            metadata_dependencies,
         })
     }
 
@@ -450,14 +449,28 @@ impl PdpResolver for OpaResolver {
 
     fn requires_metadata(&self, call: &PdpCall) -> bool {
         let Some(args) = call.args.as_mapping() else {
-            return self.global_requires_metadata || call.references_metadata();
+            return true;
         };
-        let inline_requires_metadata = args
-            .get(serde_yaml::Value::String("module".to_owned()))
+        let Some(query) = args
+            .get(serde_yaml::Value::String("query".to_owned()))
             .and_then(serde_yaml::Value::as_str)
-            .is_some_and(source_references_metadata);
-
-        self.global_requires_metadata || inline_requires_metadata
+        else {
+            return true;
+        };
+        let inline = args
+            .get(serde_yaml::Value::String("module".to_owned()))
+            .and_then(serde_yaml::Value::as_str);
+        let Some(inline) = inline else {
+            return self.metadata_dependencies.query_requires_metadata(query);
+        };
+        let mut engine = self.base_engine.clone();
+        if engine
+            .add_policy(INLINE_MODULE_NAME.to_owned(), inline.to_owned())
+            .is_err()
+        {
+            return true;
+        }
+        MetadataDependencies::from_engine(&mut engine).query_requires_metadata(query)
     }
 
     async fn evaluate(&self, call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
@@ -1035,9 +1048,13 @@ mod eval_tests {
 whole := input
 deny contains "suspended" if whole.metadata.account.suspended"#,
             r#"package authz
+deny contains "suspended" if { first := input; second := first; second.metadata.account.suspended }"#,
+            r#"package authz
 deny contains "suspended" if { some k, v in input; k == "metadata"; v.account.suspended }"#,
             r#"package authz
 deny contains "suspended" if { o := {"i": input}; o.i.metadata.account.suspended }"#,
+            r#"package authz
+deny contains "suspended" if { values := [x | x := input]; values[0].metadata.account.suspended }"#,
         ] {
             let resolver = resolver(&[source], OnError::Deny);
 
@@ -1046,6 +1063,162 @@ deny contains "suspended" if { o := {"i": input}; o.i.metadata.account.suspended
                 "whole-input use must conservatively require metadata: {source}"
             );
         }
+    }
+
+    #[test]
+    fn global_metadata_dependency_is_scoped_to_the_selected_rule_graph() {
+        let resolver = resolver(
+            &[
+                "package helpers\nmetadata_gate if input.metadata.account.active",
+                "package authz\nconstant := true\nallow if data.helpers.metadata_gate",
+            ],
+            OnError::Deny,
+        );
+
+        assert!(
+            !resolver.requires_metadata(&call("data.authz.constant", None)),
+            "an independent constant rule must not inherit another rule's metadata dependency"
+        );
+        assert!(
+            resolver.requires_metadata(&call("data.authz.allow", None)),
+            "the selected rule must inherit metadata use from a reachable cross-module helper"
+        );
+    }
+
+    #[test]
+    fn dynamic_document_reference_inherits_descendant_metadata_dependency() {
+        let resolver = resolver(
+            &[
+                "package helpers\nsuspended if input.metadata.account.suspended",
+                "package authz\nconstant := true\ndeny contains \"suspended\" if data.helpers[input.subject.id]",
+            ],
+            OnError::Deny,
+        );
+
+        assert!(
+            !resolver.requires_metadata(&call("data.authz.constant", None)),
+            "an independent rule remains metadata-free"
+        );
+        assert!(
+            resolver.requires_metadata(&call("data.authz.deny", None)),
+            "a dynamic document lookup must include declared descendant rules"
+        );
+    }
+
+    #[test]
+    fn child_queries_inherit_metadata_from_object_rules() {
+        let resolver = resolver(
+            &[
+                r#"package helpers
+policy := {"deny": [m | input.metadata.account.suspended; m := "suspended"]}"#,
+                "package authz\ndeny := data.helpers.policy.deny",
+            ],
+            OnError::Deny,
+        );
+
+        for query in ["data.helpers.policy.deny", "data.authz.deny"] {
+            assert!(
+                resolver.requires_metadata(&call(query, None)),
+                "a query or reference below an object rule must inherit its metadata: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_variables_and_constant_helpers_do_not_grant_unrelated_metadata() {
+        let resolver = resolver(
+            &[
+                "package helpers\nconstant := {\"active\": true}\nmetadata_gate if input.metadata.account.active",
+                "package authz\nmetadata_gate if input.metadata.account.active\nallow if { some r in input.roles; r == \"admin\" }\nhelper_allow if data.helpers.constant.active",
+            ],
+            OnError::Deny,
+        );
+
+        for query in ["data.authz.allow", "data.authz.helper_allow"] {
+            assert!(
+                !resolver.requires_metadata(&call(query, None)),
+                "unrelated package rules must not grant metadata: {query}"
+            );
+        }
+    }
+
+    #[test]
+    fn function_argument_bindings_do_not_read_same_named_package_rules() {
+        for argument in ["suspended", "[suspended]", "{\"active\": suspended}"] {
+            let resolver = resolver(
+                &[&format!(
+                    "package authz\nsuspended if input.metadata.account.suspended\naccept({argument}) := true\nallow := accept(false)"
+                )],
+                OnError::Deny,
+            );
+
+            assert!(
+                !resolver.requires_metadata(&call("data.authz.allow", None)),
+                "function argument bindings must not inherit package-rule dependencies: {argument}"
+            );
+        }
+    }
+
+    #[test]
+    fn function_argument_references_keep_their_metadata_dependencies() {
+        let resolver = resolver(
+            &[
+                "package helpers\nsuspended if input.metadata.account.suspended",
+                "package authz\naccept(data.helpers.suspended) := true\nallow := accept(true)",
+            ],
+            OnError::Deny,
+        );
+
+        assert!(
+            resolver.requires_metadata(&call("data.authz.allow", None)),
+            "a function argument that reads a helper must retain that helper's metadata dependency"
+        );
+    }
+
+    #[test]
+    fn parent_document_query_includes_indexed_metadata_rules() {
+        let indexed = resolver(
+            &[r#"package authz
+default decision["allow"] := false
+decision["allow"] := true if input.metadata.account.active"#],
+            OnError::Deny,
+        );
+        let exact = resolver(
+            &[r#"package authz
+default decision := {"allow": false}
+decision := {"allow": true} if input.metadata.account.active"#],
+            OnError::Deny,
+        );
+
+        assert!(
+            indexed.requires_metadata(&call("data.authz.decision", None)),
+            "a document query must include indexed child rules"
+        );
+        assert!(
+            exact.requires_metadata(&call("data.authz.decision", None)),
+            "an exact complete-document rule remains covered"
+        );
+    }
+
+    #[test]
+    fn dependency_paths_preserve_literal_dot_components() {
+        let resolver = resolver(
+            &[
+                r#"package graph["a.b"]
+allow if input.metadata.account.active"#,
+                "package graph.a.b\nallow := true",
+            ],
+            OnError::Deny,
+        );
+
+        assert!(
+            !resolver.requires_metadata(&call("data.graph.a.b.allow", None)),
+            "a dotted package must not alias a literal-dot package component"
+        );
+        assert!(
+            resolver.requires_metadata(&call("data.graph[\"a.b\"].allow", None)),
+            "an unsupported query spelling must retain the conservative grant"
+        );
     }
 
     #[test]
@@ -1134,6 +1307,33 @@ msg := "not a decision"
             .await
             .unwrap();
         assert_eq!(out.decision, Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn direct_api_preserves_bag_metadata_and_structured_input_overrides_it() {
+        let r = resolver(
+            &["package authz\ndefault allow := false\nallow if input.metadata.account.active"],
+            OnError::Deny,
+        );
+        let mut input = bag("alice");
+        input.set("metadata.account.active", true);
+
+        let direct = r
+            .evaluate(&call("data.authz.allow", None), &input)
+            .await
+            .unwrap();
+        assert_eq!(direct.decision, Decision::Allow);
+
+        let structured = StructuredInput::default().with_metadata(
+            std::sync::Arc::new(serde_json::json!({"account": {"active": false}})),
+            std::sync::Arc::new(serde_json::json!({})),
+            std::sync::Arc::new(serde_json::json!({})),
+        );
+        let overridden = r
+            .evaluate_structured(&call("data.authz.allow", None), &input, &structured)
+            .await
+            .unwrap();
+        assert!(matches!(overridden.decision, Decision::Deny { .. }));
     }
 
     #[tokio::test]

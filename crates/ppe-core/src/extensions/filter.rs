@@ -11,8 +11,6 @@ use std::sync::Arc;
 
 use super::container::Extensions;
 use super::http::HttpExtension;
-use crate::host::HttpTransportSlot;
-
 use super::security::{SecurityExtension, SubjectExtension};
 use super::tiers::{AccessPolicy, Capability, MutabilityTier, SlotPolicy};
 
@@ -325,6 +323,7 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
         mcp: extensions.mcp.clone(),
         meta: extensions.meta.clone(),
         custom: extensions.custom.clone(),
+        http_transport: extensions.http_transport.detached(),
         // Pass through like `custom` (ungated in v1): the APL engine
         // writes this output slot, and passing it through keeps a later
         // plugin's `merge_owned` from clobbering it back to `None`.
@@ -348,7 +347,7 @@ pub fn filter_extensions(extensions: &Extensions, capabilities: &HashSet<String>
         filtered.http_transport = if capabilities.contains(&cap_str(Capability::PerformHttp)) {
             extensions.http_transport.rebuilt()
         } else {
-            HttpTransportSlot::withheld()
+            extensions.http_transport.withheld_rebuilt()
         };
     }
 
@@ -612,7 +611,7 @@ mod tests {
     // tell an operator the host forgot to wire a transport when in fact
     // their own config withheld it.
 
-    use crate::host::{HostServices as _, HttpRequestError, ServiceError};
+    use crate::host::{HostServices as _, HttpRequestError, HttpTransportSlot, ServiceError};
     use crate::http::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
     use async_trait::async_trait;
 

@@ -34,14 +34,15 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use chrono::Utc;
 use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
 use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload, ToolCall};
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::executor::PipelineResult;
 use praxis_policy_core::extensions::{
-    HttpExtension, LlmRequestDocument, MetaExtension, SecurityExtension, SubjectExtension,
-    SubjectType,
+    AcquiredFacts, HttpExtension, LlmRequestDocument, MetaExtension, MetadataCacheDisposition,
+    SecurityExtension, SubjectExtension, SubjectType,
 };
 use praxis_policy_core::hooks::payload::Extensions;
 use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HttpHook, HttpPayload};
@@ -196,6 +197,144 @@ async fn config_declared_cedar_pdp_denies_non_reader() {
     );
 }
 
+#[tokio::test]
+async fn cedar_policy_context_metadata_is_granted_and_can_forbid() {
+    let yaml = route_yaml(
+        "tool: get_document",
+        r#"
+@id("allow")
+permit(principal, action, resource);
+@id("suspended")
+forbid(principal, action, resource)
+when { context.metadata has account && context.metadata.account.suspended };
+"#,
+        "",
+    );
+    let mgr = build_manager_with_yaml(&yaml).await.expect("config loads");
+    let mut ext = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_document"))),
+        security: Some(Arc::new(security_with_roles("alice", &[]))),
+        ..Default::default()
+    };
+    ext.install_metadata(
+        "account",
+        "metadata/http",
+        AcquiredFacts::success(
+            serde_json::json!({"suspended": true}),
+            Utc::now(),
+            MetadataCacheDisposition::Miss,
+        ),
+    )
+    .expect("trusted host metadata installs");
+
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), ext, None)
+        .await;
+    assert!(
+        !result.continue_processing,
+        "the Cedar forbid must see metadata"
+    );
+    assert!(
+        result
+            .violation
+            .as_ref()
+            .is_some_and(|violation| violation.reason == "denied by Cedar policy: suspended"),
+        "the metadata-backed forbid should be attributed: {:?}",
+        result.violation
+    );
+}
+
+#[tokio::test]
+async fn cedar_record_dot_field_does_not_hide_a_metadata_dependency() {
+    let yaml = route_yaml(
+        "tool: get_document",
+        r#"
+@id("allow")
+permit(principal, action, resource);
+@id("suspended")
+forbid(principal, action, resource)
+when { ({".": true, "m": context.metadata}).m has account };
+"#,
+        "",
+    );
+    let mgr = build_manager_with_yaml(&yaml).await.expect("config loads");
+    let mut ext = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_document"))),
+        security: Some(Arc::new(security_with_roles("alice", &[]))),
+        ..Default::default()
+    };
+    ext.install_metadata(
+        "account",
+        "metadata/http",
+        AcquiredFacts::success(
+            serde_json::json!({"suspended": true}),
+            Utc::now(),
+            MetadataCacheDisposition::Miss,
+        ),
+    )
+    .expect("trusted host metadata installs");
+
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), ext, None)
+        .await;
+    assert!(
+        !result.continue_processing,
+        "a record field named `.` must not hide the sibling metadata read"
+    );
+    assert_eq!(
+        result
+            .violation
+            .as_ref()
+            .map(|violation| violation.reason.as_str()),
+        Some("denied by Cedar policy: suspended"),
+        "the record-dot regression must be denied by the suspended forbid"
+    );
+}
+
+#[tokio::test]
+async fn parenthesized_cedar_provenance_read_is_granted_without_a_fetch() {
+    let yaml = route_yaml(
+        "tool: get_document",
+        r#"
+@id("allow")
+permit(principal, action, resource);
+@id("has-provenance")
+forbid(principal, action, resource)
+when { (context).metadata_provenance has account };
+"#,
+        "",
+    );
+    let mgr = build_manager_with_yaml(&yaml).await.expect("config loads");
+    let mut ext = Extensions {
+        meta: Some(Arc::new(meta_for_tool("get_document"))),
+        security: Some(Arc::new(security_with_roles("alice", &[]))),
+        ..Default::default()
+    };
+    ext.install_metadata(
+        "account",
+        "metadata/http",
+        AcquiredFacts::success(
+            serde_json::json!({"active": true}),
+            Utc::now(),
+            MetadataCacheDisposition::Miss,
+        ),
+    )
+    .expect("trusted host metadata installs");
+
+    let (result, _bg) = mgr
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(), ext, None)
+        .await;
+
+    assert!(
+        result
+            .violation
+            .as_ref()
+            .is_some_and(|violation| violation.reason == "denied by Cedar policy: has-provenance"),
+        "the parsed provenance read must receive installed metadata: {:?}",
+        result.violation
+    );
+}
+
 // Structured input: the request document on `llm:` routes and native `args` on
 // `tool:` routes, sanitized into the Cedar context.
 
@@ -255,6 +394,8 @@ global:
           principal: User,
           resource: Document,
           context: {{
+            metadata?: {{}},
+            metadata_provenance?: {{}},
             args?: {{}},
             llm?: {{ request: {{}} }},
             meta?: {{ entity_type?: String, entity_name?: String, scope?: String, tags?: Set<String> }},
@@ -364,7 +505,7 @@ global:
         action read appliesTo {
           principal: User,
           resource: Document,
-          context: { llm?: { request: {} } },
+          context: { metadata?: {}, metadata_provenance?: {}, llm?: { request: {} } },
         };
   authorization:
     pre_invocation:

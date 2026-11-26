@@ -4,6 +4,7 @@
 #![allow(
     missing_docs,
     clippy::expect_used,
+    clippy::panic,
     clippy::unwrap_used,
     reason = "integration test fixtures"
 )]
@@ -15,30 +16,40 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use praxis_policy_apl_core::route::StructuredInput;
 use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
 use praxis_policy_apl_core::{AttributeBag, Decision};
 use praxis_policy_apl_runtime::{AplOptions, register_apl};
+use praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
 use praxis_policy_core::cmf::enums::Role;
 use praxis_policy_core::cmf::{CmfHook, ContentPart, Message, MessagePayload, ToolCall};
 use praxis_policy_core::context::PluginContext;
 use praxis_policy_core::engine::PolicyEngine;
 use praxis_policy_core::error::{PluginError, PluginViolation};
 use praxis_policy_core::extensions::{
-    AcquiredFacts, Extensions, MetaExtension, MetadataCacheDisposition,
+    AcquiredFacts, Extensions, HttpExtension, MetaExtension, MetadataCacheDisposition,
 };
 use praxis_policy_core::factory::{PluginFactory, PluginInstance};
 use praxis_policy_core::hooks::{HookHandler, PluginResult, TypedHandlerAdapter};
+use praxis_policy_core::host::HostServices as _;
+use praxis_policy_core::http::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
+use praxis_policy_core::http_hook::{HOOK_HTTP_REQUEST, HttpHook, HttpPayload};
+use praxis_policy_core::http_retry::RetryPolicy;
 use praxis_policy_core::metadata::{MetadataFetchHook, MetadataFetchRequest};
+use praxis_policy_core::metadata_callout::MetadataCalloutErrorCode;
 use praxis_policy_core::plugin::{Plugin, PluginConfig};
 
 #[derive(Clone, Copy)]
 enum SourceResult {
     Success,
+    Structured,
     Error,
     ReservedError,
     Hang,
     NoRecord,
     Deny,
+    Panic,
+    Http,
 }
 
 struct Source {
@@ -56,7 +67,7 @@ impl HookHandler<MetadataFetchHook> for Source {
     async fn handle(
         &self,
         request: &MetadataFetchRequest,
-        _extensions: &Extensions,
+        extensions: &Extensions,
         _context: &mut PluginContext,
     ) -> PluginResult<MetadataFetchRequest> {
         let facts = match self.result {
@@ -67,13 +78,41 @@ impl HookHandler<MetadataFetchHook> for Source {
                     "account source refused the lookup",
                 ));
             },
+            SourceResult::Panic => panic!("metadata source panicked"),
+            SourceResult::Http => {
+                let response = extensions
+                    .http_request(
+                        HttpRequest::get("https://metadata.example/account")
+                            .timeout(Duration::from_secs(60))
+                            .connect_timeout(Duration::from_secs(50)),
+                        RetryPolicy::none(),
+                    )
+                    .await
+                    .expect("test metadata callout should succeed");
+                AcquiredFacts::success(
+                    serde_json::json!({"status": response.status}),
+                    Utc::now(),
+                    MetadataCacheDisposition::Disabled,
+                )
+            },
             SourceResult::Success => AcquiredFacts::success(
                 serde_json::json!({"active": true}),
                 Utc::now(),
                 MetadataCacheDisposition::Disabled,
             ),
+            SourceResult::Structured => AcquiredFacts::success(
+                serde_json::json!({
+                    "active": true,
+                    "profile": {
+                        "details": {"tier": "gold"},
+                        "roles": ["admin", "reader"]
+                    }
+                }),
+                Utc::now(),
+                MetadataCacheDisposition::Disabled,
+            ),
             SourceResult::Error => AcquiredFacts::error(
-                "metadata.upstream_error",
+                MetadataCalloutErrorCode::UpstreamError,
                 MetadataCacheDisposition::Disabled,
             ),
             SourceResult::ReservedError => AcquiredFacts::error(
@@ -105,6 +144,22 @@ impl HookHandler<CmfHook> for Source {
 }
 
 struct SourceFactory(SourceResult);
+
+#[derive(Debug, Default)]
+struct DeadlineTransport {
+    request: std::sync::Mutex<Option<HttpRequest>>,
+}
+
+#[async_trait]
+impl HttpTransport for DeadlineTransport {
+    async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
+        *self
+            .request
+            .lock()
+            .expect("request lock should not be poisoned") = Some(request);
+        Ok(HttpResponse::new(200, Default::default()))
+    }
+}
 
 impl PluginFactory for SourceFactory {
     fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
@@ -197,6 +252,22 @@ fn extensions() -> Extensions {
     }
 }
 
+fn extensions_with_headers(request: &[(&str, &str)], response: &[(&str, &str)]) -> Extensions {
+    let mut extensions = extensions();
+    extensions.http = Some(Arc::new(HttpExtension {
+        request_headers: request
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+        response_headers: response
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+        ..HttpExtension::default()
+    }));
+    extensions
+}
+
 /// Load an engine with one controlled metadata source and the supplied policy.
 async fn engine(yaml: &str, result: SourceResult) -> Arc<PolicyEngine> {
     let engine = Arc::new(PolicyEngine::default());
@@ -216,18 +287,41 @@ impl PdpResolver for MetadataPdp {
     }
 
     async fn evaluate(&self, _call: &PdpCall, bag: &AttributeBag) -> Result<PdpDecision, PdpError> {
-        let decision = if bag.get_bool("metadata.account.active") == Some(true) {
-            Decision::Allow
-        } else {
-            Decision::Deny {
-                reason: Some("fetched metadata missing".to_owned()),
-                rule_source: "metadata-check".to_owned(),
-            }
+        let _flat_metadata_is_present = bag.get_bool("metadata.account.active") == Some(true);
+        let decision = Decision::Deny {
+            reason: Some("structured PDP path was not used".to_owned()),
+            rule_source: "metadata-check".to_owned(),
         };
         Ok(PdpDecision {
             decision,
             diagnostics: Vec::new(),
         })
+    }
+
+    async fn evaluate_structured(
+        &self,
+        _call: &PdpCall,
+        bag: &AttributeBag,
+        structured: &StructuredInput,
+    ) -> Result<PdpDecision, PdpError> {
+        let projected = structured
+            .metadata()
+            .and_then(|metadata| metadata.pointer("/account/active"))
+            .and_then(serde_json::Value::as_bool);
+        if bag.get_bool("metadata.account.active") == Some(true) && projected == Some(true) {
+            Ok(PdpDecision {
+                decision: Decision::Allow,
+                diagnostics: Vec::new(),
+            })
+        } else {
+            Ok(PdpDecision {
+                decision: Decision::Deny {
+                    reason: Some("structured fetched metadata missing".to_owned()),
+                    rule_source: "metadata-check".to_owned(),
+                },
+                diagnostics: Vec::new(),
+            })
+        }
     }
 }
 
@@ -304,6 +398,458 @@ routes:
     assert!(
         result.continue_processing,
         "PDP should see the freshly fetched account record"
+    );
+}
+
+#[tokio::test]
+async fn metadata_assertions_require_a_reachable_prior_fetch() {
+    let engine = Arc::new(PolicyEngine::default());
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            "
+engine_settings:
+  dispatch: policy
+routes:
+  - tool: check_account
+    assertions:
+      request:
+        headers:
+          - name: x-account-active
+            from: metadata.account.active
+    authorization:
+      pre_invocation: [allow]
+",
+        )
+        .expect_err("an assertion cannot read a source the route never fetches");
+    assert!(error.to_string().contains("fetch(account)"), "{error}");
+}
+
+#[tokio::test]
+async fn metadata_assertions_accept_a_conditional_prior_fetch() {
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(
+        "test-source",
+        Box::new(SourceFactory(SourceResult::Success)),
+    );
+    register_apl(&engine, AplOptions::in_process());
+    engine
+        .load_config_yaml(
+            "
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+routes:
+  - tool: check_account
+    assertions:
+      request:
+        headers:
+          - name: x-account-active
+            from: metadata.account.active
+            on_missing: omit
+    authorization:
+      pre_invocation:
+        - when: args.fetch
+          do: fetch(account)
+",
+        )
+        .expect("conditional absence is handled by on_missing");
+}
+
+#[tokio::test]
+async fn metadata_assertions_render_nested_values_in_both_directions() {
+    let engine = engine(
+        r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+routes:
+  - tool: check_account
+    assertions:
+      request:
+        headers:
+          - name: x-account-details
+            from: metadata.account.profile.details
+            encode: json
+          - name: x-account-roles
+            from: metadata.account.profile.roles
+            encode: csv
+          - name: x-account-roles-json
+            from: metadata.account.profile.roles
+            encode: json
+          - name: x-account-first-role
+            from: metadata.account.profile.roles.0
+      response:
+        headers:
+          - name: x-account-profile
+            from: metadata.account.profile
+            encode: json
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        SourceResult::Structured,
+    )
+    .await;
+    let (request_result, _) = engine
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            payload(true),
+            extensions_with_headers(
+                &[
+                    ("X-Account-Details", "spoofed"),
+                    ("x-account-details", "spoofed-again"),
+                ],
+                &[("x-account-profile", "upstream-spoofed")],
+            ),
+            None,
+        )
+        .await;
+    assert!(
+        request_result.continue_processing,
+        "request projection should allow: {:?}",
+        request_result.violation
+    );
+    let request_extensions = request_result
+        .modified_extensions
+        .expect("fetch and request assertions modify extensions");
+    let request_headers = &request_extensions
+        .http
+        .as_deref()
+        .expect("an HTTP extension")
+        .request_headers;
+    assert_eq!(
+        request_headers.get("x-account-details").map(String::as_str),
+        Some(r#"{"tier":"gold"}"#)
+    );
+    assert_eq!(
+        request_headers.get("x-account-roles").map(String::as_str),
+        Some("admin,reader")
+    );
+    assert_eq!(
+        request_headers
+            .get("x-account-roles-json")
+            .map(String::as_str),
+        Some(r#"["admin","reader"]"#)
+    );
+    assert_eq!(
+        request_headers
+            .get("x-account-first-role")
+            .map(String::as_str),
+        Some("admin")
+    );
+    assert_eq!(
+        request_headers
+            .keys()
+            .filter(|name| name.eq_ignore_ascii_case("x-account-details"))
+            .count(),
+        1,
+        "all spoofed casings must be removed before injection: {request_headers:?}"
+    );
+
+    let (response_result, _) = engine
+        .invoke_named::<CmfHook>(
+            "cmf.tool_post_invoke",
+            payload(true),
+            request_extensions,
+            None,
+        )
+        .await;
+    assert!(
+        response_result.continue_processing,
+        "response projection should reuse request-acquired facts: {:?}",
+        response_result.violation
+    );
+    let response_extensions = response_result
+        .modified_extensions
+        .expect("response assertions modify extensions");
+    let response_headers = &response_extensions
+        .http
+        .as_deref()
+        .expect("an HTTP extension")
+        .response_headers;
+    assert_eq!(
+        response_headers
+            .get("x-account-profile")
+            .map(String::as_str),
+        Some(r#"{"details":{"tier":"gold"},"roles":["admin","reader"]}"#)
+    );
+}
+
+#[tokio::test]
+async fn skipped_conditional_fetch_obeys_each_missing_source_rule() {
+    for (on_missing, should_continue) in [("omit", true), ("deny", false)] {
+        let yaml = format!(
+            "
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+routes:
+  - tool: check_account
+    assertions:
+      request:
+        headers:
+          - name: x-account-active
+            from: metadata.account.active
+            on_missing: {on_missing}
+    authorization:
+      pre_invocation:
+        - when: args.fetch
+          do: fetch(account)
+"
+        );
+        let engine = engine(&yaml, SourceResult::Success).await;
+        let (result, _) = engine
+            .invoke_named::<CmfHook>(
+                "cmf.tool_pre_invoke",
+                payload(false),
+                extensions_with_headers(&[("X-Account-Active", "spoofed")], &[]),
+                None,
+            )
+            .await;
+
+        assert_eq!(
+            result.continue_processing, should_continue,
+            "on_missing={on_missing}: {:?}",
+            result.violation
+        );
+        let headers = &result
+            .modified_extensions
+            .as_ref()
+            .expect("the targeted spoof is removed")
+            .http
+            .as_deref()
+            .expect("an HTTP extension")
+            .request_headers;
+        assert!(
+            !headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("x-account-active")),
+            "on_missing={on_missing} must not retain a spoofed target: {headers:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn inherited_metadata_assertions_are_checked_against_the_effective_route() {
+    let engine = Arc::new(PolicyEngine::default());
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            "
+engine_settings:
+  dispatch: policy
+groups:
+  account-readers:
+    assertions:
+      request:
+        headers:
+          - name: x-account-active
+            from: metadata.account.active
+routes:
+  - tool: check_account
+    groups: account-readers
+    authorization:
+      pre_invocation: [allow]
+",
+        )
+        .expect_err("an inherited assertion still needs a fetch on the effective route");
+    assert!(error.to_string().contains("fetch(account)"), "{error}");
+}
+
+#[tokio::test]
+async fn entity_default_metadata_assertions_require_a_default_fetch() {
+    let engine = Arc::new(PolicyEngine::default());
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  defaults:
+    tool:
+      assertions:
+        request:
+          headers:
+            - name: x-account-active
+              from: metadata.account.active
+",
+        )
+        .expect_err("unmatched tool traffic cannot project metadata without a default fetch");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("global.defaults.tool catch-all"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("fetch(account)"), "{rendered}");
+}
+
+#[tokio::test]
+async fn default_fetch_cannot_satisfy_an_unmatched_http_assertion() {
+    let engine = Arc::new(PolicyEngine::default());
+    engine.register_factory(
+        "test-source",
+        Box::new(SourceFactory(SourceResult::Success)),
+    );
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+global:
+  defaults:
+    http:
+      authorization:
+        pre_invocation: ["fetch(account)"]
+      assertions:
+        request:
+          headers:
+            - name: x-account-active
+              from: metadata.account.active
+              on_missing: deny
+routes:
+  - http: /known
+    authorization:
+      pre_invocation: [allow]
+"#,
+        )
+        .expect_err("an unmatched request never executes the declared default fetch");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("global.defaults.http catch-all"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("fetch(account)"), "{rendered}");
+}
+
+#[tokio::test]
+async fn global_fetch_satisfies_default_assertions_for_unmatched_http() {
+    let engine = engine(
+        r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+global:
+  authorization:
+    pre_invocation: ["fetch(account)"]
+  defaults:
+    http:
+      assertions:
+        request:
+          headers:
+            - name: x-account-active
+              from: metadata.account.active
+              on_missing: deny
+routes:
+  - http: /known
+    authorization:
+      pre_invocation: [allow]
+"#,
+        SourceResult::Success,
+    )
+    .await;
+    for path in ["/known", "/other"] {
+        let extensions = Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some(ENTITY_HTTP.to_owned()),
+                entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
+                ..Default::default()
+            })),
+            http: Some(Arc::new(HttpExtension {
+                method: Some("GET".to_owned()),
+                path: Some(path.to_owned()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let (result, _background) = engine
+            .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, extensions, None)
+            .await;
+        assert!(
+            result.continue_processing,
+            "global fetch must run for {path}: {:?}",
+            result.violation
+        );
+        assert_eq!(
+            result
+                .modified_extensions
+                .as_ref()
+                .and_then(|extensions| extensions.http.as_deref())
+                .and_then(|http| http.request_headers.get("x-account-active"))
+                .map(String::as_str),
+            Some("true"),
+            "the default assertion must render the globally acquired fact for {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn assertion_only_route_still_requires_a_reachable_fetch() {
+    let engine = Arc::new(PolicyEngine::default());
+    register_apl(&engine, AplOptions::in_process());
+    let error = engine
+        .load_config_yaml(
+            "
+engine_settings:
+  dispatch: policy
+routes:
+  - tool: check_account
+    assertions:
+      request:
+        headers:
+          - name: x-account-active
+            from: metadata.account.active
+",
+        )
+        .expect_err("assertions run even when the route installs no APL handler");
+    assert!(error.to_string().contains("fetch(account)"), "{error}");
+}
+
+#[tokio::test]
+async fn global_catchall_metadata_assertions_require_a_global_fetch() {
+    let engine = Arc::new(PolicyEngine::default());
+    register_apl(&engine, AplOptions::in_process());
+    engine
+        .load_config_yaml("engine_settings:\n  dispatch: hooks\n")
+        .expect("the initial runtime snapshot loads");
+    let error = engine
+        .load_config_yaml(
+            "
+engine_settings:
+  dispatch: policy
+global:
+  assertions:
+    request:
+      headers:
+        - name: x-account-active
+          from: metadata.account.active
+",
+        )
+        .expect_err("an entity-less assertion cannot rely on a fetch from a named route");
+    let rendered = error.to_string();
+    assert!(rendered.contains("global catch-all"), "{rendered}");
+    assert!(rendered.contains("fetch(account)"), "{rendered}");
+    assert_eq!(
+        engine.dispatch_mode(),
+        praxis_policy_core::config::DispatchMode::Hooks,
+        "a failed preflight must leave the prior runtime snapshot active"
     );
 }
 
@@ -457,6 +1003,90 @@ routes:
             .contains("account source refused the lookup"),
         "{violation:?}"
     );
+}
+
+#[tokio::test]
+async fn ignored_source_panic_denies() {
+    let engine = engine(
+        r#"
+engine_settings:
+  dispatch: policy
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+    on_error: ignore
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        SourceResult::Panic,
+    )
+    .await;
+
+    let (result, _) = engine
+        .invoke_named::<CmfHook>("cmf.tool_pre_invoke", payload(true), extensions(), None)
+        .await;
+
+    assert!(!result.continue_processing, "a source panic must deny");
+    let violation = result.violation.expect("a source panic must deny");
+    assert_ne!(violation.code, "metadata.upstream_error");
+    assert!(
+        violation
+            .reason
+            .contains("returned no AcquiredFacts record"),
+        "{violation:?}"
+    );
+}
+
+#[tokio::test]
+async fn nested_metadata_callout_preserves_the_outer_invocation_deadline() {
+    let engine = Arc::new(PolicyEngine::default());
+    let transport = Arc::new(DeadlineTransport::default());
+    assert!(engine.set_http_transport(transport.clone()));
+    engine.register_factory("test-source", Box::new(SourceFactory(SourceResult::Http)));
+    register_apl(&engine, AplOptions::in_process());
+    engine
+        .load_config_yaml(
+            r#"
+engine_settings:
+  dispatch: policy
+  plugin_timeout: 30
+plugins:
+  - name: account
+    kind: test-source
+    hooks: [metadata.fetch]
+    capabilities: [perform_http]
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation: ["fetch(account)"]
+"#,
+        )
+        .expect("configuration should load");
+    engine.initialize().await.expect("engine should initialize");
+
+    let request_extensions = extensions().with_invocation_deadline(Duration::from_secs(10));
+    let (result, _) = engine
+        .invoke_named::<CmfHook>(
+            "cmf.tool_pre_invoke",
+            payload(true),
+            request_extensions,
+            None,
+        )
+        .await;
+
+    assert!(result.continue_processing, "metadata fetch should succeed");
+    let request = transport
+        .request
+        .lock()
+        .expect("request lock should not be poisoned")
+        .clone()
+        .expect("transport should receive one request");
+    assert!(request.timeout <= Duration::from_secs(10));
+    assert!(!request.timeout.is_zero());
+    assert_eq!(request.connect_timeout, Some(request.timeout));
 }
 
 #[tokio::test]

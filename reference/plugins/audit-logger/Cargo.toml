@@ -44,6 +44,9 @@ serde_json  = { workspace = true }
 tracing     = { workspace = true }
 
 [dev-dependencies]
+praxis-policy-apl-core = { workspace = true }
+praxis-policy-builtins = { workspace = true, default-features = false, features = ["cel"] }
+serde_yaml = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
 [lints]

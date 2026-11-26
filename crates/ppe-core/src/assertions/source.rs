@@ -24,6 +24,7 @@
 // would make the addressable set whatever the provider's credentials can reach,
 // with no list an operator could audit.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use serde_json::Value;
@@ -32,6 +33,7 @@ use crate::extensions::{Capability, Extensions};
 use crate::secrets::SecretStore;
 
 /// Why an authored string is not a source.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceRejection {
     /// The path names no addressable slot.
@@ -42,6 +44,12 @@ pub enum SourceRejection {
 
     /// The path names the claim map rather than one claim.
     ClaimRoot,
+
+    /// A metadata instance was named without an exact value path.
+    MetadataRoot,
+
+    /// Acquired provenance cannot be promoted into an asserted header.
+    MetadataProvenance,
 }
 
 /// A rejected source, carrying the path and why it was refused.
@@ -77,6 +85,16 @@ impl std::fmt::Display for SourceError {
                  provider's claim set cannot be rendered wholesale",
                 self.path
             ),
+            SourceRejection::MetadataRoot => write!(
+                f,
+                "`{}` names a whole metadata instance; write an exact `metadata.<instance>.<path>` source",
+                self.path
+            ),
+            SourceRejection::MetadataProvenance => write!(
+                f,
+                "`{}` names reserved metadata provenance, which is never an assertion source",
+                self.path
+            ),
         }
     }
 }
@@ -101,6 +119,7 @@ pub const ADDRESSABLE_SOURCES: &[&str] = &[
     "client.authorized_audiences",
     "client.claim.<name>",
     "secret.<name>",
+    "metadata.<instance>.<path>",
 ];
 
 /// The slot prefixes no entry may ever name, with the reason each is refused.
@@ -172,6 +191,32 @@ pub enum SourcePath {
     /// declared name rather than the value, so a resolved contract carries no
     /// secret material and neither does anything that clones or prints one.
     Secret(String),
+    /// One exact value path in an immutable acquired-facts record.
+    Metadata(MetadataPath),
+}
+
+/// A validated, non-empty path into one acquired-metadata instance.
+///
+/// Its fields are private so callers cannot construct a metadata source with
+/// no value path or with a reserved provenance segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataPath {
+    instance: String,
+    path: Vec<String>,
+}
+
+impl MetadataPath {
+    /// Producing plugin instance.
+    #[must_use]
+    pub fn instance(&self) -> &str {
+        &self.instance
+    }
+
+    /// Validated object fields or array indices below the instance.
+    #[must_use]
+    pub fn segments(&self) -> &[String] {
+        &self.path
+    }
 }
 
 impl SourcePath {
@@ -220,6 +265,27 @@ impl SourcePath {
         {
             return Ok(Self::Secret(name.to_owned()));
         }
+        if path == "metadata" || path == "metadata." {
+            return rejected(SourceRejection::MetadataRoot);
+        }
+        if let Some(rest) = path.strip_prefix("metadata.") {
+            let mut segments = rest.split('.');
+            let instance = segments.next().unwrap_or_default();
+            let value_path: Vec<String> = segments.map(str::to_owned).collect();
+            if instance.is_empty()
+                || value_path.is_empty()
+                || value_path.iter().any(String::is_empty)
+            {
+                return rejected(SourceRejection::MetadataRoot);
+            }
+            if value_path.iter().any(|segment| segment.starts_with('$')) {
+                return rejected(SourceRejection::MetadataProvenance);
+            }
+            return Ok(Self::Metadata(MetadataPath {
+                instance: instance.to_owned(),
+                path: value_path,
+            }));
+        }
         match path {
             "subject.id" => Ok(Self::SubjectId),
             "subject.type" => Ok(Self::SubjectType),
@@ -261,6 +327,9 @@ impl SourcePath {
             Self::ClientAudiences => "client.authorized_audiences".to_owned(),
             Self::ClientClaim(name) => format!("client.claim.{name}"),
             Self::Secret(name) => format!("secret.{name}"),
+            Self::Metadata(metadata) => {
+                format!("metadata.{}.{}", metadata.instance, metadata.path.join("."))
+            },
         }
     }
 
@@ -296,6 +365,7 @@ impl SourcePath {
             | Self::ClientAudiences
             | Self::ClientClaim(_) => Some(Capability::ReadClient),
             Self::Secret(_) => None,
+            Self::Metadata(_) => Some(Capability::ReadMetadata),
         }
     }
 
@@ -337,6 +407,17 @@ impl SourcePath {
     /// `on_missing` decides what that means, the same as for any other slot.
     #[must_use]
     pub fn resolve(&self, ext: &Extensions, secrets: Option<&SecretStore>) -> Option<Value> {
+        self.resolve_borrowed(ext, secrets).map(Cow::into_owned)
+    }
+
+    /// Read the slot while borrowing acquired metadata directly from request
+    /// extensions. Other source kinds retain their existing owned projection.
+    #[must_use]
+    pub(crate) fn resolve_borrowed<'a>(
+        &self,
+        ext: &'a Extensions,
+        secrets: Option<&SecretStore>,
+    ) -> Option<Cow<'a, Value>> {
         // Ahead of the security slot, which a secret does not live under: a
         // request that authenticated nobody still renders one.
         if let Self::Secret(name) = self {
@@ -344,52 +425,93 @@ impl SourcePath {
             // stops being cleared on drop. Unavoidable at this boundary: the
             // rendered header is a plain `String` on its way to the wire, so
             // the bytes exist in an ordinary allocation either way.
-            return secrets
-                .and_then(|store| store.value(name).map(|v| Value::String(v.to_string())));
+            return secrets.and_then(|store| {
+                store
+                    .value(name)
+                    .map(|v| Cow::Owned(Value::String(v.to_string())))
+            });
+        }
+        if let Self::Metadata(metadata) = self {
+            let facts = ext.metadata.as_deref()?.get(&metadata.instance)?;
+            let mut value = facts.value()?;
+            let mut segments = metadata.path.iter();
+            if !value.is_object() && segments.next().map(String::as_str) != Some("value") {
+                return None;
+            }
+            for segment in segments {
+                value = match value {
+                    Value::Object(fields) => fields.get(segment)?,
+                    Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
+                    _ => return None,
+                };
+            }
+            return (!value.is_null()).then_some(Cow::Borrowed(value));
         }
         let security = ext.security.as_deref()?;
         match self {
-            Self::SubjectId => security.subject.as_ref()?.id.clone().map(Value::String),
+            Self::SubjectId => security
+                .subject
+                .as_ref()?
+                .id
+                .clone()
+                .map(Value::String)
+                .map(Cow::Owned),
             Self::SubjectType => security
                 .subject
                 .as_ref()?
                 .subject_type
-                .and_then(|kind| serde_json::to_value(kind).ok()),
-            Self::SubjectRoles => Some(sorted_set(&security.subject.as_ref()?.roles)),
-            Self::SubjectTeams => Some(sorted_set(&security.subject.as_ref()?.teams)),
-            Self::SubjectPermissions => Some(sorted_set(&security.subject.as_ref()?.permissions)),
-            Self::Claim(name) => claim(&security.subject.as_ref()?.claims, name),
-            Self::ClientId => Some(Value::String(security.client.as_ref()?.client_id.clone())),
+                .and_then(|kind| serde_json::to_value(kind).ok())
+                .map(Cow::Owned),
+            Self::SubjectRoles => Some(Cow::Owned(sorted_set(&security.subject.as_ref()?.roles))),
+            Self::SubjectTeams => Some(Cow::Owned(sorted_set(&security.subject.as_ref()?.teams))),
+            Self::SubjectPermissions => Some(Cow::Owned(sorted_set(
+                &security.subject.as_ref()?.permissions,
+            ))),
+            Self::Claim(name) => claim(&security.subject.as_ref()?.claims, name).map(Cow::Borrowed),
+            Self::ClientId => Some(Cow::Owned(Value::String(
+                security.client.as_ref()?.client_id.clone(),
+            ))),
             Self::ClientName => security
                 .client
                 .as_ref()?
                 .client_name
                 .clone()
-                .map(Value::String),
-            Self::ClientTrustLevel => {
-                serde_json::to_value(&security.client.as_ref()?.trust_level).ok()
+                .map(Value::String)
+                .map(Cow::Owned),
+            Self::ClientTrustLevel => serde_json::to_value(&security.client.as_ref()?.trust_level)
+                .ok()
+                .map(Cow::Owned),
+            Self::ClientRoles => Some(Cow::Owned(sorted_list(&security.client.as_ref()?.roles))),
+            Self::ClientPermissions => Some(Cow::Owned(sorted_list(
+                &security.client.as_ref()?.permissions,
+            ))),
+            Self::ClientTeams => Some(Cow::Owned(sorted_list(&security.client.as_ref()?.teams))),
+            Self::ClientScopes => Some(Cow::Owned(sorted_list(
+                &security.client.as_ref()?.authorized_scopes,
+            ))),
+            Self::ClientAudiences => Some(Cow::Owned(sorted_list(
+                &security.client.as_ref()?.authorized_audiences,
+            ))),
+            Self::ClientClaim(name) => {
+                claim(&security.client.as_ref()?.claims, name).map(Cow::Borrowed)
             },
-            Self::ClientRoles => Some(sorted_list(&security.client.as_ref()?.roles)),
-            Self::ClientPermissions => Some(sorted_list(&security.client.as_ref()?.permissions)),
-            Self::ClientTeams => Some(sorted_list(&security.client.as_ref()?.teams)),
-            Self::ClientScopes => Some(sorted_list(&security.client.as_ref()?.authorized_scopes)),
-            Self::ClientAudiences => {
-                Some(sorted_list(&security.client.as_ref()?.authorized_audiences))
-            },
-            Self::ClientClaim(name) => claim(&security.client.as_ref()?.claims, name),
             // Answered above, before the security slot was required. Spelled
             // out rather than folded into a wildcard so a slot added later
             // still has to say where it reads from.
             Self::Secret(_) => None,
+            Self::Metadata(_) => None,
         }
     }
 }
 
 /// One claim, or `None` when it is absent or holds JSON null.
-fn claim(claims: &std::collections::HashMap<String, Value>, name: &str) -> Option<Value> {
+fn claim<'a>(
+    claims: &'a std::collections::HashMap<String, Value>,
+    name: &str,
+) -> Option<&'a Value> {
     match claims.get(name) {
         None | Some(Value::Null) => None,
-        Some(value) => Some(value.clone()),
+        Some(value) => Some(value),
     }
 }
 
@@ -428,6 +550,7 @@ fn sorted_list(values: &[String]) -> Value {
     reason = "tests"
 )]
 mod tests {
+    use chrono::{TimeZone as _, Utc};
     use std::sync::Arc;
 
     use serde_json::json;
@@ -453,6 +576,46 @@ mod tests {
 
     fn parse(path: &str) -> SourcePath {
         SourcePath::parse(path).expect("the path is a source")
+    }
+
+    #[test]
+    fn metadata_sources_require_an_exact_non_provenance_path() {
+        assert!(matches!(
+            parse("metadata.account.profile.roles"),
+            SourcePath::Metadata(metadata)
+                if metadata.instance() == "account" && metadata.segments() == ["profile", "roles"]
+        ));
+        assert_eq!(rejection("metadata.account"), SourceRejection::MetadataRoot);
+        assert_eq!(
+            rejection("metadata.account.$source"),
+            SourceRejection::MetadataProvenance
+        );
+    }
+
+    #[test]
+    fn metadata_sources_resolve_structured_values_and_treat_null_as_missing() {
+        let mut ext = Extensions::default();
+        ext.install_metadata(
+            "account",
+            "metadata/http",
+            crate::extensions::AcquiredFacts::success(
+                json!({"profile": {"roles": ["reader", "writer"], "empty": null}}),
+                Utc.with_ymd_and_hms(2026, 10, 19, 12, 0, 0)
+                    .single()
+                    .expect("valid instant"),
+                crate::extensions::MetadataCacheDisposition::Miss,
+            ),
+        )
+        .expect("metadata installs");
+
+        assert_eq!(
+            parse("metadata.account.profile.roles").resolve(&ext, None),
+            Some(json!(["reader", "writer"]))
+        );
+        assert_eq!(
+            parse("metadata.account.profile.empty").resolve(&ext, None),
+            None
+        );
     }
 
     fn rejection(path: &str) -> SourceRejection {

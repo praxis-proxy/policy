@@ -40,6 +40,8 @@ in this order, or jump to the one that matches your task.
 
 ## Guides
 
+- [Host integration](guides/host-integration-guide.md):
+  build the message parts policy reads and serialize its response edits
 - [HTTP Routing](guides/http-routing.md):
   the `http:` route selector, precedence, and the catch-all report
 - [Rate Limiting](guides/rate-limiting.md):

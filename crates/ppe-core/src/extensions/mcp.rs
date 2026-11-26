@@ -7,6 +7,19 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Display icon carried by a CMF resource.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Icon {
+    /// MIME type of the icon image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Sizes the icon is available in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<Vec<String>>,
+    /// Icon URL or data URI.
+    pub src: String,
+}
+
 /// MCP tool metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolMetadata {

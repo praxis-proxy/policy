@@ -28,6 +28,8 @@ mising = "mising"
 requst = "requst"
 strp = "strp"
 authorty = "authorty"
+# A misspelled field after `**` on a prompt `result:` must be refused at load.
+contnet = "contnet"
 
 # Alternate spellings that are correct English. typos-cli prefers the other form;
 # this project uses these and is consistent about them.

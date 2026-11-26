@@ -1290,7 +1290,7 @@ mod tests {
 
     // --- decision-audit sink ----------------------------------------------
 
-    use praxis_policy_core::decision::{DecisionLog, PluginAction, Span, Verdict};
+    use praxis_policy_core::decision::{DecisionLog, DecisionWarning, PluginAction, Span, Verdict};
     use praxis_policy_core::error::PluginViolation;
 
     /// Sink-mode config: no `hooks:`, so the factory registers no post-hook
@@ -1324,6 +1324,60 @@ mod tests {
         assert!(
             observer.as_audit_handler().is_none(),
             "hooks listed -> post-hook observer only, no double emission"
+        );
+    }
+
+    #[test]
+    fn decision_warnings_are_serialized_in_the_tamper_evident_block() {
+        let e = OcsfAuditEmitter::new(sink_cfg(json!({ "chain": true }))).unwrap();
+        let mut log = finalized(Vec::new(), Verdict::Allow);
+        log.record_warning(DecisionWarning::new(
+            "assertion_credential_target_used",
+            [
+                ("direction".to_owned(), "response".to_owned()),
+                ("header".to_owned(), "Set-Cookie".to_owned()),
+            ],
+        ));
+
+        let ev = e.build_decision(
+            Some(&tool_payload()),
+            &subject_ext(),
+            &log,
+            "2026-08-18T12:00:00.000Z",
+        );
+
+        assert_eq!(
+            ev["unmapped"]["aid.warnings"][0]["code"],
+            "assertion_credential_target_used"
+        );
+        assert_eq!(
+            ev["unmapped"]["aid.warnings"][0]["fields"]["direction"],
+            "response"
+        );
+        assert_eq!(
+            ev["unmapped"]["aid.warnings"][0]["fields"]["header"],
+            "Set-Cookie"
+        );
+
+        let signing_input = crate::sign::signing_input(&ev);
+        let fingerprint = ev["attestation_list"][0]["fingerprint"]["value"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            crate::sign::fingerprint_value(&signing_input),
+            fingerprint,
+            "the emitted fingerprint must cover the complete warning"
+        );
+
+        let mut without_warning = ev.clone();
+        without_warning["unmapped"]
+            .as_object_mut()
+            .unwrap()
+            .remove("aid.warnings");
+        assert_ne!(
+            crate::sign::fingerprint_value(&crate::sign::signing_input(&without_warning)),
+            fingerprint,
+            "removing the warning must invalidate the emitted fingerprint"
         );
     }
 

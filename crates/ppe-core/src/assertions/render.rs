@@ -16,6 +16,8 @@
 // rejected secret is reported the same way any other rejected value is, by
 // header name and defect, never by value.
 
+use std::borrow::Cow;
+
 use serde_json::Value;
 use tracing::warn;
 
@@ -75,6 +77,18 @@ pub fn render(
     Ok(rendered)
 }
 
+pub(crate) fn resolved_source_label(source: &ResolvedSource) -> String {
+    match source {
+        ResolvedSource::From(path) => path.authored(),
+        ResolvedSource::Members(members) => members
+            .iter()
+            .map(|(_, path)| path.authored())
+            .collect::<Vec<_>>()
+            .join(", "),
+        ResolvedSource::Unresolvable => "unresolvable".to_owned(),
+    }
+}
+
 /// What rendering one entry produced.
 enum Rendered {
     /// A value to inject.
@@ -96,8 +110,8 @@ fn render_one(
     secrets: Option<&SecretStore>,
 ) -> Rendered {
     match &header.source {
-        ResolvedSource::From(path) => match path.resolve(ext, secrets) {
-            Some(value) => match encode(&value, header.encode) {
+        ResolvedSource::From(path) => match path.resolve_borrowed(ext, secrets) {
+            Some(value) => match encode(value.as_ref(), header.encode) {
                 Some(text) => emit(&header.name, text),
                 None => Rendered::Skip,
             },
@@ -109,14 +123,16 @@ fn render_one(
             // `preserve_order`, and a transitive dependency that does would
             // otherwise make one identity render different header bytes. Sorting
             // makes the order the same either way.
-            let mut resolved: Vec<(&String, Value)> = members
+            let mut resolved: Vec<(&String, Cow<'_, Value>)> = members
                 .iter()
                 .filter_map(|(member, path)| {
-                    path.resolve(ext, secrets).map(|value| (member, value))
+                    path.resolve_borrowed(ext, secrets)
+                        .map(|value| (member, value))
                 })
                 .collect();
             resolved.sort_by_key(|(member, _)| *member);
-            let mut object = serde_json::Map::new();
+            let mut object: std::collections::BTreeMap<String, Cow<'_, Value>> =
+                std::collections::BTreeMap::new();
             for (member, value) in resolved {
                 object.insert(member.clone(), value);
             }
@@ -126,7 +142,7 @@ fn render_one(
                 let paths: Vec<String> = members.iter().map(|(_, p)| p.authored()).collect();
                 return Rendered::Missing(paths.join(", "));
             }
-            match serde_json::to_string(&Value::Object(object)) {
+            match serde_json::to_string(&object) {
                 Ok(text) => emit(&header.name, text),
                 Err(cause) => {
                     warn!(
@@ -237,6 +253,7 @@ mod tests {
             source,
             on_missing: OnMissing::Omit,
             encode: None,
+            allow_credential_target: false,
             declared_in: "global".to_owned(),
             level: AssertionLevel::Global,
             overrode: None,

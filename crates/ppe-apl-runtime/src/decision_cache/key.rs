@@ -206,7 +206,27 @@ fn hash_structured(
         hasher,
         structured.llm_request().map(std::convert::AsRef::as_ref),
     )?;
-    hash_optional_json(hasher, structured.args().map(std::convert::AsRef::as_ref))
+    hash_optional_json(hasher, structured.args().map(std::convert::AsRef::as_ref))?;
+    // The flat bag deliberately collapses string-array order/duplicates and
+    // represents mixed or object arrays only as `NonScalar`. Hash all three
+    // evaluator projections independently: normal framework construction
+    // derives them from one record, but `StructuredInput::with_metadata` is a
+    // public API and does not require callers to supply mutually consistent
+    // values.
+    hash_optional_json(
+        hasher,
+        structured.metadata().map(std::convert::AsRef::as_ref),
+    )?;
+    hash_optional_json(
+        hasher,
+        structured.cedar_metadata().map(std::convert::AsRef::as_ref),
+    )?;
+    hash_optional_json(
+        hasher,
+        structured
+            .metadata_provenance()
+            .map(std::convert::AsRef::as_ref),
+    )
 }
 
 fn hash_optional_json(
@@ -522,6 +542,69 @@ mod tests {
             StructuredInput::new(None, Some(null.clone())),
             StructuredInput::new(Some(null.clone()), None),
             StructuredInput::new(Some(null.clone()), Some(null)),
+        ]
+        .into_iter()
+        .map(|input| CacheKey::for_evaluation(&call, &bag, &input).unwrap())
+        .collect();
+        assert_distinct(&keys);
+    }
+
+    #[test]
+    fn structured_metadata_shape_order_and_duplicates_change_the_cache_key() {
+        let call = call_with_map(true);
+        let bag = AttributeBag::new();
+        let input = |metadata| {
+            StructuredInput::default().with_metadata(
+                Arc::new(metadata),
+                Arc::new(serde_json::json!({})),
+                Arc::new(serde_json::json!({})),
+            )
+        };
+        let keys: Vec<CacheKey> = [
+            input(serde_json::json!({"account": {"roles": ["reader", "writer"]}})),
+            input(serde_json::json!({"account": {"roles": ["writer", "reader"]}})),
+            input(serde_json::json!({"account": {"roles": ["reader", "reader", "writer"]}})),
+            input(serde_json::json!({"account": {"roles": [{"name": "reader"}]}})),
+            input(serde_json::json!({"account": {"roles": [{"name": "writer"}]}})),
+        ]
+        .into_iter()
+        .map(|input| CacheKey::for_evaluation(&call, &bag, &input).unwrap())
+        .collect();
+        assert_distinct(&keys);
+    }
+
+    #[test]
+    fn every_structured_metadata_projection_changes_the_cache_key() {
+        let call = call_with_map(true);
+        let bag = AttributeBag::new();
+        let input = |metadata, cedar, provenance| {
+            StructuredInput::default().with_metadata(
+                Arc::new(metadata),
+                Arc::new(cedar),
+                Arc::new(provenance),
+            )
+        };
+        let keys: Vec<CacheKey> = [
+            input(
+                serde_json::json!({}),
+                serde_json::json!({}),
+                serde_json::json!({}),
+            ),
+            input(
+                serde_json::json!({"account": {"active": true}}),
+                serde_json::json!({}),
+                serde_json::json!({}),
+            ),
+            input(
+                serde_json::json!({}),
+                serde_json::json!({"account": {"active": true}}),
+                serde_json::json!({}),
+            ),
+            input(
+                serde_json::json!({}),
+                serde_json::json!({}),
+                serde_json::json!({"account": {"source": "metadata/http"}}),
+            ),
         ]
         .into_iter()
         .map(|input| CacheKey::for_evaluation(&call, &bag, &input).unwrap())

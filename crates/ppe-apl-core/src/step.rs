@@ -563,7 +563,9 @@ fn identifier_end(bytes: &[u8], mut index: usize) -> usize {
 }
 
 fn metadata_accessor_after(bytes: &[u8], index: usize) -> bool {
-    if bracketed_metadata_after(bytes, index) {
+    if bracketed_named_after(bytes, index, "metadata")
+        || bracketed_named_after(bytes, index, "metadata_provenance")
+    {
         return true;
     }
     let mut index = skip_whitespace(bytes, index);
@@ -571,16 +573,21 @@ fn metadata_accessor_after(bytes: &[u8], index: usize) -> bool {
         return false;
     }
     index = skip_whitespace(bytes, index + 1);
-    let Some(end) = index.checked_add("metadata".len()) else {
-        return false;
-    };
-    bytes.get(index..end) == Some(b"metadata")
-        && bytes
-            .get(end)
-            .is_none_or(|byte| !is_identifier_continue(*byte))
+    ["metadata", "metadata_provenance"].iter().any(|name| {
+        index.checked_add(name.len()).is_some_and(|end| {
+            bytes.get(index..end) == Some(name.as_bytes())
+                && bytes
+                    .get(end)
+                    .is_none_or(|byte| !is_identifier_continue(*byte))
+        })
+    })
 }
 
-fn bracketed_metadata_after(bytes: &[u8], mut index: usize) -> bool {
+fn bracketed_metadata_after(bytes: &[u8], index: usize) -> bool {
+    bracketed_named_after(bytes, index, "metadata")
+}
+
+fn bracketed_named_after(bytes: &[u8], mut index: usize, name: &str) -> bool {
     index = skip_whitespace(bytes, index);
     if bytes.get(index) != Some(&b'[') {
         return false;
@@ -591,10 +598,10 @@ fn bracketed_metadata_after(bytes: &[u8], mut index: usize) -> bool {
         return false;
     };
     index += 1;
-    let Some(end) = index.checked_add("metadata".len()) else {
+    let Some(end) = index.checked_add(name.len()) else {
         return false;
     };
-    if bytes.get(index..end) != Some(b"metadata") || bytes.get(end) != Some(&quote) {
+    if bytes.get(index..end) != Some(name.as_bytes()) || bytes.get(end) != Some(&quote) {
         return false;
     }
     index = end + 1;
@@ -762,6 +769,28 @@ impl<'a> PluginInvocation<'a> {
     }
 }
 
+/// A parent container addressed by a concrete field-path segment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FieldParent {
+    /// An array whose indexes refer to this many elements.
+    Array {
+        /// Number of elements at evaluation time.
+        len: usize,
+    },
+    /// An object addressed by a literal key.
+    Object,
+}
+
+/// The concrete location of one field-stage invocation.
+#[derive(Clone, Copy, Debug)]
+pub struct FieldLocation<'a> {
+    /// Parent containers, one for each path segment. A nonempty path with
+    /// no parents uses legacy field dispatch.
+    pub parents: &'a [FieldParent],
+    /// Object keys and array indexes, with literal key boundaries retained.
+    pub path: &'a [String],
+}
+
 /// Plugin invocation dispatch. praxis-policy-apl-runtime wraps the PPE `PolicyEngine`
 /// behind this trait so the praxis-policy-apl-core evaluator stays free of praxis-policy-core
 /// dependencies.
@@ -776,6 +805,33 @@ pub trait PluginInvoker: Send + Sync {
         invocation: PluginInvocation<'_>,
     ) -> Result<PluginOutcome, PluginError>;
 
+    /// Invoke a field stage at its expanded path. Segments retain object-key
+    /// boundaries and include array indexes. The default uses [`Self::invoke`].
+    ///
+    /// [`Self::invoke`]: Self::invoke
+    async fn invoke_field_at(
+        &self,
+        name: &str,
+        bag: &crate::attributes::AttributeBag,
+        invocation: PluginInvocation<'_>,
+        _location: FieldLocation<'_>,
+    ) -> Result<PluginOutcome, PluginError> {
+        self.invoke(name, bag, invocation).await
+    }
+
+    /// Record a successful policy write, including one that leaves the value
+    /// equal to its input. Hosts use this to reconcile independent plugin edits.
+    /// `value` is the replacement; `None` records an omission. `parents`
+    /// describes the containers before the write.
+    async fn record_field_write(
+        &self,
+        _path: &[String],
+        _phase: DispatchPhase,
+        _value: Option<&serde_json::Value>,
+        _parents: &[FieldParent],
+    ) {
+    }
+
     /// Acquire one named metadata record and return its APL projection.
     async fn fetch_metadata(
         &self,
@@ -786,10 +842,27 @@ pub trait PluginInvoker: Send + Sync {
 }
 
 /// Attributes published by one completed metadata acquisition.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MetadataFetchOutcome {
     /// Fresh `metadata.<instance>.*` attributes for subsequent effects.
     pub attributes: crate::attributes::AttributeBag,
+    /// Complete CEL/OPA projection after this acquisition.
+    pub metadata: serde_json::Value,
+    /// Complete Cedar value projection after this acquisition.
+    pub cedar_metadata: serde_json::Value,
+    /// Complete identifier-safe Cedar provenance projection.
+    pub metadata_provenance: serde_json::Value,
+}
+
+impl Default for MetadataFetchOutcome {
+    fn default() -> Self {
+        Self {
+            attributes: crate::attributes::AttributeBag::new(),
+            metadata: serde_json::json!({}),
+            cedar_metadata: serde_json::json!({}),
+            metadata_provenance: serde_json::json!({}),
+        }
+    }
 }
 
 /// Why one metadata acquisition did not publish a record.
@@ -1521,6 +1594,14 @@ query:
         assert!(source_references_metadata_under(
             "input [ `metadata` ].account.active",
             "input"
+        ));
+        assert!(source_references_metadata_under(
+            "context.metadata_provenance.account.source",
+            "context"
+        ));
+        assert!(source_references_metadata_under(
+            "context['metadata_provenance'].account.source",
+            "context"
         ));
         assert!(!source_references_metadata_under(
             "data.metadata.account.active",

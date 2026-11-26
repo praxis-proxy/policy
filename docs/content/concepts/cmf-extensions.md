@@ -564,6 +564,12 @@ the contract instead of the request. The argument values themselves reach
 policy as `args.*`; see
 [Payloads that are not slots](#payloads-that-are-not-slots).
 
+The display icons on CMF `Resource` parts are outside the resolved MCP
+metadata and do not populate attribute-bag keys.
+
+A host must fill `MCPExtension` from its own catalog, never from what the agent
+sent; see the [Host integration guide](../guides/host-integration-guide.md).
+
 ### 10. `completion` — `CompletionExtension`
 
 | Key | Type | When |

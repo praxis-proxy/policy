@@ -3303,6 +3303,7 @@ dependencies = [
 name = "praxis-policy-pdp-diff"
 version = "0.7.0"
 dependencies = [
+ "chrono",
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
  "praxis-policy-builtins",
@@ -3318,11 +3319,14 @@ version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "praxis-policy-apl-core",
+ "praxis-policy-builtins",
  "praxis-policy-core",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]
