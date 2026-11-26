@@ -26,7 +26,7 @@ use crate::plugins::identity_jwt::trusted_issuer::{TrustedIssuer, older_than};
 /// Held in the issuer's `RefreshGate` and written only by the refresh that
 /// holds its single-flight lock. Bounded: one URL, at most nine algorithms,
 /// one validator.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub(super) struct DiscoveryState {
     /// The JWKS the current keys came from. `None` until a document has been
     /// accepted and its JWKS fetched.
@@ -180,6 +180,10 @@ pub(super) async fn refresh(
             commit_hop(&mut next, hop, now);
             next.rediscover = false;
             let count = keys.len();
+            // Keys first, discovery state last, each under its own lock. A
+            // verify in between sees new keys with an old `discovered_at` and
+            // at worst re-checks staleness, which the floor and the
+            // single-flight lock held here turn into no extra fetch.
             *issuer
                 .keys
                 .write()
@@ -1139,6 +1143,54 @@ mod tests {
         assert!(
             logged.iter().all(|line| line.len() < 16 * 1_024),
             "no log line grows with the body"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_strings_cannot_forge_log_lines() {
+        let forged_issuer = json!({
+            "issuer": format!("{ISSUER}\n2026-11-26T00:00:00Z  INFO praxis: FORGED-ISSUER"),
+            "jwks_uri": format!("https://keys.example{KEYS_ONE}"),
+        });
+        let forged_algorithm = doc(KEYS_ONE, Some(&["RS256\n\u{1b}[2J FORGED-ALG"]));
+        let forged_kid = jwks(&[
+            json!({ "kty": "RSA", "use": "sig", "kid": "k\nFORGED-KID", "n": "!!", "e": "AQAB" }),
+        ]);
+        let http = Arc::new(
+            FakeTransport::new()
+                .json(WELL_KNOWN, 200, &forged_issuer.to_string())
+                .json(WELL_KNOWN, 200, &forged_algorithm)
+                .json(WELL_KNOWN, 200, &doc(KEYS_ONE, None))
+                .json(KEYS_ONE, 200, &forged_kid),
+        );
+
+        let (_, events) = captured(async {
+            let plain = issuer(OidcDiscoveryConfig::default(), &[]);
+            run(&plain, &http, JwksFetchBudget::Startup).await;
+            let narrowed = issuer(OidcDiscoveryConfig::default(), &[Algorithm::ES256]);
+            run(&narrowed, &http, JwksFetchBudget::Startup).await;
+            run(&plain, &http, JwksFetchBudget::Startup).await;
+        })
+        .await;
+
+        let logged = events.recorded();
+        let all = logged.join("\n");
+        assert_eq!(http.call_count(), 4, "every hostile string was served");
+        for escaped in [
+            r"\n2026-11-26T00:00:00Z  INFO praxis: FORGED-ISSUER",
+            r"RS256\n\u{1b}[2J FORGED-ALG",
+            r"k\nFORGED-KID",
+        ] {
+            assert!(
+                all.contains(escaped),
+                "echoed escaped: {escaped} in {logged:?}"
+            );
+        }
+        assert!(
+            logged
+                .iter()
+                .all(|l| !l.contains('\n') && !l.contains('\u{1b}')),
+            "no raw newline or escape reaches a log event: {logged:?}"
         );
     }
 

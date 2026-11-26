@@ -585,13 +585,36 @@ fn url_fault(url: &str, allow_query: bool) -> Option<&'static str> {
     None
 }
 
-/// `s` cut to [`MAX_ECHOED_CHARS`] characters, for echoing a
-/// document-supplied string.
+/// `s` cut to [`MAX_ECHOED_CHARS`] characters and made safe for one log
+/// line, for echoing a remotely supplied string.
+///
+/// Control characters, line and paragraph separators and bidirectional
+/// overrides are escaped (`\n`, `\u{2028}`): a text log renders a raw newline
+/// as a new line, so an unescaped one would let whoever serves the document
+/// write lines of their own.
 pub(super) fn clip(s: &str) -> String {
-    match s.char_indices().nth(MAX_ECHOED_CHARS) {
-        Some((end, _)) => format!("{}...", s.get(..end).unwrap_or_default()),
-        None => s.to_owned(),
+    let mut out = String::with_capacity(s.len().min(MAX_ECHOED_CHARS));
+    for (n, c) in s.chars().enumerate() {
+        if n == MAX_ECHOED_CHARS {
+            out.push_str("...");
+            break;
+        }
+        if breaks_log_lines(c) {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
     }
+    out
+}
+
+/// Whether `c` could end a log line or reorder how one displays.
+fn breaks_log_lines(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        )
 }
 
 #[cfg(test)]
@@ -1013,6 +1036,30 @@ mod tests {
         let clipped = clip(&long);
         assert_eq!(clipped.chars().count(), MAX_ECHOED_CHARS + 3);
         assert_eq!(clip("short"), "short");
+    }
+
+    #[test]
+    fn echoed_strings_cannot_break_a_log_line() {
+        assert_eq!(clip("a\nb\rc"), r"a\nb\rc", "newlines are escaped");
+        assert_eq!(
+            clip("x\u{1b}[2J\u{7}"),
+            r"x\u{1b}[2J\u{7}",
+            "escapes and bells"
+        );
+        assert_eq!(
+            clip("a\u{2028}b\u{202e}c"),
+            r"a\u{2028}b\u{202e}c",
+            "line separators and bidi overrides"
+        );
+        assert_eq!(
+            clip("Ünïcödé kid-1 \"q\""),
+            "Ünïcödé kid-1 \"q\"",
+            "printable text is kept"
+        );
+        let long = "\n".repeat(MAX_ECHOED_CHARS + 10);
+        let clipped = clip(&long);
+        assert!(!clipped.contains('\n'), "{clipped}");
+        assert!(clipped.ends_with("..."), "still clipped: {clipped}");
     }
 
     #[test]
