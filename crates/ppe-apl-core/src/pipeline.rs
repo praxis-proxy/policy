@@ -458,7 +458,7 @@ mod tests {
         let json = serde_json::to_string(&pipeline).expect("serialize");
         let deserialized: Pipeline = serde_json::from_str(&json).expect("deserialize");
 
-        assert_eq!(deserialized.stages.len(), 2);
+        assert_eq!(deserialized, pipeline);
     }
 
     #[test]

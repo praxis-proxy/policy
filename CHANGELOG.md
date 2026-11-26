@@ -22,7 +22,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 - **HTTP metadata source.** The `metadata-http` feature registers
   `kind: metadata/http`, which builds static-authority GET and POST requests
   from capability-filtered policy context through the host HTTP transport.
-  Context-specific encoding, single-attempt execution, strict status and media
+  Context-specific encoding, GET requests use idempotent retry policies while
+  POST requests retry only failures where the request was not delivered, both
+  subject to a configurable total attempt budget. Strict status and media
   checks, duplicate-aware JSON parsing, and hard byte and structural ceilings
   keep acquired facts bounded and atomic. Named shared-secret authentication
   remains gated on the per-name plugin secret grants in #384.

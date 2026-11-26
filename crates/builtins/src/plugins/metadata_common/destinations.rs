@@ -107,9 +107,6 @@ impl CompiledDestinationScope {
     /// Compile and validate destination scope configuration.
     #[allow(dead_code, reason = "Phase 2: Address validation")]
     pub(crate) fn compile(config: DestinationScopeConfig) -> Self {
-        // Phase 1: Basic validation
-        // - private_allow list syntax (valid CIDR notation)
-        // Phase 2: Will enforce scoped constraints and reject policy widening
         Self { config }
     }
 
@@ -229,7 +226,6 @@ impl CompiledDestinationScope {
         self.config.allow_loopback
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
