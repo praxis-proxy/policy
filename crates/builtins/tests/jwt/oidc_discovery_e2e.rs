@@ -69,6 +69,107 @@ async fn boot_discovers_and_a_valid_token_is_allowed_with_mapped_claims() {
     assert_eq!(http.call_count(), 2, "fresh tokens cost no request");
 }
 
+/// Keycloak's default `id_token_signing_alg_values_supported`, verbatim.
+const KEYCLOAK_ALGORITHMS: &[&str] = &[
+    "PS384", "RS384", "EdDSA", "ES384", "HS256", "HS512", "ES256", "RS256", "HS384", "ES512",
+    "PS256", "PS512", "RS512",
+];
+
+#[tokio::test]
+async fn an_advertised_set_spanning_key_families_allows_each_family() {
+    let mut keys: Value = serde_json::from_str(&jwks(&[KID])).unwrap();
+    keys["keys"].as_array_mut().unwrap().push(ec_jwk(EC_KID));
+    let http = idp(&doc(CERTS, KEYCLOAK_ALGORITHMS), &keys.to_string());
+    let engine = engine(discovery_config(false, json!({})), &http, true).await;
+
+    let ps256 = {
+        let mut header = Header::new(Algorithm::PS256);
+        header.kid = Some(KID.to_owned());
+        let key = EncodingKey::from_rsa_pem(keypair().private_pem.as_bytes()).unwrap();
+        encode(&header, &claims(json!({})), &key).unwrap()
+    };
+    for (label, token) in [
+        ("RS256", token(KID, json!({}))),
+        ("PS256", ps256),
+        ("ES256", ec_token(EC_KID)),
+    ] {
+        let result = call(&engine, &token).await;
+        assert!(
+            result.continue_processing,
+            "{label} is advertised and its key is published: {:?}",
+            result.violation
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_token_naming_a_key_of_another_family_is_refused() {
+    let mut keys: Value = serde_json::from_str(&jwks(&[KID])).unwrap();
+    keys["keys"].as_array_mut().unwrap().push(ec_jwk(EC_KID));
+    let http = idp(&doc(CERTS, &["RS256", "ES256"]), &keys.to_string());
+    let engine = engine(discovery_config(false, json!({})), &http, true).await;
+
+    // ES256-signed, but pointing at the RSA key.
+    let result = call(&engine, &ec_token(KID)).await;
+
+    assert_eq!(denial(&result), "auth.algorithm_mismatch");
+}
+
+#[tokio::test]
+async fn the_first_token_after_a_failed_boot_is_allowed_without_waiting_for_the_floor() {
+    let up = Arc::new(AtomicBool::new(false));
+    let http = switchable_idp(&up, &doc(CERTS, &["RS256"]));
+    // Default 30 s floor.
+    let engine = engine(discovery_config(false, json!({})), &http, true).await;
+    let boot_calls = http.call_count_for(WELL_KNOWN);
+
+    up.store(true, Ordering::SeqCst);
+    let result = call(&engine, &token(KID, json!({}))).await;
+
+    assert!(result.continue_processing, "{:?}", result.violation);
+    assert_eq!(
+        http.call_count_for(WELL_KNOWN) - boot_calls,
+        1,
+        "the first token rediscovered at once"
+    );
+}
+
+#[tokio::test]
+async fn engines_built_and_dropped_leave_nothing_behind() {
+    let http = idp(&doc(CERTS, &["RS256"]), &jwks(&[KID]));
+    let baseline = Arc::strong_count(&http);
+    let mut engines = Vec::new();
+
+    for _ in 0..30 {
+        let engine = yaml_engine(&http);
+        engine
+            .load_config_yaml(&yaml_for(ISSUER))
+            .expect("the config loads");
+        engine.initialize().await.expect("initialize");
+        assert!(
+            call(&engine, &token(KID, json!({})))
+                .await
+                .continue_processing
+        );
+        engine.shutdown().await;
+        engines.push(Arc::downgrade(&engine));
+    }
+    let calls = http.call_count();
+    tokio::task::yield_now().await;
+
+    assert!(
+        engines.iter().all(|engine| engine.upgrade().is_none()),
+        "every dropped engine is freed"
+    );
+    assert_eq!(
+        Arc::strong_count(&http),
+        baseline,
+        "no plugin instance holds on to the transport"
+    );
+    assert_eq!(http.call_count(), calls, "nothing fetches after the drop");
+    assert_eq!(calls, 60, "one document and one JWKS per engine");
+}
+
 #[tokio::test]
 async fn a_discovered_and_a_static_issuer_coexist() {
     let http = idp(&doc(CERTS, &["RS256"]), &jwks(&[KID]));
@@ -79,7 +180,9 @@ async fn a_discovered_and_a_static_issuer_coexist() {
         .push(json!({
             "issuer": "spiffe://example.org/static",
             "audiences": [TEST_AUDIENCE],
-            "algorithms": ["RS256"],
+            // Two key families: the token's algorithm is checked against the
+            // list, not the whole list against the key.
+            "algorithms": ["RS256", "ES256"],
             "decoding_key": { "kind": "pem", "pem": keypair().public_pem },
         }));
     let engine = engine(cfg, &http, true).await;
@@ -335,7 +438,10 @@ async fn a_stalled_idp_at_boot_soft_fails_within_the_startup_budget() {
     let engine = engine(discovery_config(false, json!({})), &http, true).await;
 
     let elapsed = started.elapsed();
-    assert!(elapsed <= Duration::from_secs(21), "boot took {elapsed:?}");
+    assert!(
+        elapsed <= Duration::from_secs(12),
+        "boot is two 5 s hops at most, took {elapsed:?}"
+    );
     assert_eq!(
         denial(&call(&engine, &token(KID, json!({}))).await),
         "auth.jwks_unavailable"
@@ -455,6 +561,36 @@ fn jwks(kids: &[&str]) -> String {
         })
         .collect();
     json!({ "keys": keys }).to_string()
+}
+
+const EC_KID: &str = "realm-es256";
+
+fn ec_signing_key() -> p256::ecdsa::SigningKey {
+    p256::ecdsa::SigningKey::from_slice(&[0x42; 32]).expect("a valid P-256 scalar")
+}
+
+/// The P-256 test key as a JWK published under `kid`.
+fn ec_jwk(kid: &str) -> Value {
+    let point = ec_signing_key().verifying_key().to_sec1_point(false);
+    let bytes = point.as_bytes();
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    json!({
+        "kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256", "kid": kid,
+        "x": b64.encode(&bytes[1..33]),
+        "y": b64.encode(&bytes[33..65]),
+    })
+}
+
+/// An ES256 token signed by the P-256 test key, naming `kid`.
+fn ec_token(kid: &str) -> String {
+    use p256::pkcs8::EncodePrivateKey as _;
+    let pem = ec_signing_key()
+        .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
+        .expect("PEM");
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(kid.to_owned());
+    let key = EncodingKey::from_ec_pem(pem.as_bytes()).expect("EC key");
+    encode(&header, &claims(json!({})), &key).expect("sign JWT")
 }
 
 fn idp(document: &str, keys: &str) -> Arc<FakeTransport> {
