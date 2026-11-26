@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+//! Configuration-level timeout validation tests.
+//!
+//! These tests validate the timeout configuration values, relationships, and
+//! defaults without network or integration concerns. They ensure the config
+//! schema properly validates constraints like:
+//! - `attempt_timeout_milliseconds > 0`
+//! - `total_timeout_milliseconds >= attempt_timeout_milliseconds`
+//! - `connect_timeout_milliseconds <= attempt_timeout_milliseconds`
+//!
+//! Integration tests covering actual timeout behavior with `FakeTransport`
+//! and retry policy scenarios are planned for Phase 2 (hardened URL execution).
+
 #![allow(
     missing_docs,
     clippy::expect_used,

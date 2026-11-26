@@ -100,6 +100,18 @@ request:
 
 ### Expected Test Coverage (Phase 2)
 
+#### Integration Tests with FakeTransport
+
+- **Retry scenarios**: GET idempotent (3 attempts, exponential backoff)
+- **Retry scenarios**: POST undelivered-only (3 attempts, reduced backoff)
+- **Timeout scenarios**: Per-attempt timeout vs total budget enforcement
+- **Timeout scenarios**: Deadline capping under request path context
+- **Error scenarios**: Each HttpTransportError variant (Timeout, Connect,
+  ResponseTooLarge, Rejected)
+- **Retry behavior**: Call count verification (not elapsed time)
+
+#### Real Transport Security Tests
+
 - Address set rejection tests (complete/mixed/private/public)
 - SNI and Host header validation
 - Deadline capping under invocation timeout

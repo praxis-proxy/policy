@@ -67,6 +67,10 @@ impl MetadataHttp {
             ));
         }
         let request = self.compiled.request.build(extensions)?;
+        // Select retry policy based on HTTP method idempotency:
+        // GET is idempotent and safe to retry on any failure (including timeout).
+        // POST is non-idempotent and only safe to retry if the peer never saw it.
+        // Both policies respect the total_budget deadline from the request path context.
         let retry_policy = match self.compiled.request.method() {
             crate::plugins::metadata_common::request::RequestMethod::Get => {
                 RetryPolicy::idempotent().with_total_budget(self.compiled.request.total_budget())
