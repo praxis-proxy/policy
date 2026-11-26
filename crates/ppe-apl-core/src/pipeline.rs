@@ -196,6 +196,7 @@ pub struct TaintEvent {
 
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests")]
+#[expect(clippy::panic, reason = "tests use panic for pattern matching")]
 mod tests {
     use super::*;
 

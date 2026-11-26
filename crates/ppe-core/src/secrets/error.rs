@@ -152,6 +152,7 @@ impl SecretError {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
 

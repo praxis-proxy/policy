@@ -200,6 +200,7 @@ impl PluginContextTable {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -322,7 +323,9 @@ mod tests {
         let mut table = PluginContextTable::new();
         let plugin_id = Uuid::nil();
 
-        table.global_state.insert("global".to_owned(), json!("state"));
+        table
+            .global_state
+            .insert("global".to_owned(), json!("state"));
         let mut stored = HashMap::new();
         stored.insert("local".to_owned(), json!("state"));
         table.local_states.insert(plugin_id, stored);
@@ -348,10 +351,11 @@ mod tests {
 
         assert_eq!(table.len(), 1);
         assert_eq!(table.global_state.get("global"), Some(&json!("value")));
-        assert_eq!(
-            table.local_states.get(&plugin_id).and_then(|s| s.get("local")),
-            Some(&json!("value"))
-        );
+        let local_val = table
+            .local_states
+            .get(&plugin_id)
+            .and_then(|s| s.get("local"));
+        assert_eq!(local_val, Some(&json!("value")));
     }
 
     #[test]
@@ -416,15 +420,14 @@ mod tests {
 
     #[test]
     fn plugin_context_table_serialization() {
-        let mut table = PluginContextTable::new();
-        table.global_state.insert("global".to_owned(), json!("state"));
-        table.mark_pre_identity_rate_limited();
+        let mut tbl = PluginContextTable::new();
+        tbl.global_state.insert("g".to_owned(), json!(123));
+        tbl.mark_pre_identity_rate_limited();
 
-        let json = serde_json::to_string(&table).expect("serialize");
-        let deserialized: PluginContextTable = serde_json::from_str(&json).expect("deserialize");
-
-        assert_eq!(deserialized.global_state.get("global"), Some(&json!("state")));
-        assert!(deserialized.pre_identity_rate_limited());
+        let s = serde_json::to_string(&tbl).expect("serialize");
+        let des: PluginContextTable = serde_json::from_str(&s).expect("des");
+        assert_eq!(des.global_state.get("g"), Some(&json!(123)));
+        assert!(des.pre_identity_rate_limited());
     }
 
     #[test]

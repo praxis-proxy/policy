@@ -148,6 +148,8 @@ impl AttachedSink {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
+#[allow(clippy::uninlined_format_args)]
 mod tests {
     use super::*;
 
