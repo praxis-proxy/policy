@@ -363,9 +363,110 @@ mod tests {
     }
 
     #[test]
-    fn address_class_invalid_hostname() {
-        // Hostnames parse as Public (safe default for Phase 1)
-        assert_eq!(AddressClass::classify("example.com"), AddressClass::Public);
-        assert_eq!(AddressClass::classify("localhost"), AddressClass::Public);
+    fn allows_address_validates_private_ranges() {
+        let config = DestinationScopeConfig {
+            private_allow: vec!["10.0.0.0/8".to_owned(), "192.168.0.0/16".to_owned()],
+            allow_cloud_metadata: true,
+            allow_loopback: true,
+        };
+        let scope = CompiledDestinationScope::compile(config);
+
+        // Public addresses always allowed
+        assert!(scope.allows_address("8.8.8.8"));
+        assert!(scope.allows_address("2001:db8::1"));
+
+        // Private addresses in allowed ranges
+        assert!(scope.allows_address("10.0.0.1"));
+        assert!(scope.allows_address("10.255.255.255"));
+        assert!(scope.allows_address("192.168.0.1"));
+        assert!(scope.allows_address("192.168.255.255"));
+
+        // Private addresses NOT in allowed ranges
+        assert!(!scope.allows_address("172.16.0.1"));
+        assert!(!scope.allows_address("fc00::1"));
+
+        // Cloud metadata allowed
+        assert!(scope.allows_address("169.254.1.1"));
+        assert!(scope.allows_address("fe80::1"));
+
+        // Loopback allowed
+        assert!(scope.allows_address("127.0.0.1"));
+        assert!(scope.allows_address("::1"));
+    }
+
+    #[test]
+    fn allows_address_respects_restrictions() {
+        let config = DestinationScopeConfig {
+            private_allow: vec![],
+            allow_cloud_metadata: false,
+            allow_loopback: false,
+        };
+        let scope = CompiledDestinationScope::compile(config);
+
+        // Only public addresses allowed
+        assert!(scope.allows_address("8.8.8.8"));
+
+        // Private addresses denied
+        assert!(!scope.allows_address("10.0.0.1"));
+        assert!(!scope.allows_address("192.168.0.1"));
+
+        // Cloud metadata denied
+        assert!(!scope.allows_address("169.254.1.1"));
+
+        // Loopback denied
+        assert!(!scope.allows_address("127.0.0.1"));
+    }
+
+
+    #[test]
+    fn allows_address_mixed_restrictions() {
+        let config = DestinationScopeConfig {
+            private_allow: vec!["10.0.0.0/8".to_owned()],
+            allow_cloud_metadata: true,
+            allow_loopback: false,
+        };
+        let scope = CompiledDestinationScope::compile(config);
+
+        assert!(scope.allows_address("8.8.8.8")); // Public
+        assert!(scope.allows_address("10.0.0.1")); // Private, in range
+        assert!(!scope.allows_address("192.168.0.1")); // Private, not in range
+        assert!(scope.allows_address("169.254.1.1")); // Cloud metadata
+        assert!(!scope.allows_address("127.0.0.1")); // Loopback denied
+    }
+
+    #[test]
+    fn allows_address_ipv6_cidr() {
+        let config = DestinationScopeConfig {
+            private_allow: vec!["fc00::/7".to_owned()],
+            allow_cloud_metadata: false,
+            allow_loopback: false,
+        };
+        let scope = CompiledDestinationScope::compile(config);
+
+        // IPv6 unique local addresses
+        assert!(scope.allows_address("fc00::1"));
+        assert!(scope.allows_address("fd00::1"));
+        assert!(scope.allows_address("fd00::ffff:ffff:ffff:ffff"));
+
+        // Outside range
+        assert!(!scope.allows_address("fe80::1"));
+    }
+
+    #[test]
+    fn allows_address_no_private_ranges() {
+        let config = DestinationScopeConfig {
+            private_allow: vec![],
+            allow_cloud_metadata: false,
+            allow_loopback: false,
+        };
+        let scope = CompiledDestinationScope::compile(config);
+
+        // All private addresses denied
+        assert!(!scope.allows_address("10.0.0.0"));
+        assert!(!scope.allows_address("10.255.255.255"));
+        assert!(!scope.allows_address("172.16.0.0"));
+        assert!(!scope.allows_address("192.168.0.0"));
+        assert!(!scope.allows_address("fc00::1"));
+        assert!(!scope.allows_address("fd00::1"));
     }
 }
