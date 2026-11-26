@@ -353,7 +353,7 @@ fn check_jwks_uri(uri: &str, insecure_http: bool) -> Result<(), Rejection> {
         return Err(Rejection::transient(format!(
             "the discovery document's jwks_uri '{}' is not an absolute http(s) URL with a host \
              and no userinfo or fragment; it {reason}",
-            clip(uri)
+            clip_url(uri)
         )));
     }
     require_https("the discovery document's jwks_uri", uri, insecure_http)
@@ -599,13 +599,25 @@ fn url_fault(url: &str, allow_query: bool) -> Option<&'static str> {
 /// as a new line, so an unescaped one would let whoever serves the document
 /// write lines of their own.
 pub(super) fn clip(s: &str) -> String {
+    clip_escaping(s, breaks_log_lines)
+}
+
+/// [`clip`] for a URL refused by [`url_fault`]: every non-ASCII character is
+/// escaped too (`\u{430}`), so a look-alike host reads as what it is.
+fn clip_url(s: &str) -> String {
+    clip_escaping(s, |c| !c.is_ascii() || c.is_control())
+}
+
+/// `s` cut to [`MAX_ECHOED_CHARS`] characters, with each character `escape`
+/// selects written as its Rust escape.
+fn clip_escaping(s: &str, escape: impl Fn(char) -> bool) -> String {
     let mut out = String::with_capacity(s.len().min(MAX_ECHOED_CHARS));
     for (n, c) in s.chars().enumerate() {
         if n == MAX_ECHOED_CHARS {
             out.push_str("...");
             break;
         }
-        if breaks_log_lines(c) {
+        if escape(c) {
             out.extend(c.escape_default());
         } else {
             out.push(c);
@@ -973,12 +985,20 @@ mod tests {
             let r = parse(json!({ "issuer": ISSUER, "jwks_uri": uri })).expect_err(uri);
             assert!(!r.config_fault, "{uri}: {}", r.reason);
             assert!(r.reason.contains("non-ASCII"), "{uri}: {}", r.reason);
-            assert!(
-                !r.reason.contains('\u{202e}'),
-                "echoed escaped: {}",
-                r.reason
-            );
+            assert!(r.reason.is_ascii(), "echoed escaped: {}", r.reason);
         }
+    }
+
+    #[test]
+    fn a_refused_look_alike_host_is_echoed_escaped() {
+        let r = parse(json!({ "issuer": ISSUER, "jwks_uri": "https://idp.ex\u{430}mple/certs" }))
+            .expect_err("a Cyrillic host is refused");
+
+        assert!(
+            r.reason.contains(r"https://idp.ex\u{430}mple/certs"),
+            "{}",
+            r.reason
+        );
     }
 
     #[test]
