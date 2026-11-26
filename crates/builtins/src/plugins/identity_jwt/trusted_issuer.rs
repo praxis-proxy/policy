@@ -213,7 +213,7 @@ pub struct TrustedIssuer {
     /// supporting multiple lets the `IdP` rotate to a new algo
     /// without us redeploying.
     ///
-    /// Overridden by [`KeyStore::algorithms`] when the keys carry their own,
+    /// Overridden by the key store's own algorithms when the keys carry them,
     /// as a discovered issuer's do; for such an issuer this is the configured
     /// list that narrows what its provider advertises, and may be empty.
     pub algorithms: Vec<Algorithm>,
