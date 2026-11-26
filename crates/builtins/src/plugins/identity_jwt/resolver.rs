@@ -83,8 +83,10 @@ use crate::plugins::identity_jwt::dpop::{
     DpopVerifier, InMemoryReplayGuard, PopDenial, PopRequest, ReplayGuard, codes as dpop_codes,
 };
 use crate::plugins::identity_jwt::presets;
+use crate::plugins::identity_jwt::trusted_issuer::{KeyStore, TrustedIssuer};
 use crate::plugins::identity_jwt::{KIND, alarm};
 use praxis_policy_core::extensions::{HttpExtension, KeyBinding};
+use praxis_policy_core::host::{HTTP_CAPABILITY, InitExtensions};
 use praxis_policy_core::identity::mapping::ConfiguredClaimMap;
 use praxis_policy_core::identity::mapping::{ClaimMap, ClaimMapper};
 use praxis_policy_core::identity::mapping::{ClaimsOverrides, CompiledClaimsOverrides};
@@ -101,8 +103,6 @@ const REFRESH_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(
 /// [`REFRESH_WAIT_BUDGET`] for a discovered issuer, whose refresh is two
 /// request-path fetches back to back: the document, then its JWKS.
 const DISCOVERY_REFRESH_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
-use crate::plugins::identity_jwt::trusted_issuer::{KeyStore, TrustedIssuer};
-use praxis_policy_core::host::{HTTP_CAPABILITY, InitExtensions};
 
 /// Default clock-skew tolerance, in seconds. Matches what most OIDC
 /// clients use as a sane default for `exp` / `nbf`.
@@ -564,8 +564,9 @@ impl Plugin for JwtIdentityResolver {
     /// The `PolicyEngine` drives this once per plugin lifetime
     /// (before any hooks fire). Idempotent: if `pending_jwks` is
     /// empty (no `JwksUrl` sources) and no issuer uses discovery, this is a
-    /// free no-op. Discovered issuers go through their refresh gate, so a
-    /// second call inside the floor fetches nothing.
+    /// free no-op. A discovered issuer that already holds an accepted
+    /// discovery document is skipped, so a second call after a successful one
+    /// fetches nothing for it.
     async fn initialize_with(&self, ext: &InitExtensions) -> Result<(), Box<PluginError>> {
         let discovered = self.discovered_issuers();
         if self.pending_jwks.is_empty() && discovered.is_empty() {
@@ -921,13 +922,18 @@ impl JwtIdentityResolver {
             .collect()
     }
 
-    /// Discover one issuer at startup, through its refresh gate like any
-    /// other attempt.
+    /// Discover one issuer at startup, under its single-flight lock.
+    ///
+    /// The refresh floor is not claimed, as with the `jwks_url` boot fetch:
+    /// after a failed boot the first token retries at once, and that
+    /// request-path attempt claims the floor. An issuer that already holds an
+    /// accepted discovery state is left alone, which is what makes a second
+    /// `initialize_with` fetch nothing.
     ///
     /// # Errors
     ///
     /// Only a [`KeySourceError::Fatal`]. Everything else soft-fails: it is
-    /// logged, and the first token after the floor tries again.
+    /// logged, and the first token tries again.
     async fn warm_up(
         &self,
         issuer: &TrustedIssuer,
@@ -935,10 +941,7 @@ impl JwtIdentityResolver {
         ext: &InitExtensions,
     ) -> Result<(), KeySourceError> {
         let _guard = issuer.refresh.fetching.lock().await;
-        if !issuer
-            .refresh
-            .claim_attempt(issuer.source.min_refresh_interval())
-        {
+        if issuer.refresh.discovery().discovered_at.is_some() {
             return Ok(());
         }
         discovery_refresh::refresh(
@@ -1595,11 +1598,22 @@ fn validate_token(
     // A discovered issuer's algorithms travel with its keys, read under the
     // same guard, so a refresh that changes both is seen whole.
     let algorithms = keys.algorithms().unwrap_or(&issuer.algorithms);
-    let Some(&primary) = algorithms.first() else {
+    if algorithms.is_empty() {
         return Err(ValidateError::NoAlgorithms);
-    };
-    let mut validation = Validation::new(primary);
-    validation.algorithms = algorithms.to_vec();
+    }
+    // Membership is checked here, and jsonwebtoken is handed only the token's
+    // own algorithm. It refuses a token when any listed algorithm belongs to
+    // another key family than the token's, so passing the whole accepted set
+    // would deny every token from an issuer that accepts both RSA and EC
+    // algorithms, as most providers advertise. The selected key must belong
+    // to the token's family too: an ES256 token naming an RSA key is an
+    // algorithm mismatch, whatever else the issuer accepts.
+    if !algorithms.contains(&header.alg) || key.family() != header.alg.family() {
+        return Err(ValidateError::Jwt(
+            jsonwebtoken::errors::ErrorKind::InvalidAlgorithm.into(),
+        ));
+    }
+    let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[&issuer.issuer]);
     // `nbf` is off by default in jsonwebtoken, unlike `exp`. Leaving it off
     // accepts a token whose own issuer says it is not valid yet, which is how a
@@ -3710,7 +3724,11 @@ mod tests {
             1,
             "no duplicate issuer"
         );
-        assert_eq!(http.call_count(), 2, "the second call is inside the floor");
+        assert_eq!(
+            http.call_count(),
+            2,
+            "the second call finds an accepted discovery state and fetches nothing"
+        );
         let result = resolver
             .handle(&ec_payload(), &ext_with(&http), &mut PluginContext::new())
             .await;
@@ -3728,7 +3746,6 @@ mod tests {
             )))
             .await
             .expect("an unreachable IdP soft-fails");
-        let boot_calls = http.call_count();
 
         let result = resolver
             .handle(&ec_payload(), &ext_with(&http), &mut PluginContext::new())
@@ -3741,10 +3758,64 @@ mod tests {
             "{}",
             violation.reason
         );
+    }
+
+    #[tokio::test]
+    async fn the_first_token_after_a_failed_boot_retries_at_once() {
+        let down = Arc::new(praxis_policy_core::http_testing::FakeTransport::new());
+        let resolver = JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap();
+        resolver
+            .initialize_with(&praxis_policy_core::http_testing::granting(Arc::clone(
+                &down,
+            )))
+            .await
+            .expect("an unreachable IdP soft-fails");
+        assert!(down.call_count() > 0, "boot tried the discovery document");
+
+        // The IdP is back, well inside the 30 s floor.
+        let up = discovery_idp();
+        let first = resolver
+            .handle(&ec_payload(), &ext_with(&up), &mut PluginContext::new())
+            .await;
+
+        assert!(
+            first.continue_processing,
+            "boot does not claim the floor, so the first token rediscovers: {:?}",
+            first.violation
+        );
         assert_eq!(
-            http.call_count(),
-            boot_calls,
-            "inside the floor, the request does not refetch"
+            up.call_count(),
+            2,
+            "discovery then JWKS, on the request path"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_first_token_after_a_failed_boot_claims_the_floor() {
+        let down = Arc::new(praxis_policy_core::http_testing::FakeTransport::new());
+        let resolver = JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap();
+        resolver
+            .initialize_with(&praxis_policy_core::http_testing::granting(Arc::clone(
+                &down,
+            )))
+            .await
+            .expect("an unreachable IdP soft-fails");
+        let boot_calls = down.call_count();
+
+        for _ in 0..3 {
+            let result = resolver
+                .handle(&ec_payload(), &ext_with(&down), &mut PluginContext::new())
+                .await;
+            assert_eq!(
+                result.violation.map(|v| v.code).as_deref(),
+                Some("auth.jwks_unavailable")
+            );
+        }
+
+        assert_eq!(
+            down.call_count() - boot_calls,
+            1,
+            "one request-path attempt, single-shot, per floor window"
         );
     }
 
@@ -3786,7 +3857,55 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_unknown_kids_share_one_refresh() {
+    async fn concurrent_cold_tokens_share_one_discovery() {
+        let http = Arc::new(
+            praxis_policy_core::http_testing::FakeTransport::new()
+                .json(WELL_KNOWN_PATH, 200, &discovery_doc())
+                .json(DISCOVERY_CERTS, 200, &ec_jwks())
+                .with_latency(std::time::Duration::from_millis(100)),
+        );
+        // Never initialized, so every token arrives to an empty store.
+        let resolver = Arc::new(JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap());
+
+        let outcomes = futures::future::join_all(
+            std::iter::repeat_with(|| {
+                let resolver = Arc::clone(&resolver);
+                let http = Arc::clone(&http);
+                tokio::spawn(async move {
+                    resolver
+                        .handle(&ec_payload(), &ext_with(&http), &mut PluginContext::new())
+                        .await
+                        .violation
+                        .map(|v| v.code)
+                })
+            })
+            .take(100),
+        )
+        .await;
+
+        let denied: Vec<_> = outcomes
+            .into_iter()
+            .map(|joined| joined.expect("no task panics"))
+            .filter(Option::is_some)
+            .collect();
+        assert!(
+            denied.is_empty(),
+            "every waiter shares the leader's result: {denied:?}"
+        );
+        assert_eq!(
+            http.call_count_for(WELL_KNOWN_PATH),
+            1,
+            "one discovery fetch for 100 concurrent cold tokens"
+        );
+        assert_eq!(
+            http.call_count_for(DISCOVERY_CERTS),
+            1,
+            "one JWKS fetch for 100 concurrent cold tokens"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn invented_kids_are_bounded_by_the_floor() {
         let http = Arc::new(
             praxis_policy_core::http_testing::FakeTransport::new()
                 .json(WELL_KNOWN_PATH, 200, &discovery_doc())
@@ -3802,23 +3921,25 @@ mod tests {
             .unwrap();
         let before = http.call_count();
 
-        let denials = futures::future::join_all((0..100).map(|i| {
-            let resolver = Arc::clone(&resolver);
-            let http = Arc::clone(&http);
-            async move {
-                let token = ec_token(&format!("invented-{i}"));
-                resolver
-                    .handle(
-                        &IdentityPayload::new(token, TokenSource::Bearer),
-                        &ext_with(&http),
-                        &mut PluginContext::new(),
-                    )
-                    .await
-                    .violation
-                    .map(|v| v.code)
-            }
-        }))
-        .await;
+        let storm = |offset: usize| {
+            futures::future::join_all((0..100).map(|i| {
+                let resolver = Arc::clone(&resolver);
+                let http = Arc::clone(&http);
+                async move {
+                    let token = ec_token(&format!("invented-{}", offset + i));
+                    resolver
+                        .handle(
+                            &IdentityPayload::new(token, TokenSource::Bearer),
+                            &ext_with(&http),
+                            &mut PluginContext::new(),
+                        )
+                        .await
+                        .violation
+                        .map(|v| v.code)
+                }
+            }))
+        };
+        let denials = [storm(0).await, storm(100).await].concat();
 
         assert!(
             denials
@@ -3827,9 +3948,14 @@ mod tests {
             "{denials:?}"
         );
         assert_eq!(
-            http.call_count() - before,
-            0,
-            "the boot fetch claimed the floor, so invented kids fetch nothing"
+            http.call_count_for(WELL_KNOWN_PATH),
+            1,
+            "the document is fresh, so the storm never re-reads it"
+        );
+        assert!(
+            http.call_count() - before <= 1,
+            "200 invented kids inside one floor window cost at most one JWKS fetch, got {}",
+            http.call_count() - before
         );
     }
 

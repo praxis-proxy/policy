@@ -40,9 +40,7 @@ mod alarm;
 pub mod claim_map;
 /// Plugin configuration and its validation.
 pub mod config;
-/// OIDC Discovery: the `oidc_discovery` key source and the checks a
-/// provider configuration document must pass.
-pub mod discovery;
+mod discovery;
 mod discovery_refresh;
 /// `DPoP` ([RFC 9449]) proof-of-possession verification.
 ///

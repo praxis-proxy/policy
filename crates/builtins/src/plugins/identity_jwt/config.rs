@@ -21,7 +21,7 @@ use praxis_policy_core::host::{HostServices, HttpRequestError};
 use praxis_policy_core::http::{HttpRequest, HttpResponse};
 use praxis_policy_core::http_retry::RetryPolicy;
 
-use crate::plugins::identity_jwt::discovery::OidcDiscoveryConfig;
+use crate::plugins::identity_jwt::discovery::{OidcDiscoveryConfig, clip};
 use crate::plugins::identity_jwt::trusted_issuer::{KeyStore, RefreshGate, TrustedIssuer};
 use praxis_policy_core::identity::mapping::ClaimMapConfig;
 
@@ -690,8 +690,15 @@ pub(super) async fn fetch_jwks(
         KeySourceError::Recoverable(format!("JWKS GET {url} body is not UTF-8: {e}"))
     })?;
 
+    // The serde message is not echoed: an "invalid type" or "unknown variant"
+    // error quotes the offending value, which is body content.
     let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_str(body).map_err(|e| {
-        KeySourceError::Recoverable(format!("JWKS {url} body is not a JWKSet: {e}"))
+        KeySourceError::Recoverable(format!(
+            "JWKS {url} body is not a JWKSet ({:?} error at line {}, column {})",
+            e.classify(),
+            e.line(),
+            e.column()
+        ))
     })?;
 
     // Iterate every signature-use key (or every key, if none declared
@@ -702,7 +709,10 @@ pub(super) async fn fetch_jwks(
     let mut entries: Vec<(String, DecodingKey)> = Vec::new();
     let mut skipped_no_kid: usize = 0;
     let mut skipped_symmetric: usize = 0;
+    // Only the first few are named, each clipped: a `kid` is body content,
+    // and a hostile document can carry thousands of long ones.
     let mut skipped_unusable: Vec<String> = Vec::new();
+    let mut unusable: usize = 0;
     for k in &jwks.keys {
         // Filter to sig-use when the IdP labels it; if no key declares
         // `use`, accept everything (some older IdPs publish JWKS without the
@@ -735,7 +745,12 @@ pub(super) async fn fetch_jwks(
             .and_then(|key| check_key(&key).map(|()| key))
         {
             Ok(key) => entries.push((kid, key)),
-            Err(e) => skipped_unusable.push(format!("{kid}: {e}")),
+            Err(e) => {
+                unusable += 1;
+                if skipped_unusable.len() < MAX_NAMED_UNUSABLE_KEYS {
+                    skipped_unusable.push(format!("{}: {}", clip(&kid), clip(&e)));
+                }
+            },
         }
     }
     if entries.is_empty() {
@@ -746,9 +761,13 @@ pub(super) async fn fetch_jwks(
             "JWKS at {url} contained no usable signature keys \
              (skipped {skipped_no_kid} entries with no kid and \
              {skipped_symmetric} symmetric entries; \
-             {} entries failed to parse: [{}])",
-            skipped_unusable.len(),
+             {unusable} entries failed to parse: [{}{}])",
             skipped_unusable.join(", "),
+            if unusable > skipped_unusable.len() {
+                format!(", and {} more", unusable - skipped_unusable.len())
+            } else {
+                String::new()
+            },
         )));
     }
     Ok(JwksFetch::Fetched {
@@ -806,7 +825,7 @@ pub(super) async fn conditional_get(
         },
     };
 
-    svc.http_request(req, bounds.retry).await.map_err(|e| {
+    let resp = svc.http_request(req, bounds.retry).await.map_err(|e| {
         let msg = format!("{what} GET {url} failed: {e}");
         match e {
             // No transport wired, or `perform_http` not granted. The call
@@ -817,7 +836,17 @@ pub(super) async fn conditional_get(
             // The transport ran and the call failed.
             HttpRequestError::Transport(_) => KeySourceError::Recoverable(msg),
         }
-    })
+    })?;
+
+    // The ceiling is the transport's to enforce, but a host transport that
+    // ignores it must not hand an unbounded document to the parser.
+    if resp.body.len() > max_response_bytes {
+        return Err(KeySourceError::Recoverable(format!(
+            "{what} GET {url} returned {} bytes, over the {max_response_bytes}-byte ceiling",
+            resp.body.len()
+        )));
+    }
+    Ok(resp)
 }
 
 /// Ceiling on a JWKS response body.
@@ -828,6 +857,10 @@ pub(super) async fn conditional_get(
 /// hostile or broken endpoint streaming without end is refused rather
 /// than buffered. `reqwest` applied no limit here at all.
 const JWKS_MAX_BYTES: usize = 256 * 1024;
+
+/// How many unusable JWKS entries an error message names. The rest are
+/// counted.
+const MAX_NAMED_UNUSABLE_KEYS: usize = 16;
 
 /// Overall request timeout on the JWKS HTTP GET (includes connect +
 /// TLS + response body). 5s is a forgiving upper bound for a healthy

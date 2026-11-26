@@ -255,6 +255,8 @@ pub(super) struct Document {
 /// Why a document was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Rejection {
+    /// What was wrong, for the operator. Never quotes the body beyond a
+    /// clipped document-supplied string.
     pub(super) reason: String,
     /// Whether an operator has to change something, as opposed to an `IdP`
     /// that is unhelpful right now.
@@ -362,7 +364,10 @@ fn check_jwks_uri(uri: &str, insecure_http: bool) -> Result<(), Rejection> {
 /// left out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AlgorithmChoice {
+    /// The effective set a token's `alg` must belong to. Never empty.
     pub(super) algorithms: Vec<Algorithm>,
+    /// Advertised names left out, at most [`MAX_IGNORED_NAMES`], each
+    /// clipped.
     pub(super) ignored: Vec<String>,
 }
 
@@ -582,7 +587,7 @@ fn url_fault(url: &str, allow_query: bool) -> Option<&'static str> {
 
 /// `s` cut to [`MAX_ECHOED_CHARS`] characters, for echoing a
 /// document-supplied string.
-fn clip(s: &str) -> String {
+pub(super) fn clip(s: &str) -> String {
     match s.char_indices().nth(MAX_ECHOED_CHARS) {
         Some((end, _)) => format!("{}...", s.get(..end).unwrap_or_default()),
         None => s.to_owned(),

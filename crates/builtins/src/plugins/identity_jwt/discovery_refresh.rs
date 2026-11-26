@@ -84,16 +84,22 @@ enum Hop {
 
 /// Refresh `issuer` from its provider configuration.
 ///
-/// Call with the issuer's single-flight lock held and its floor claimed. At
-/// most one document fetch and one JWKS fetch. A document is re-read only
-/// when none was accepted yet, when it is older than `refresh_secs`, or
-/// after a JWKS failure; the JWKS is always fetched, conditionally when the
-/// URL is unchanged.
+/// Call with the issuer's single-flight lock held and, on the request path,
+/// its floor claimed. At most one document fetch and one JWKS fetch. A
+/// document is re-read only when none was accepted yet, when it is older than
+/// `refresh_secs`, or after a JWKS failure; the JWKS is always fetched,
+/// conditionally when the URL is unchanged.
 ///
 /// Returns whether what a verify checks against changed (keys or
 /// algorithms), so the caller knows whether re-validating is worth anything.
 /// Recoverable failures are logged here and keep the last good state; they
 /// return `Ok`, as the caller has nothing more to do about them.
+///
+/// A failed document fetch does not advance the document's age, so during a
+/// lasting discovery outage the issuer stays stale: one request per
+/// `min_refresh_interval_secs` runs this inline and waits out the failing
+/// fetch (up to two request-path hops, 4 s), while held keys keep verifying.
+/// The same holds for a `jwks_url` issuer whose endpoint is down.
 ///
 /// # Errors
 ///
@@ -182,6 +188,9 @@ pub(super) async fn refresh(
             issuer.refresh.set_etag(etag);
             issuer.refresh.mark_success();
             log.progress(&held, &next, discovered, Some(count));
+            if held.jwks_uri.is_some() {
+                log.keys_refreshed(&target, count);
+            }
             issuer.refresh.set_discovery(next);
             Ok(true)
         },
@@ -337,6 +346,18 @@ impl Log<'_> {
                 "OIDC discovery changed"
             );
         }
+    }
+
+    /// A refresh after the first resolution replaced the key set, the event a
+    /// `jwks_url` issuer logs for the same thing.
+    fn keys_refreshed(&self, jwks_uri: &str, keys: usize) {
+        tracing::info!(
+            plugin = %self.plugin,
+            issuer = %self.issuer,
+            jwks_uri = %jwks_uri,
+            keys,
+            "refreshed JWKS on demand"
+        );
     }
 
     /// A document fetch failed with nothing to fall back on.
@@ -1041,6 +1062,117 @@ mod tests {
         assert!(
             !format!("{:?}", issuer.refresh.discovery()).contains("ETAG-MARKER"),
             "Debug elides the validator"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rotated_key_set_is_logged_at_info() {
+        let http = Arc::new(
+            FakeTransport::new()
+                .json(WELL_KNOWN, 200, &doc(KEYS_ONE, Some(&["RS256"])))
+                .json(KEYS_ONE, 200, &jwks(&[rsa("k1")]))
+                .json(KEYS_ONE, 200, &jwks(&[rsa("k1"), rsa("k2")])),
+        );
+        let issuer = issuer(OidcDiscoveryConfig::default(), &[]);
+        let (_, boot) = captured(run(&issuer, &http, JwksFetchBudget::Startup)).await;
+        assert!(
+            boot.matching("refreshed JWKS").is_empty(),
+            "the first resolution has its own event: {:?}",
+            boot.recorded()
+        );
+
+        let (changed, events) = captured(run(&issuer, &http, JwksFetchBudget::RequestPath)).await;
+
+        assert!(
+            changed && holds(&issuer, "k2"),
+            "the rotated key is installed"
+        );
+        let refreshed = events.matching("refreshed JWKS on demand");
+        assert_eq!(refreshed.len(), 1, "{:?}", events.recorded());
+        assert!(refreshed[0].starts_with("[INFO]"), "{refreshed:?}");
+        assert!(
+            refreshed[0].contains("keys=2") && refreshed[0].contains("issuer="),
+            "{refreshed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hostile_jwks_bodies_reach_no_log() {
+        let long_kid = |i: usize| format!("KID-MARKER-{i}-{}", "x".repeat(1_000));
+        let unusable: Vec<Value> = (0..40)
+            .map(
+                |i| json!({ "kty": "RSA", "use": "sig", "kid": long_kid(i), "n": "!!", "e": "!!" }),
+            )
+            .collect();
+        let http = Arc::new(
+            FakeTransport::new()
+                .json(WELL_KNOWN, 200, &doc(KEYS_ONE, None))
+                .json(
+                    KEYS_ONE,
+                    200,
+                    r#"{"keys":"BODY-MARKER-aws_secret_access_key=AKIAEXAMPLE"}"#,
+                )
+                .json(KEYS_ONE, 200, &jwks(&unusable)),
+        );
+        let issuer = issuer(OidcDiscoveryConfig::default(), &[]);
+
+        let (_, events) = captured(async {
+            run(&issuer, &http, JwksFetchBudget::Startup).await;
+            run(&issuer, &http, JwksFetchBudget::RequestPath).await;
+        })
+        .await;
+
+        let logged = events.recorded();
+        assert_eq!(
+            http.call_count_for(KEYS_ONE),
+            2,
+            "both hostile bodies were served"
+        );
+        let all = logged.join("\n");
+        assert!(!all.contains("BODY-MARKER"), "body content leaked: {all}");
+        assert!(all.contains("not a JWKSet"), "{all}");
+        assert!(all.contains("and 24 more"), "the list is capped: {all}");
+        assert!(
+            !all.contains(&long_kid(0)),
+            "every echoed kid is clipped: {all}"
+        );
+        assert!(
+            logged.iter().all(|line| line.len() < 16 * 1_024),
+            "no log line grows with the body"
+        );
+    }
+
+    #[tokio::test]
+    async fn bodies_over_the_ceiling_are_refused_even_when_the_transport_ignores_it() {
+        // `FakeTransport` does not enforce `max_response_bytes`, like a host
+        // transport that ignores it.
+        let mut big_doc: Value = serde_json::from_str(&doc(KEYS_ONE, None)).unwrap();
+        big_doc["padding"] = json!("p".repeat(70_000));
+        let http = Arc::new(FakeTransport::new().json(WELL_KNOWN, 200, &big_doc.to_string()));
+        let issuer_a = issuer(OidcDiscoveryConfig::default(), &[]);
+        assert!(!run(&issuer_a, &http, JwksFetchBudget::RequestPath).await);
+        assert_eq!(http.call_count(), 1, "an oversized document names no keys");
+
+        let mut big_jwks: Value = serde_json::from_str(&jwks(&[rsa("k1")])).unwrap();
+        big_jwks["padding"] = json!("p".repeat(300_000));
+        let http = Arc::new(
+            FakeTransport::new()
+                .json(WELL_KNOWN, 200, &doc(KEYS_ONE, None))
+                .json(KEYS_ONE, 200, &big_jwks.to_string()),
+        );
+        let issuer_b = issuer(OidcDiscoveryConfig::default(), &[]);
+
+        let (changed, events) = captured(run(&issuer_b, &http, JwksFetchBudget::RequestPath)).await;
+
+        assert!(!changed);
+        assert!(
+            issuer_b.keys.read().unwrap().is_empty(),
+            "an oversized JWKS installs nothing"
+        );
+        assert!(
+            events.recorded().join("\n").contains("ceiling"),
+            "{:?}",
+            events.recorded()
         );
     }
 
