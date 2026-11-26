@@ -449,6 +449,9 @@ mod tests {
 
         // Outside range
         assert!(!scope.allows_address("fe80::1"));
+        // Edge cases for IPv6
+        assert!(scope.allows_address("fc00:0000:0000:0000:0000:0000:0000:0000"));
+        assert!(scope.allows_address("fd00:ffff:ffff:ffff:ffff:ffff:ffff:ffff"));
     }
 
     #[test]
