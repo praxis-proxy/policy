@@ -281,6 +281,114 @@ async fn a_burst_of_unknown_kids_refetches_the_jwks_at_most_once() {
     );
 }
 
+/// Where the discovered issuer's document says its keys are. Outside the
+/// host's own JWKS URL, so the two are counted apart.
+const DISCOVERED_JWKS_URL: &str = "https://idp.test/realms/policy-demo/discovered/jwks";
+
+/// The HMAC secret the discovered JWKS publishes as an `oct` key.
+const PUBLISHED_SECRET: &[u8] = b"secret-published-as-an-oct-jwk";
+
+/// The cedar fixture with `jwt-user` switched to OIDC discovery, against a
+/// document that advertises `HS256` and `none` next to `RS256` and a JWKS
+/// that publishes [`PUBLISHED_SECRET`] as an `oct` key next to the realm key.
+async fn discovery_host() -> RefHost {
+    let static_issuer = "        - issuer: \"https://idp.test/realms/policy-demo\"\n          \
+         audiences: [\"praxis-gateway\"]\n          algorithms: [\"RS256\"]\n          \
+         decoding_key:\n            kind: jwks_url\n            \
+         url: \"https://idp.test/realms/policy-demo/protocol/openid-connect/certs\"\n";
+    let discovered = "        - issuer: \"https://idp.test/realms/policy-demo\"\n          \
+         audiences: [\"praxis-gateway\"]\n          decoding_key:\n            \
+         kind: oidc_discovery\n";
+    let yaml = Fixture::Cedar
+        .hermetic()
+        .replacen(static_issuer, discovered, 1);
+    assert_ne!(yaml, Fixture::Cedar.hermetic(), "the anchor matched");
+    let document = json!({
+        "issuer": idp::ISSUER,
+        "jwks_uri": DISCOVERED_JWKS_URL,
+        "id_token_signing_alg_values_supported": ["HS256", "RS256", "none"],
+    });
+    let mut keys = idp::jwks();
+    keys["keys"]
+        .as_array_mut()
+        .expect("a key list")
+        .push(json!({ "kty": "oct", "kid": "shared", "alg": "HS256", "k": "c2VjcmV0LXB1Ymxpc2hlZC1hcy1hbi1vY3Qtandr" }));
+    RefHost::builder()
+        .transport(
+            FakeTransport::new()
+                .json(
+                    "/.well-known/openid-configuration",
+                    200,
+                    &document.to_string(),
+                )
+                .json(DISCOVERED_JWKS_URL, 200, &keys.to_string()),
+        )
+        .start(&yaml)
+        .await
+        .expect("the discovery fixture starts")
+}
+
+/// A discovered issuer accepts only asymmetric algorithms, whatever its
+/// document advertises, and an `oct` key in its JWKS is never a verification
+/// key, so neither a published secret nor `alg: none` gets past identity.
+#[tokio::test]
+async fn a_discovered_issuer_never_accepts_a_symmetric_or_unsigned_token() {
+    let host = discovery_host().await;
+    assert_eq!(
+        host.transport().call_count_for(DISCOVERED_JWKS_URL),
+        1,
+        "the discovered key set was fetched at boot"
+    );
+
+    let cases = [
+        (
+            "HS256 with the published secret under its own kid",
+            idp::forge(
+                &header(json!({ "alg": "HS256", "kid": "shared" })),
+                &Persona::Bob.claims(),
+                Signer::Hs256(PUBLISHED_SECRET),
+            ),
+            "auth.unknown_kid",
+        ),
+        (
+            "HS256 with the published secret under the realm kid",
+            idp::forge(
+                &header(json!({ "alg": "HS256" })),
+                &Persona::Bob.claims(),
+                Signer::Hs256(PUBLISHED_SECRET),
+            ),
+            "auth.algorithm_mismatch",
+        ),
+        (
+            "alg none",
+            idp::forge(
+                &header(json!({ "alg": "none" })),
+                &Persona::Bob.claims(),
+                Signer::Unsigned,
+            ),
+            "auth.malformed_credential",
+        ),
+    ];
+    for (label, token, code) in cases {
+        let call = compensation_as(&token);
+        let planted = planted_for(&call);
+        let out = host.call(call).await;
+        assert_eq!(out.violation_code(), Some(code), "{label}");
+        assert_identity_deny(&host, &out, code, &planted);
+    }
+
+    let control = compensation_as(&Persona::Bob.token());
+    let mut planted = planted_for(&control);
+    let out = host.call(control).await;
+    assert!(
+        out.allowed(),
+        "the realm-signed control passes: {:?}",
+        out.violation
+    );
+    planted.plant("minted workday token", support::forwarded_bearer(&out));
+    out.assert_no_leaks(&planted);
+}
+
 /// Each header is validated for its own role, so a swapped pair grants
 /// nothing the user header's subject does not hold.
 #[tokio::test]

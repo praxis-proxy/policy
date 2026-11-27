@@ -74,14 +74,19 @@ use praxis_policy_core::plugin::{Plugin, PluginConfig, PluginMode};
 use crate::plugins::identity_jwt::claim_map::JWT_MAPPING_PROFILE;
 use crate::plugins::identity_jwt::config::DpopMode;
 use crate::plugins::identity_jwt::config::{
-    JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig, KeySourceError, TrustedIssuerConfig,
+    DecodingKeySource, JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig, KeySourceError,
+    TrustedIssuerConfig,
 };
+use crate::plugins::identity_jwt::discovery::OidcDiscoveryConfig;
+use crate::plugins::identity_jwt::discovery_refresh;
 use crate::plugins::identity_jwt::dpop::{
     DpopVerifier, InMemoryReplayGuard, PopDenial, PopRequest, ReplayGuard, codes as dpop_codes,
 };
 use crate::plugins::identity_jwt::presets;
+use crate::plugins::identity_jwt::trusted_issuer::{KeyStore, TrustedIssuer};
 use crate::plugins::identity_jwt::{KIND, alarm};
 use praxis_policy_core::extensions::{HttpExtension, KeyBinding};
+use praxis_policy_core::host::{HTTP_CAPABILITY, InitExtensions};
 use praxis_policy_core::identity::mapping::ConfiguredClaimMap;
 use praxis_policy_core::identity::mapping::{ClaimMap, ClaimMapper};
 use praxis_policy_core::identity::mapping::{ClaimsOverrides, CompiledClaimsOverrides};
@@ -94,8 +99,10 @@ use praxis_policy_core::identity::mapping::{ClaimsOverrides, CompiledClaimsOverr
 /// alternative, an unbounded `lock().await`, is what let a slow `IdP`
 /// stall every concurrent request for an issuer at once.
 const REFRESH_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
-use crate::plugins::identity_jwt::trusted_issuer::{KeyStore, TrustedIssuer};
-use praxis_policy_core::host::InitExtensions;
+
+/// [`REFRESH_WAIT_BUDGET`] for a discovered issuer, whose refresh is two
+/// request-path fetches back to back: the document, then its JWKS.
+const DISCOVERY_REFRESH_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Default clock-skew tolerance, in seconds. Matches what most OIDC
 /// clients use as a sane default for `exp` / `nbf`.
@@ -115,6 +122,9 @@ const DEFAULT_LEEWAY_SECONDS: u64 = 60;
 ///   fetches all pending JWKS endpoints **concurrently** via
 ///   `futures::join_all` and merges the resolved issuers into the
 ///   `trusted_issuers` vec under the `RwLock`.
+/// * **`OidcDiscovery`** — registered in `trusted_issuers` at `new()` with no
+///   keys. `initialize()` discovers them alongside the JWKS fetches, and an
+///   instance that is never initialized discovers on its first token.
 ///
 /// The split keeps construction synchronous (matches the existing
 /// `PluginFactory::create` trait surface across the workspace) while
@@ -310,6 +320,25 @@ impl JwtIdentityResolver {
             }));
         }
 
+        // Discovery is the whole point of the source, so a resolver that
+        // could never make the request is refused now rather than loading an
+        // issuer that denies every token.
+        if let Some(issuer) = typed
+            .trusted_issuers
+            .iter()
+            .find(|i| matches!(i.decoding_key, DecodingKeySource::OidcDiscovery(_)))
+            && !cfg.capabilities.contains(HTTP_CAPABILITY)
+        {
+            return Err(Box::new(PluginError::Config {
+                message: format!(
+                    "plugin '{}' ({KIND}): trusted_issuer '{}' uses oidc_discovery, which \
+                     fetches the issuer's provider configuration; grant the plugin the \
+                     `{HTTP_CAPABILITY}` capability",
+                    cfg.name, issuer.issuer
+                ),
+            }));
+        }
+
         // Partition issuer configs:
         //   * Inline / on-disk decoding keys (Pem, PemFile, Jwk,
         //     Secret) → eagerly built into TrustedIssuers here.
@@ -334,7 +363,13 @@ impl JwtIdentityResolver {
                     probe_algorithms(&raw.dpop.algorithms)?;
                 }
             }
-            if raw.decoding_key.needs_async() {
+            if matches!(raw.decoding_key, DecodingKeySource::OidcDiscovery(_)) {
+                // Registered now, keys or not, so an instance whose
+                // `initialize_with` never runs still knows the issuer and
+                // discovers on its first token. The engine builds such
+                // instances when it loads a config after initialization.
+                trusted_issuers.push(Arc::new(raw.into_trusted_issuer(KeyStore::empty())));
+            } else if raw.decoding_key.needs_async() {
                 pending_jwks.push(raw);
             } else {
                 let built = raw.build().map_err(|e| {
@@ -528,11 +563,15 @@ impl Plugin for JwtIdentityResolver {
     ///
     /// The `PolicyEngine` drives this once per plugin lifetime
     /// (before any hooks fire). Idempotent: if `pending_jwks` is
-    /// empty (no `JwksUrl` sources) this is a free no-op.
+    /// empty (no `JwksUrl` sources) and no issuer uses discovery, this is a
+    /// free no-op. A discovered issuer that already holds an accepted
+    /// discovery document is skipped, so a second call after a successful one
+    /// fetches nothing for it.
     async fn initialize_with(&self, ext: &InitExtensions) -> Result<(), Box<PluginError>> {
-        if self.pending_jwks.is_empty() {
-            // No `jwks_url` issuer, so nothing here needs egress. A
-            // deployment on inline keys must not be made to declare
+        let discovered = self.discovered_issuers();
+        if self.pending_jwks.is_empty() && discovered.is_empty() {
+            // No `jwks_url` or discovered issuer, so nothing here needs
+            // egress. A deployment on inline keys must not be made to declare
             // `perform_http` for a call it never makes.
             return Ok(());
         }
@@ -541,13 +580,23 @@ impl Plugin for JwtIdentityResolver {
         //    outcome) — we keep the config alongside the result
         //    so the soft-fail path can construct an empty
         //    KeyStore that still carries the source a later verify
-        //    needs to re-fetch it.
+        //    needs to re-fetch it. Discovered issuers are already
+        //    registered and fill their own keys in place.
         let fetches = self.pending_jwks.iter().cloned().map(|cfg| async move {
             let outcome = cfg.clone().build_async(ext, JwksFetchBudget::Startup).await;
             (cfg, outcome)
         });
-        let resolved: Vec<(TrustedIssuerConfig, Result<TrustedIssuer, KeySourceError>)> =
-            futures::future::join_all(fetches).await;
+        let warm_ups = discovered
+            .iter()
+            .map(|(issuer, source)| self.warm_up(issuer, source, ext));
+        let (resolved, warmed): (
+            Vec<(TrustedIssuerConfig, Result<TrustedIssuer, KeySourceError>)>,
+            Vec<Result<(), KeySourceError>>,
+        ) = futures::future::join(
+            futures::future::join_all(fetches),
+            futures::future::join_all(warm_ups),
+        )
+        .await;
 
         // 2. A configuration fault is fatal before anything is installed.
         //    Soft-failing one would boot a gateway that denies every token
@@ -564,6 +613,17 @@ impl Plugin for JwtIdentityResolver {
                 Err(e) if e.is_fatal() => Some(format!("issuer '{}': {e}", cfg.issuer)),
                 _ => None,
             })
+            .chain(
+                discovered
+                    .iter()
+                    .zip(&warmed)
+                    .filter_map(|((issuer, _), outcome)| {
+                        outcome
+                            .as_ref()
+                            .err()
+                            .map(|e| format!("issuer '{}': {e}", issuer.issuer))
+                    }),
+            )
             .collect();
         if !fatal.is_empty() {
             return Err(PluginError::Config {
@@ -572,7 +632,7 @@ impl Plugin for JwtIdentityResolver {
                      misconfigured: {}",
                     self.cfg.name,
                     fatal.len(),
-                    resolved.len(),
+                    resolved.len() + discovered.len(),
                     fatal.join("; "),
                 ),
             }
@@ -611,23 +671,12 @@ impl Plugin for JwtIdentityResolver {
                     );
                     // Build a TrustedIssuer with an empty KeyStore
                     // so a refresh can swap a fresh store in
-                    // without re-running validation logic.
-                    TrustedIssuer {
-                        issuer: cfg.issuer.clone(),
-                        audiences: cfg.audiences.clone(),
-                        skip_audience_validation: cfg.skip_audience_validation,
-                        keys: Arc::new(std::sync::RwLock::new(KeyStore::empty())),
-                        algorithms: cfg.algorithms.clone(),
-                        leeway_seconds: cfg.leeway_seconds,
-                        dpop: cfg.dpop.clone(),
-                        // Carrying the source is what makes the empty
-                        // store recoverable: the first verify that needs
-                        // a key will re-fetch rather than denying for the
-                        // life of the process.
-                        source: cfg.decoding_key.clone(),
-                        refresh: crate::plugins::identity_jwt::trusted_issuer::RefreshGate::default(
-                        ),
-                    }
+                    // without re-running validation logic. It carries the
+                    // source, which is what makes the empty store
+                    // recoverable: the first verify that needs a key will
+                    // re-fetch rather than denying for the life of the
+                    // process.
+                    cfg.into_trusted_issuer(KeyStore::empty())
                 },
             };
 
@@ -712,8 +761,11 @@ impl JwtIdentityResolver {
         // charge every one of them.
         let _guard = match urgency {
             RefreshUrgency::Required => {
-                let waited =
-                    tokio::time::timeout(REFRESH_WAIT_BUDGET, issuer.refresh.fetching.lock()).await;
+                let budget = match issuer.source {
+                    DecodingKeySource::OidcDiscovery(_) => DISCOVERY_REFRESH_WAIT_BUDGET,
+                    _ => REFRESH_WAIT_BUDGET,
+                };
+                let waited = tokio::time::timeout(budget, issuer.refresh.fetching.lock()).await;
                 let Ok(guard) = waited else {
                     tracing::warn!(
                         plugin = %self.cfg.name,
@@ -748,6 +800,54 @@ impl JwtIdentityResolver {
             return false;
         }
 
+        let outcome = match &issuer.source {
+            DecodingKeySource::OidcDiscovery(source) => {
+                discovery_refresh::refresh(
+                    issuer,
+                    source,
+                    ext,
+                    JwksFetchBudget::RequestPath,
+                    &self.cfg.name,
+                )
+                .await
+            },
+            _ => self.refresh_jwks(issuer, ext).await,
+        };
+        match outcome {
+            Ok(changed) => changed,
+            // A fatal error is reachable here even though initialization
+            // refuses to start on one: the request-path capability gate is
+            // evaluated per request, so `perform_http` can be revoked from
+            // under a resolver that booted with it. Logged at `error`
+            // rather than `warn` because no amount of waiting clears it,
+            // and every subsequent refresh will fail the same way.
+            Err(e) => {
+                tracing::error!(
+                    plugin = %self.cfg.name,
+                    issuer = %issuer.issuer,
+                    error = %e,
+                    "on-demand JWKS refresh cannot run and will not recover \
+                     on its own; keys for this issuer are frozen until the \
+                     configuration is fixed"
+                );
+                false
+            },
+        }
+    }
+
+    /// Re-fetch a `jwks_url` issuer's keys. Call with the gate claimed.
+    ///
+    /// Returns whether the store was replaced. Recoverable failures are
+    /// logged here and keep the previous store.
+    ///
+    /// # Errors
+    ///
+    /// Only a [`KeySourceError::Fatal`]: no later attempt fixes it.
+    async fn refresh_jwks(
+        &self,
+        issuer: &TrustedIssuer,
+        ext: &Extensions,
+    ) -> Result<bool, KeySourceError> {
         // Conditional when we hold a validator, which is what keeps the
         // common refresh — stale keys, an `IdP` that has not rotated — to
         // a round trip rather than a document.
@@ -774,7 +874,7 @@ impl JwtIdentityResolver {
                     issuer = %issuer.issuer,
                     "refreshed JWKS on demand"
                 );
-                true
+                Ok(true)
             },
             Ok(JwksFetch::NotModified) => {
                 // The keys we hold are current, so the staleness clock
@@ -788,25 +888,9 @@ impl JwtIdentityResolver {
                     issuer = %issuer.issuer,
                     "JWKS unchanged since the last fetch"
                 );
-                false
+                Ok(false)
             },
-            // A fatal error is reachable here even though initialization
-            // refuses to start on one: the request-path capability gate is
-            // evaluated per request, so `perform_http` can be revoked from
-            // under a resolver that booted with it. Logged at `error`
-            // rather than `warn` because no amount of waiting clears it,
-            // and every subsequent refresh will fail the same way.
-            Err(e) if e.is_fatal() => {
-                tracing::error!(
-                    plugin = %self.cfg.name,
-                    issuer = %issuer.issuer,
-                    error = %e,
-                    "on-demand JWKS refresh cannot run and will not recover \
-                     on its own; keys for this issuer are frozen until the \
-                     configuration is fixed"
-                );
-                false
-            },
+            Err(e) if e.is_fatal() => Err(e),
             Err(e) => {
                 // Keep the previous store. A failed refresh must not
                 // widen the blast radius: tokens signed by a key we
@@ -817,9 +901,58 @@ impl JwtIdentityResolver {
                     error = %e,
                     "on-demand JWKS refresh failed; keeping the existing keys"
                 );
-                false
+                Ok(false)
             },
         }
+    }
+
+    /// The registered issuers whose keys come from OIDC discovery, with
+    /// their discovery settings.
+    fn discovered_issuers(&self) -> Vec<(Arc<TrustedIssuer>, OidcDiscoveryConfig)> {
+        self.trusted_issuers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|issuer| match &issuer.source {
+                DecodingKeySource::OidcDiscovery(source) => {
+                    Some((Arc::clone(issuer), source.clone()))
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Discover one issuer at startup, under its single-flight lock.
+    ///
+    /// The refresh floor is not claimed, as with the `jwks_url` boot fetch:
+    /// after a failed boot the first token retries at once, and that
+    /// request-path attempt claims the floor. An issuer that already holds an
+    /// accepted discovery state is left alone, which is what makes a second
+    /// `initialize_with` fetch nothing.
+    ///
+    /// # Errors
+    ///
+    /// Only a [`KeySourceError::Fatal`]. Everything else soft-fails: it is
+    /// logged, and the first token tries again.
+    async fn warm_up(
+        &self,
+        issuer: &TrustedIssuer,
+        source: &OidcDiscoveryConfig,
+        ext: &InitExtensions,
+    ) -> Result<(), KeySourceError> {
+        let _guard = issuer.refresh.fetching.lock().await;
+        if issuer.refresh.discovery().discovered_at.is_some() {
+            return Ok(());
+        }
+        discovery_refresh::refresh(
+            issuer,
+            source,
+            ext,
+            JwksFetchBudget::Startup,
+            &self.cfg.name,
+        )
+        .await
+        .map(drop)
     }
 }
 
@@ -972,7 +1105,7 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
         ) {
             self.refresh_issuer(issuer, ext, RefreshUrgency::Required)
                 .await
-        } else if issuer.refresh.is_stale(issuer.source.refresh_interval()) {
+        } else if issuer.is_stale() {
             self.refresh_issuer(issuer, ext, RefreshUrgency::Opportunistic)
                 .await
         } else {
@@ -989,11 +1122,15 @@ impl HookHandler<IdentityHook> for JwtIdentityResolver {
         let token_data = match outcome {
             Ok(td) => td,
             Err(ValidateError::KeysUnavailable) => {
+                let cause = match issuer.source {
+                    DecodingKeySource::OidcDiscovery(_) => "OIDC discovery or its JWKS fetch",
+                    _ => "initial JWKS fetch",
+                };
                 return PluginResult::deny(PluginViolation::new(
                     "auth.jwks_unavailable",
                     format!(
                         "issuer '{iss}' has no signing keys available — \
-                         initial JWKS fetch failed and refresh has not \
+                         {cause} failed and refresh has not \
                          yet succeeded; check upstream IdP reachability"
                     ),
                 ));
@@ -1458,11 +1595,25 @@ fn validate_token(
         None => return Err(ValidateError::UnknownKid(kid.map(String::from))),
     };
 
-    let Some(&primary) = issuer.algorithms.first() else {
+    // A discovered issuer's algorithms travel with its keys, read under the
+    // same guard, so a refresh that changes both is seen whole.
+    let algorithms = keys.algorithms().unwrap_or(&issuer.algorithms);
+    if algorithms.is_empty() {
         return Err(ValidateError::NoAlgorithms);
-    };
-    let mut validation = Validation::new(primary);
-    validation.algorithms = issuer.algorithms.clone();
+    }
+    // Membership is checked here, and jsonwebtoken is handed only the token's
+    // own algorithm. It refuses a token when any listed algorithm belongs to
+    // another key family than the token's, so passing the whole accepted set
+    // would deny every token from an issuer that accepts both RSA and EC
+    // algorithms, as most providers advertise. The selected key must belong
+    // to the token's family too: an ES256 token naming an RSA key is an
+    // algorithm mismatch, whatever else the issuer accepts.
+    if !algorithms.contains(&header.alg) || key.family() != header.alg.family() {
+        return Err(ValidateError::Jwt(
+            jsonwebtoken::errors::ErrorKind::InvalidAlgorithm.into(),
+        ));
+    }
+    let mut validation = Validation::new(header.alg);
     validation.set_issuer(&[&issuer.issuer]);
     // `nbf` is off by default in jsonwebtoken, unlike `exp`. Leaving it off
     // accepts a token whose own issuer says it is not valid yet, which is how a
@@ -3461,5 +3612,436 @@ mod tests {
         tracing::subscriber::set_global_default(Capture(std::sync::Arc::clone(&log)))
             .expect("the child installs the only subscriber");
         log
+    }
+
+    #[test]
+    fn a_minimal_discovery_issuer_loads_without_algorithms() {
+        let resolver = JwtIdentityResolver::new(discovery_cfg(json!({}), true))
+            .expect("issuer, audiences and kind: oidc_discovery are enough");
+        let issuers = resolver.trusted_issuers.read().unwrap();
+        assert_eq!(issuers.len(), 1, "registered at construction");
+        assert!(
+            issuers[0].keys.read().unwrap().is_empty(),
+            "no keys before discovery"
+        );
+        assert!(
+            resolver.pending_jwks.is_empty(),
+            "not deferred like jwks_url"
+        );
+    }
+
+    #[test]
+    fn a_discovery_issuer_without_perform_http_is_refused_at_load() {
+        let err = JwtIdentityResolver::new(discovery_cfg(json!({}), false))
+            .expect_err("discovery cannot work without egress");
+        assert!(err.to_string().contains("perform_http"), "{err}");
+    }
+
+    #[test]
+    fn discovery_settings_are_validated_at_load() {
+        let cases = [
+            (json!({ "refresh_sec": 60 }), "refresh_sec"),
+            (
+                json!({ "discovery_issuer": "https://x.example" }),
+                "discovery_url",
+            ),
+            (
+                json!({ "min_refresh_interval_secs": 0 }),
+                "min_refresh_interval_secs",
+            ),
+        ];
+        for (settings, needle) in cases {
+            let err = JwtIdentityResolver::new(discovery_cfg(settings.clone(), true))
+                .expect_err("a bad setting must not load");
+            assert!(err.to_string().contains(needle), "{settings}: {err}");
+        }
+        let mut cfg = discovery_cfg(json!({}), true);
+        cfg.config.as_mut().unwrap()["trusted_issuers"][0]["algorithms"] = json!(["HS256"]);
+        let err = JwtIdentityResolver::new(cfg).expect_err("HS256 cannot come from a JWKS");
+        assert!(err.to_string().contains("shared-secret"), "{err}");
+        let mut cfg = discovery_cfg(json!({}), true);
+        cfg.config.as_mut().unwrap()["trusted_issuers"][0]["issuer"] = json!("http://idp.example");
+        let err = JwtIdentityResolver::new(cfg).expect_err("plaintext needs opting into");
+        assert!(err.to_string().contains("insecure_http"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("plugin 'jwt' (identity/jwt): trusted_issuer 'http://idp.example'"),
+            "the message carries the usual prefix: {err}"
+        );
+    }
+
+    #[test]
+    fn other_sources_still_require_algorithms() {
+        for algorithms in [json!(null), json!([])] {
+            let mut issuer = json!({
+                "issuer": "https://idp.example",
+                "audiences": ["test-aud"],
+                "decoding_key": { "kind": "jwks_url", "url": "https://idp.example/jwks" },
+            });
+            if !algorithms.is_null() {
+                issuer["algorithms"] = algorithms;
+            }
+            let err = JwtIdentityResolver::new(cfg_with_config(
+                "jwt",
+                json!({ "trusted_issuers": [issuer] }),
+            ))
+            .expect_err("jwks_url keeps requiring algorithms");
+            assert!(
+                err.to_string().contains("must list at least one algorithm"),
+                "{err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_uninitialized_instance_discovers_on_its_first_token() {
+        let http = discovery_idp();
+        let resolver = JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap();
+
+        let result = resolver
+            .handle(&ec_payload(), &ext_with(&http), &mut PluginContext::new())
+            .await;
+
+        assert!(result.continue_processing, "{:?}", result.violation);
+        assert_eq!(
+            http.call_count(),
+            2,
+            "discovery then JWKS, on the request path"
+        );
+    }
+
+    #[tokio::test]
+    async fn initializing_twice_neither_duplicates_nor_refetches() {
+        let http = discovery_idp();
+        let resolver = JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap();
+        let init = praxis_policy_core::http_testing::granting(Arc::clone(&http));
+
+        resolver.initialize_with(&init).await.unwrap();
+        resolver.initialize_with(&init).await.unwrap();
+
+        assert_eq!(
+            resolver.trusted_issuers.read().unwrap().len(),
+            1,
+            "no duplicate issuer"
+        );
+        assert_eq!(
+            http.call_count(),
+            2,
+            "the second call finds an accepted discovery state and fetches nothing"
+        );
+        let result = resolver
+            .handle(&ec_payload(), &ext_with(&http), &mut PluginContext::new())
+            .await;
+        assert!(result.continue_processing, "{:?}", result.violation);
+        assert_eq!(http.call_count(), 2, "a fresh token costs no request");
+    }
+
+    #[tokio::test]
+    async fn a_discovery_failure_denies_as_jwks_unavailable_naming_discovery() {
+        let http = Arc::new(praxis_policy_core::http_testing::FakeTransport::new());
+        let resolver = JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap();
+        resolver
+            .initialize_with(&praxis_policy_core::http_testing::granting(Arc::clone(
+                &http,
+            )))
+            .await
+            .expect("an unreachable IdP soft-fails");
+
+        let result = resolver
+            .handle(&ec_payload(), &ext_with(&http), &mut PluginContext::new())
+            .await;
+
+        let violation = result.violation.expect("no keys, no identity");
+        assert_eq!(violation.code, "auth.jwks_unavailable");
+        assert!(
+            violation.reason.contains("OIDC discovery"),
+            "{}",
+            violation.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn the_first_token_after_a_failed_boot_retries_at_once() {
+        let down = Arc::new(praxis_policy_core::http_testing::FakeTransport::new());
+        let resolver = JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap();
+        resolver
+            .initialize_with(&praxis_policy_core::http_testing::granting(Arc::clone(
+                &down,
+            )))
+            .await
+            .expect("an unreachable IdP soft-fails");
+        assert!(down.call_count() > 0, "boot tried the discovery document");
+
+        // The IdP is back, well inside the 30 s floor.
+        let up = discovery_idp();
+        let first = resolver
+            .handle(&ec_payload(), &ext_with(&up), &mut PluginContext::new())
+            .await;
+
+        assert!(
+            first.continue_processing,
+            "boot does not claim the floor, so the first token rediscovers: {:?}",
+            first.violation
+        );
+        assert_eq!(
+            up.call_count(),
+            2,
+            "discovery then JWKS, on the request path"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_first_token_after_a_failed_boot_claims_the_floor() {
+        let down = Arc::new(praxis_policy_core::http_testing::FakeTransport::new());
+        let resolver = JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap();
+        resolver
+            .initialize_with(&praxis_policy_core::http_testing::granting(Arc::clone(
+                &down,
+            )))
+            .await
+            .expect("an unreachable IdP soft-fails");
+        let boot_calls = down.call_count();
+
+        for _ in 0..3 {
+            let result = resolver
+                .handle(&ec_payload(), &ext_with(&down), &mut PluginContext::new())
+                .await;
+            assert_eq!(
+                result.violation.map(|v| v.code).as_deref(),
+                Some("auth.jwks_unavailable")
+            );
+        }
+
+        assert_eq!(
+            down.call_count() - boot_calls,
+            1,
+            "one request-path attempt, single-shot, per floor window"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_transport_fails_initialization() {
+        let resolver = JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap();
+        let err = resolver
+            .initialize_with(&praxis_policy_core::host::InitExtensions::new())
+            .await
+            .expect_err("no transport is a configuration fault");
+        assert!(err.to_string().contains(DISCOVERY_ISSUER), "{err}");
+    }
+
+    #[tokio::test]
+    async fn dropping_the_resolver_frees_the_issuer_and_stops_all_traffic() {
+        let http = discovery_idp();
+        let resolver = JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap();
+        resolver
+            .initialize_with(&praxis_policy_core::http_testing::granting(Arc::clone(
+                &http,
+            )))
+            .await
+            .unwrap();
+        let issuer = Arc::downgrade(&resolver.trusted_issuers.read().unwrap()[0]);
+        let calls = http.call_count();
+
+        drop(resolver);
+        tokio::task::yield_now().await;
+
+        assert!(
+            issuer.upgrade().is_none(),
+            "nothing outlives the plugin instance"
+        );
+        assert_eq!(
+            http.call_count(),
+            calls,
+            "nothing keeps fetching after the drop"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_cold_tokens_share_one_discovery() {
+        let http = Arc::new(
+            praxis_policy_core::http_testing::FakeTransport::new()
+                .json(WELL_KNOWN_PATH, 200, &discovery_doc())
+                .json(DISCOVERY_CERTS, 200, &ec_jwks())
+                .with_latency(std::time::Duration::from_millis(100)),
+        );
+        // Never initialized, so every token arrives to an empty store.
+        let resolver = Arc::new(JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap());
+
+        let outcomes = futures::future::join_all(
+            std::iter::repeat_with(|| {
+                let resolver = Arc::clone(&resolver);
+                let http = Arc::clone(&http);
+                tokio::spawn(async move {
+                    resolver
+                        .handle(&ec_payload(), &ext_with(&http), &mut PluginContext::new())
+                        .await
+                        .violation
+                        .map(|v| v.code)
+                })
+            })
+            .take(100),
+        )
+        .await;
+
+        let denied: Vec<_> = outcomes
+            .into_iter()
+            .map(|joined| joined.expect("no task panics"))
+            .filter(Option::is_some)
+            .collect();
+        assert!(
+            denied.is_empty(),
+            "every waiter shares the leader's result: {denied:?}"
+        );
+        assert_eq!(
+            http.call_count_for(WELL_KNOWN_PATH),
+            1,
+            "one discovery fetch for 100 concurrent cold tokens"
+        );
+        assert_eq!(
+            http.call_count_for(DISCOVERY_CERTS),
+            1,
+            "one JWKS fetch for 100 concurrent cold tokens"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn invented_kids_are_bounded_by_the_floor() {
+        let http = Arc::new(
+            praxis_policy_core::http_testing::FakeTransport::new()
+                .json(WELL_KNOWN_PATH, 200, &discovery_doc())
+                .json(DISCOVERY_CERTS, 200, &ec_jwks())
+                .with_latency(std::time::Duration::from_millis(50)),
+        );
+        let resolver = Arc::new(JwtIdentityResolver::new(discovery_cfg(json!({}), true)).unwrap());
+        resolver
+            .initialize_with(&praxis_policy_core::http_testing::granting(Arc::clone(
+                &http,
+            )))
+            .await
+            .unwrap();
+        let before = http.call_count();
+
+        let storm = |offset: usize| {
+            futures::future::join_all((0..100).map(|i| {
+                let resolver = Arc::clone(&resolver);
+                let http = Arc::clone(&http);
+                async move {
+                    let token = ec_token(&format!("invented-{}", offset + i));
+                    resolver
+                        .handle(
+                            &IdentityPayload::new(token, TokenSource::Bearer),
+                            &ext_with(&http),
+                            &mut PluginContext::new(),
+                        )
+                        .await
+                        .violation
+                        .map(|v| v.code)
+                }
+            }))
+        };
+        let denials = [storm(0).await, storm(100).await].concat();
+
+        assert!(
+            denials
+                .iter()
+                .all(|c| c.as_deref() == Some("auth.unknown_kid")),
+            "{denials:?}"
+        );
+        assert_eq!(
+            http.call_count_for(WELL_KNOWN_PATH),
+            1,
+            "the document is fresh, so the storm never re-reads it"
+        );
+        assert!(
+            http.call_count() - before <= 1,
+            "200 invented kids inside one floor window cost at most one JWKS fetch, got {}",
+            http.call_count() - before
+        );
+    }
+
+    fn discovery_cfg(discovery: Value, perform_http: bool) -> PluginConfig {
+        let mut decoding_key = json!({ "kind": "oidc_discovery" });
+        for (k, v) in discovery.as_object().unwrap() {
+            decoding_key[k] = v.clone();
+        }
+        PluginConfig {
+            name: "jwt".into(),
+            capabilities: if perform_http {
+                ["perform_http".to_owned()].into()
+            } else {
+                Default::default()
+            },
+            config: Some(json!({
+                "trusted_issuers": [{
+                    "issuer": DISCOVERY_ISSUER,
+                    "audiences": ["test-aud"],
+                    "decoding_key": decoding_key,
+                }],
+            })),
+            ..Default::default()
+        }
+    }
+
+    const DISCOVERY_ISSUER: &str = "https://idp.example/realms/a";
+    const WELL_KNOWN_PATH: &str = "/.well-known/openid-configuration";
+    const DISCOVERY_CERTS: &str = "/realms/a/certs";
+
+    fn discovery_doc() -> String {
+        json!({
+            "issuer": DISCOVERY_ISSUER,
+            "jwks_uri": format!("{DISCOVERY_ISSUER}/certs"),
+            "id_token_signing_alg_values_supported": ["ES256"],
+        })
+        .to_string()
+    }
+
+    fn discovery_idp() -> Arc<praxis_policy_core::http_testing::FakeTransport> {
+        Arc::new(
+            praxis_policy_core::http_testing::FakeTransport::new()
+                .json(WELL_KNOWN_PATH, 200, &discovery_doc())
+                .json(DISCOVERY_CERTS, 200, &ec_jwks()),
+        )
+    }
+
+    fn ext_with(http: &Arc<praxis_policy_core::http_testing::FakeTransport>) -> Extensions {
+        let transport: Arc<dyn praxis_policy_core::http::HttpTransport> = http.clone();
+        Extensions {
+            http_transport: praxis_policy_core::host::HttpTransportSlot::installed(transport),
+            ..Default::default()
+        }
+    }
+
+    fn ec_signing_key() -> p256::ecdsa::SigningKey {
+        p256::ecdsa::SigningKey::from_slice(&[0x42; 32]).expect("a valid P-256 scalar")
+    }
+
+    fn ec_jwks() -> String {
+        let point = ec_signing_key().verifying_key().to_sec1_point(false);
+        let bytes = point.as_bytes();
+        json!({ "keys": [{
+            "kty": "EC", "crv": "P-256", "use": "sig", "kid": "ec-1",
+            "x": URL_SAFE_NO_PAD.encode(&bytes[1..33]),
+            "y": URL_SAFE_NO_PAD.encode(&bytes[33..65]),
+        }]})
+        .to_string()
+    }
+
+    fn ec_token(kid: &str) -> String {
+        use p256::pkcs8::EncodePrivateKey as _;
+        let pem = ec_signing_key()
+            .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
+            .expect("PEM");
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(kid.to_owned());
+        jsonwebtoken::encode(
+            &header,
+            &valid_claims(json!({ "iss": DISCOVERY_ISSUER })),
+            &jsonwebtoken::EncodingKey::from_ec_pem(pem.as_bytes()).expect("EC key"),
+        )
+        .expect("signing a test token")
+    }
+
+    fn ec_payload() -> IdentityPayload {
+        IdentityPayload::new(ec_token("ec-1"), TokenSource::Bearer)
     }
 }

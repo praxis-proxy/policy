@@ -397,7 +397,7 @@ praxis-policy-core = { workspace = true, features = ["test-util"] }
 # runtime, and that crate does not have `test-util`. The cache contract
 # lives in the runtime's `tests/` tree and is included from here by path.
 praxis-policy-apl-runtime = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 bytes = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }

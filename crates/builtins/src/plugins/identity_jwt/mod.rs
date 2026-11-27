@@ -40,6 +40,8 @@ mod alarm;
 pub mod claim_map;
 /// Plugin configuration and its validation.
 pub mod config;
+mod discovery;
+mod discovery_refresh;
 /// `DPoP` ([RFC 9449]) proof-of-possession verification.
 ///
 /// [RFC 9449]: https://datatracker.ietf.org/doc/html/rfc9449
@@ -66,6 +68,7 @@ pub use config::{
     DecodingKeySource, DpopConfig, DpopMode, JwksFetch, JwksFetchBudget, JwtIdentityResolverConfig,
     KeySourceError, TrustedIssuerConfig,
 };
+pub use discovery::OidcDiscoveryConfig;
 pub use factory::{JwtIdentityFactory, JwtIdentityFactoryWithReplay, KIND};
 pub use praxis_policy_core::identity::mapping::{
     ClaimMap, ClaimMapConfig, ClaimMapper, ClaimPath, ClaimsOverrides, CompiledClaimMap,
