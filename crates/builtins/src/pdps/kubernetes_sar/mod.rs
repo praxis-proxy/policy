@@ -31,8 +31,10 @@
 //! ```
 //!
 //! The reviewer token's identity needs `create` on `subjectaccessreviews`.
-//! An expression that fails or yields the wrong type, or an empty user, always
-//! denies. `on_error` decides only when the API server gives no answer.
+//! A review the API server answers decides the step. An expression that fails
+//! or yields the wrong type, or an empty user, always denies. When the API
+//! server gives no answer, `on_error` decides: `deny` by default, or `allow`
+//! as an advisory fallback.
 
 /// The `global.pdp[]` block and the step arguments.
 pub mod config;
@@ -43,8 +45,8 @@ pub mod resolver;
 mod review;
 
 pub use config::{
-    ApiServerConfig, NonResourceExprs, OnError, ResourceExprs, ReviewerTokenSource, StepArgs,
-    SubjectAccessReviewConfig, SubjectExprs,
+    ApiServerConfig, Attributes, NonResourceFields, OnError, ResourceFields, ReviewerTokenSource,
+    StepArgs, SubjectAccessReviewConfig, SubjectExprs,
 };
 pub use factory::{KIND, SubjectAccessReviewPdpFactory};
 pub use resolver::{DIALECT, SubjectAccessReviewResolver};

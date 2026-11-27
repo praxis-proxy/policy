@@ -21,11 +21,12 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 - **Kubernetes SubjectAccessReview decision point.** The `kubernetes-sar`
   feature adds a `kind: kubernetes-sar` PDP. A `pdp(kubernetes-sar):` step
-  sends a SubjectAccessReview to the API server and allows only when the
-  cluster's authorizer chain allows. Both resource and non-resource reviews
-  are supported, and every field, including the subject, is a CEL expression
-  over the attribute bag. A failed expression always denies; `on_error`
-  governs only an API server that gives no answer. It shares the API server
+  sends a SubjectAccessReview to the API server, and the cluster's
+  authorizer chain decides. Both resource and non-resource reviews are
+  supported, and every field, including the subject, is a CEL expression over
+  the attribute bag. A failed expression always denies. When the API server
+  gives no answer, `on_error` decides: `deny` by default, or `allow` as an
+  advisory fallback. It shares the API server
   and reviewer token configuration with `identity/kubernetes-token-review`,
   and needs the host HTTP transport.
   ([#214](https://github.com/praxis-proxy/policy/issues/214))

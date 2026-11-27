@@ -4,6 +4,9 @@
 //! End to end behaviour of the Kubernetes `SubjectAccessReview` decision point,
 //! from a `global.pdp` block and a route step through a scripted API server to
 //! the route's allow or deny.
+//!
+//! Response bodies in `fixtures/` were captured from a real API server, which
+//! sends `allowed: false` rather than omitting it when no authorizer allows.
 
 #![allow(
     missing_docs,
@@ -28,8 +31,7 @@ use praxis_policy_core::extensions::{
     MetaExtension, SecurityExtension, SubjectExtension, SubjectType,
 };
 use praxis_policy_core::hooks::payload::Extensions;
-use praxis_policy_core::http::HttpResponse;
-use praxis_policy_core::http::HttpTransport;
+use praxis_policy_core::http::{HttpResponse, HttpTransport, HttpTransportError};
 use praxis_policy_core::http_testing::FakeTransport;
 
 // -----------------------------------------------------------------------------
@@ -42,10 +44,21 @@ const REVIEW_PATH: &str = "/apis/authorization.k8s.io/v1/subjectaccessreviews";
 
 const REVIEWER: &str = "reviewer-sa-token";
 
-const ALLOWED: &str = r#"{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true,"reason":"RBAC: allowed by ClusterRoleBinding \"agents\""}}"#;
+// The fixtures are answers from a Kubernetes v1.35.0 API server (kind),
+// captured 2026-11-26.
 
-const NO_OPINION: &str =
-    r#"{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{}}"#;
+/// RBAC allowing a non-resource review through a `ClusterRoleBinding`.
+const ALLOWED: &str = include_str!("fixtures/allowed-nonresource.json");
+
+/// No authorizer allowing: `{"allowed": false}` with no reason.
+const NO_OPINION: &str = include_str!("fixtures/no-opinion.json");
+
+/// RBAC allowing a resource review through a namespaced `RoleBinding`.
+const ALLOWED_RESOURCE: &str = include_str!("fixtures/allowed-resource.json");
+
+/// The API server refusing a reviewer that lacks `create` on
+/// `subjectaccessreviews`.
+const FORBIDDEN: &str = include_str!("fixtures/reviewer-without-rbac.json");
 
 const AGENT: &str = "system:serviceaccount:team-a:agent";
 
@@ -134,12 +147,12 @@ async fn resource_attributes_follow_the_tool_arguments() {
         let attributes = &review["spec"]["resourceAttributes"];
         let allowed = attributes["namespace"] == "staging"
             && ["get", "invoke"].contains(&attributes["verb"].as_str().unwrap_or_default());
-        Ok(HttpResponse::new(
-            201,
-            serde_json::json!({"status": {"allowed": allowed}})
-                .to_string()
-                .into(),
-        ))
+        let answer = if allowed {
+            ALLOWED_RESOURCE
+        } else {
+            NO_OPINION
+        };
+        Ok(HttpResponse::new(201, answer.as_bytes().to_vec().into()))
     }));
     let step = "
             resource_attributes:
@@ -226,13 +239,15 @@ async fn a_step_can_review_a_different_subject() {
 
 #[tokio::test]
 async fn no_answer_from_the_api_server_follows_on_error() {
-    for (on_error, status, allowed) in [
-        ("deny", 503, false),
-        ("allow", 503, true),
-        ("allow", 403, true),
+    for (on_error, status, body, allowed) in [
+        ("deny", 503, "{}", false),
+        ("allow", 503, "{}", true),
+        ("deny", 403, FORBIDDEN, false),
+        ("allow", 403, FORBIDDEN, true),
+        ("deny", 201, r#"{"status":{"allowed":true}}"#, false),
     ] {
         let token = TokenFile::write(REVIEWER);
-        let api = Arc::new(FakeTransport::new().json(REVIEW_PATH, status, "{}"));
+        let api = Arc::new(FakeTransport::new().json(REVIEW_PATH, status, body));
         let block = format!("      on_error: {on_error}\n");
         let engine = engine(
             &policy(&token, &block, "search", NON_RESOURCE_STEP),
@@ -249,6 +264,35 @@ async fn no_answer_from_the_api_server_follows_on_error() {
             result.violation
         );
     }
+}
+
+#[tokio::test]
+async fn a_failed_attempt_is_retried_and_the_retry_decides() {
+    let token = TokenFile::write(REVIEWER);
+    let api = Arc::new(
+        FakeTransport::new()
+            .fail(
+                REVIEW_PATH,
+                HttpTransportError::Connect("connection refused".to_owned()),
+            )
+            .json(REVIEW_PATH, 201, ALLOWED),
+    );
+    let engine = engine(&policy(&token, "", "search", NON_RESOURCE_STEP), Some(&api))
+        .await
+        .expect("the policy loads");
+
+    let result = call(&engine, "search", serde_json::json!({}), Some(agent())).await;
+
+    assert_eq!(
+        api.call_count(),
+        2,
+        "a review creates nothing, so a failed attempt is sent again"
+    );
+    assert!(
+        result.continue_processing,
+        "the second attempt's verdict decides: {:?}",
+        result.violation
+    );
 }
 
 #[tokio::test]

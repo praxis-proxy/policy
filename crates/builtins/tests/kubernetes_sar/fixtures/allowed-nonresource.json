@@ -1,0 +1,42 @@
+{
+  "kind": "SubjectAccessReview",
+  "apiVersion": "authorization.k8s.io/v1",
+  "metadata": {
+    "managedFields": [
+      {
+        "manager": "curl",
+        "operation": "Update",
+        "apiVersion": "authorization.k8s.io/v1",
+        "time": "2026-11-26T16:05:22Z",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:spec": {
+            "f:groups": {},
+            "f:nonResourceAttributes": {
+              ".": {},
+              "f:path": {},
+              "f:verb": {}
+            },
+            "f:user": {}
+          }
+        }
+      }
+    ]
+  },
+  "spec": {
+    "nonResourceAttributes": {
+      "path": "/tools/search_issues",
+      "verb": "post"
+    },
+    "user": "system:serviceaccount:team-a:agent-bot",
+    "groups": [
+      "system:serviceaccounts",
+      "system:serviceaccounts:team-a",
+      "system:authenticated"
+    ]
+  },
+  "status": {
+    "allowed": true,
+    "reason": "RBAC: allowed by ClusterRoleBinding \"ppe-sar-search-tool\" of ClusterRole \"ppe-sar-search-tool\" to ServiceAccount \"agent-bot/team-a\""
+  }
+}

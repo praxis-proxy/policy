@@ -78,59 +78,138 @@ pub struct SubjectExprs {
 // Step Arguments
 // -----------------------------------------------------------------------------
 
-/// A `pdp(kubernetes-sar):` step. Exactly one of `resource_attributes` and
-/// `non_resource_attributes` is set. Every value is a CEL expression that
+/// A `pdp(kubernetes-sar):` step. It sets exactly one of
+/// `resource_attributes` and `non_resource_attributes`; a step with both or
+/// neither does not deserialize. Every value is a CEL expression that
 /// evaluates to a string.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "RawStepArgs")]
 pub struct StepArgs {
-    /// "May the subject `verb` this URL path?"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub non_resource_attributes: Option<NonResourceExprs>,
-
-    /// "May the subject `verb` this object?"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource_attributes: Option<ResourceExprs>,
+    /// What the review asks about, as CEL expressions.
+    pub attributes: Attributes<String>,
 
     /// Overrides the block's `subject`, field by field.
-    #[serde(default)]
     pub subject: SubjectExprs,
 }
 
-/// `spec.nonResourceAttributes`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// The step as written, before the one-of check.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NonResourceExprs {
+struct RawStepArgs {
+    #[serde(default)]
+    non_resource_attributes: Option<NonResourceFields<String>>,
+    #[serde(default)]
+    resource_attributes: Option<ResourceFields<String>>,
+    #[serde(default)]
+    subject: SubjectExprs,
+}
+
+impl TryFrom<RawStepArgs> for StepArgs {
+    type Error = &'static str;
+
+    fn try_from(raw: RawStepArgs) -> Result<Self, Self::Error> {
+        let attributes = match (raw.resource_attributes, raw.non_resource_attributes) {
+            (Some(resource), None) => Attributes::Resource(resource),
+            (None, Some(non_resource)) => Attributes::NonResource(non_resource),
+            _ => {
+                return Err(
+                    "set exactly one of `resource_attributes` and `non_resource_attributes`",
+                );
+            },
+        };
+        Ok(Self {
+            attributes,
+            subject: raw.subject,
+        })
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Review Attributes
+// -----------------------------------------------------------------------------
+
+/// What a review asks about. The same shape holds a step's CEL expressions,
+/// their compiled programs, and the values sent, so a field Kubernetes adds is
+/// added once. Serialized, a variant is the review's `spec` key.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum Attributes<T> {
+    /// "May the subject `verb` this URL path?"
+    #[serde(rename = "nonResourceAttributes")]
+    NonResource(NonResourceFields<T>),
+    /// "May the subject `verb` this object?"
+    #[serde(rename = "resourceAttributes")]
+    Resource(ResourceFields<T>),
+}
+
+/// `spec.nonResourceAttributes`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NonResourceFields<T> {
     /// The URL path.
-    pub path: String,
+    pub path: T,
     /// The verb, such as `get` or `post`.
-    pub verb: String,
+    pub verb: T,
 }
 
 /// `spec.resourceAttributes`. An unset field is omitted, which Kubernetes
-/// reads as "any".
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+/// reads as the empty value. That is not a wildcard: it asks a different,
+/// usually broader question, so a narrow grant does not allow it. `"*"` asks
+/// about all values of a field.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ResourceExprs {
-    /// The API group; `""` is the core group.
+pub struct ResourceFields<T> {
+    /// The API group; empty is the core group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    /// The object's name.
+    pub group: Option<T>,
+    /// The object's name; empty is every object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// The namespace; unset is cluster scope.
+    pub name: Option<T>,
+    /// The namespace; empty is every namespace for a namespaced resource.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
+    pub namespace: Option<T>,
     /// The resource, such as `pods`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource: Option<String>,
-    /// The subresource, such as `log`.
+    pub resource: Option<T>,
+    /// The subresource, such as `log`; empty is the resource itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subresource: Option<String>,
+    pub subresource: Option<T>,
     /// The verb, such as `get` or `create`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verb: Option<String>,
+    pub verb: Option<T>,
     /// The API version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
+    pub version: Option<T>,
+}
+
+impl<T> Attributes<T> {
+    /// Apply `f` to every set field, passing the field's name as a step
+    /// writes it, such as `resource_attributes.namespace`.
+    pub(crate) fn try_map<U, E>(
+        &self,
+        mut f: impl FnMut(&'static str, &T) -> Result<U, E>,
+    ) -> Result<Attributes<U>, E> {
+        Ok(match self {
+            Self::NonResource(fields) => Attributes::NonResource(NonResourceFields {
+                path: f("non_resource_attributes.path", &fields.path)?,
+                verb: f("non_resource_attributes.verb", &fields.verb)?,
+            }),
+            Self::Resource(fields) => {
+                let mut field = |name: &'static str, value: Option<&T>| {
+                    value.map(|value| f(name, value)).transpose()
+                };
+                Attributes::Resource(ResourceFields {
+                    group: field("resource_attributes.group", fields.group.as_ref())?,
+                    name: field("resource_attributes.name", fields.name.as_ref())?,
+                    namespace: field("resource_attributes.namespace", fields.namespace.as_ref())?,
+                    resource: field("resource_attributes.resource", fields.resource.as_ref())?,
+                    subresource: field(
+                        "resource_attributes.subresource",
+                        fields.subresource.as_ref(),
+                    )?,
+                    verb: field("resource_attributes.verb", fields.verb.as_ref())?,
+                    version: field("resource_attributes.version", fields.version.as_ref())?,
+                })
+            },
+        })
+    }
 }

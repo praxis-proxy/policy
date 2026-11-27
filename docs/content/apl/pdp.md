@@ -447,8 +447,8 @@ decision and its diagnostics are recorded in the audit log. See
 ## Kubernetes authorization
 
 The `kubernetes-sar` decision point defers to the cluster. It sends a
-[SubjectAccessReview] to the API server and allows only when an authorizer
-in the cluster's chain (RBAC, Node, or a webhook) allows. Pair it with
+[SubjectAccessReview] to the API server, and the cluster's authorizer chain
+(RBAC, Node, or a webhook) decides. Pair it with
 `identity/kubernetes-token-review`, so the subject it asks about is the
 `ServiceAccount` the cluster already knows.
 
@@ -512,7 +512,12 @@ How a step is built and decided:
 - A step sets exactly one of `resource_attributes` (`group`, `version`,
   `resource`, `subresource`, `name`, `namespace`, `verb`) and
   `non_resource_attributes` (`path`, `verb`). An unset resource field is
-  omitted, which Kubernetes reads as "any".
+  omitted, which Kubernetes reads as the empty value, not as a wildcard:
+  an empty `group` is the core group, `subresource` the resource itself,
+  `name` every object, and `namespace` every namespace. Each of those asks a
+  different or broader question than a narrow grant covers, so leaving a
+  field out can only make a request harder to allow. `"*"` asks about every
+  value of a field.
 - `subject` names who is reviewed: `user` defaults to `subject.id` and
   `groups` to `subject.roles`; `uid` and `extra` are sent only when set. Set
   any of them on the `global.pdp` block, or on one step to review a
@@ -532,7 +537,9 @@ How a step is built and decided:
   denies without asking the API server, whatever `on_error` says.
   `on_error` (`deny` by default) decides only when the API server gives no
   answer: unreachable, refusing PPE's credential, or answering with
-  something that is not a review.
+  something that is not a review. A retried review stays within
+  `timeout_secs` in total. A denial for no answer skips the step's
+  `on_deny` reactions, which are about what the cluster decided.
 - An answer where no authorizer had an opinion denies, as it does in the
   API server itself.
 - A value taken from the request, such as `namespace: args.environment`
@@ -547,7 +554,10 @@ needs `create` on `subjectaccessreviews`, which the `system:auth-delegator`
 ClusterRole grants together with `tokenreviews`.
 
 The `cache:` option above applies, and it keys on the whole bag. While an
-answer is cached, an RBAC change waits out its `ttl_seconds`.
+answer is cached, an RBAC change waits out its `ttl_seconds`. A denial
+because the API server gave no answer is never cached. Under
+`on_error: allow`, the fallback allow is cached like any answer, so it can
+outlast the outage by up to `ttl_seconds`.
 
 [SubjectAccessReview]: https://kubernetes.io/docs/reference/kubernetes-api/authorization-resources/subject-access-review-v1/
 

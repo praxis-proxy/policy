@@ -671,7 +671,10 @@ fn value_type(value: &Value) -> String {
 /// types, and a name is kept only when the expression spells it, so a key or
 /// message derived from the data never appears. `NoSuchKey` drops its key,
 /// since a map index can compute it from the data.
-fn eval_error_category(error: &ExecutionError, refs: &ExpressionReferences<'_>) -> String {
+pub(crate) fn eval_error_category(
+    error: &ExecutionError,
+    refs: &ExpressionReferences<'_>,
+) -> String {
     let named = |kind: &str, name: &str, known: bool| {
         if known {
             format!("{kind} `{name}`")

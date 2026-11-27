@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cel::objects::Key;
-use cel::{Context, Program, Value};
+use cel::{Context, ExecutionError, Program, Value};
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
 use praxis_policy_apl_core::route::StructuredInput;
@@ -21,13 +21,13 @@ use praxis_policy_core::http_retry::{RetryPolicy, execute_with_retry};
 
 use crate::kubernetes::reviewer_token::ReviewerToken;
 use crate::pdps::cel::activation::bag_to_context;
+use crate::pdps::cel::resolver::eval_error_category;
 use crate::pdps::kubernetes_sar::config::{
-    DEFAULT_GROUPS, DEFAULT_USER, OnError, ResourceExprs, StepArgs, SubjectAccessReviewConfig,
+    Attributes, DEFAULT_GROUPS, DEFAULT_USER, OnError, StepArgs, SubjectAccessReviewConfig,
     SubjectExprs,
 };
 use crate::pdps::kubernetes_sar::review::{
-    NonResourceAttributes, REVIEW_PATH, ResourceAttributes, ReviewRequest, ReviewSpec, Verdict,
-    read_verdict,
+    REVIEW_PATH, ReviewRequest, ReviewSpec, Verdict, read_verdict,
 };
 use crate::pdps::stack;
 
@@ -140,11 +140,13 @@ impl SubjectAccessReviewResolver {
             request = request.connect_timeout(connect_timeout);
         }
 
-        // A review changes nothing on the server, so retrying is safe.
-        let response =
-            execute_with_retry(self.transport.as_ref(), request, RetryPolicy::idempotent())
-                .await
-                .map_err(|e| format!("the API server could not be reached: {e}"))?;
+        // A review changes nothing on the server, so retrying is safe. The
+        // budget keeps every attempt and backoff inside one `timeout_secs`:
+        // a PDP gets no invocation deadline to cap the loop otherwise.
+        let retry = RetryPolicy::idempotent().with_total_budget(self.timeout);
+        let response = execute_with_retry(self.transport.as_ref(), request, retry)
+            .await
+            .map_err(|e| format!("the API server could not be reached: {e}"))?;
 
         match response.status {
             200 | 201 => read_verdict(&response.body),
@@ -156,16 +158,22 @@ impl SubjectAccessReviewResolver {
         }
     }
 
-    /// The decision when the API server gave no answer.
-    fn on_error_decision(&self, cause: &str) -> PdpDecision {
-        let diagnostics = vec![format!("kubernetes-sar: {cause}")];
+    /// The outcome when the API server gave no answer.
+    ///
+    /// A deny is returned as an error, which the evaluator turns into a
+    /// denial and a decision cache never stores, so an outage's deny does not
+    /// outlive the outage. The error text becomes the denial's reason, which
+    /// can reach the client, so the cause goes only to the log.
+    fn on_error_outcome(&self, cause: &str) -> Result<PdpDecision, PdpError> {
         match self.on_error {
             OnError::Deny => {
                 tracing::warn!(
                     cause,
                     "kubernetes-sar: no answer from the API server; denying"
                 );
-                deny(diagnostics)
+                Err(PdpError::Dispatch(
+                    "kubernetes-sar: the API server gave no answer".to_owned(),
+                ))
             },
             OnError::Allow => {
                 tracing::error!(
@@ -173,10 +181,10 @@ impl SubjectAccessReviewResolver {
                     "kubernetes-sar: no answer from the API server; allowing under \
                      `on_error: allow`"
                 );
-                PdpDecision {
+                Ok(PdpDecision {
                     decision: Decision::Allow,
-                    diagnostics,
-                }
+                    diagnostics: vec![format!("kubernetes-sar: {cause}")],
+                })
             },
         }
     }
@@ -214,14 +222,14 @@ impl PdpResolver for SubjectAccessReviewResolver {
             },
         };
 
-        Ok(match self.review(spec).await {
-            Ok(Verdict::Allowed(diagnostics)) => PdpDecision {
+        match self.review(spec).await {
+            Ok(Verdict::Allowed(diagnostics)) => Ok(PdpDecision {
                 decision: Decision::Allow,
                 diagnostics,
-            },
-            Ok(Verdict::NotAllowed(diagnostics)) => deny(diagnostics),
-            Err(cause) => self.on_error_decision(&cause),
-        })
+            }),
+            Ok(Verdict::NotAllowed(diagnostics)) => Ok(deny(diagnostics)),
+            Err(cause) => self.on_error_outcome(&cause),
+        }
     }
 }
 
@@ -231,23 +239,8 @@ impl PdpResolver for SubjectAccessReviewResolver {
 
 /// A step with every expression compiled and its subject defaults applied.
 struct CompiledStep {
-    attributes: CompiledAttributes,
+    attributes: Attributes<Program>,
     subject: CompiledSubject,
-}
-
-enum CompiledAttributes {
-    NonResource { path: Program, verb: Program },
-    Resource(CompiledResource),
-}
-
-struct CompiledResource {
-    group: Option<Program>,
-    name: Option<Program>,
-    namespace: Option<Program>,
-    resource: Option<Program>,
-    subresource: Option<Program>,
-    verb: Option<Program>,
-    version: Option<Program>,
 }
 
 struct CompiledSubject {
@@ -261,23 +254,10 @@ impl CompiledStep {
     fn compile(args: &serde_yaml::Value, defaults: &SubjectExprs) -> Result<Self, String> {
         let args: StepArgs = serde_yaml::from_value(args.clone())
             .map_err(|e| format!("`pdp({DIALECT})` step: {e}"))?;
-        let attributes = match (args.resource_attributes, args.non_resource_attributes) {
-            (Some(resource), None) => {
-                CompiledAttributes::Resource(CompiledResource::compile(&resource)?)
-            },
-            (None, Some(non_resource)) => CompiledAttributes::NonResource {
-                path: compile("non_resource_attributes.path", &non_resource.path)?,
-                verb: compile("non_resource_attributes.verb", &non_resource.verb)?,
-            },
-            _ => {
-                return Err(format!(
-                    "`pdp({DIALECT})` step must set exactly one of `resource_attributes` and \
-                     `non_resource_attributes`"
-                ));
-            },
-        };
         Ok(Self {
-            attributes,
+            attributes: args
+                .attributes
+                .try_map(|field, expr| compile(field, expr))?,
             subject: CompiledSubject::compile(&args.subject, defaults)?,
         })
     }
@@ -295,7 +275,10 @@ impl CompiledStep {
                  to send it"
             ));
         }
-        let mut spec = ReviewSpec {
+        Ok(ReviewSpec {
+            attributes: self
+                .attributes
+                .try_map(|field, program| string(program, ctx, field))?,
             extra: match &self.subject.extra {
                 Some(extra) => string_map(extra, ctx)?,
                 None => BTreeMap::new(),
@@ -303,58 +286,6 @@ impl CompiledStep {
             groups,
             uid: optional(self.subject.uid.as_ref(), ctx, "subject.uid")?,
             user,
-            ..ReviewSpec::default()
-        };
-        match &self.attributes {
-            CompiledAttributes::NonResource { path, verb } => {
-                spec.non_resource_attributes = Some(NonResourceAttributes {
-                    path: string(path, ctx, "non_resource_attributes.path")?,
-                    verb: string(verb, ctx, "non_resource_attributes.verb")?,
-                });
-            },
-            CompiledAttributes::Resource(resource) => {
-                spec.resource_attributes = Some(resource.attributes(ctx)?);
-            },
-        }
-        Ok(spec)
-    }
-}
-
-impl CompiledResource {
-    fn compile(exprs: &ResourceExprs) -> Result<Self, String> {
-        let field = |name: &str, expr: &Option<String>| {
-            expr.as_deref()
-                .map(|expr| compile(&format!("resource_attributes.{name}"), expr))
-                .transpose()
-        };
-        Ok(Self {
-            group: field("group", &exprs.group)?,
-            name: field("name", &exprs.name)?,
-            namespace: field("namespace", &exprs.namespace)?,
-            resource: field("resource", &exprs.resource)?,
-            subresource: field("subresource", &exprs.subresource)?,
-            verb: field("verb", &exprs.verb)?,
-            version: field("version", &exprs.version)?,
-        })
-    }
-
-    fn attributes(&self, ctx: &Context<'_, '_>) -> Result<ResourceAttributes, String> {
-        Ok(ResourceAttributes {
-            group: optional(self.group.as_ref(), ctx, "resource_attributes.group")?,
-            name: optional(self.name.as_ref(), ctx, "resource_attributes.name")?,
-            namespace: optional(
-                self.namespace.as_ref(),
-                ctx,
-                "resource_attributes.namespace",
-            )?,
-            resource: optional(self.resource.as_ref(), ctx, "resource_attributes.resource")?,
-            subresource: optional(
-                self.subresource.as_ref(),
-                ctx,
-                "resource_attributes.subresource",
-            )?,
-            verb: optional(self.verb.as_ref(), ctx, "resource_attributes.verb")?,
-            version: optional(self.version.as_ref(), ctx, "resource_attributes.version")?,
         })
     }
 }
@@ -399,11 +330,18 @@ fn compile(field: &str, expr: &str) -> Result<Program, String> {
     Program::compile(expr).map_err(|e| format!("`{field}` is not valid CEL: {e}"))
 }
 
+/// Why an expression failed, without any value from the request, since the
+/// text reaches logs and audit diagnostics.
+fn eval_failed(field: &str, program: &Program, error: &ExecutionError) -> String {
+    let category = eval_error_category(error, &program.references());
+    format!("`{field}` could not be evaluated: {category}")
+}
+
 fn string(program: &Program, ctx: &Context<'_, '_>, field: &str) -> Result<String, String> {
     match program.execute(ctx) {
-        Ok(Value::String(text)) => Ok(text.as_str().to_owned()),
+        Ok(Value::String(text)) => Ok(Arc::unwrap_or_clone(text)),
         Ok(_other) => Err(format!("`{field}` must evaluate to a string")),
-        Err(e) => Err(format!("`{field}` could not be evaluated: {e}")),
+        Err(e) => Err(eval_failed(field, program, &e)),
     }
 }
 
@@ -421,7 +359,7 @@ fn strings(program: &Program, ctx: &Context<'_, '_>, field: &str) -> Result<Vec<
     match program.execute(ctx) {
         Ok(Value::List(items)) => string_list(&items, field),
         Ok(_other) => Err(format!("`{field}` must evaluate to a list of strings")),
-        Err(e) => Err(format!("`{field}` could not be evaluated: {e}")),
+        Err(e) => Err(eval_failed(field, program, &e)),
     }
 }
 
@@ -441,7 +379,7 @@ fn string_map(
 ) -> Result<BTreeMap<String, Vec<String>>, String> {
     let Value::Map(map) = program
         .execute(ctx)
-        .map_err(|e| format!("`subject.extra` could not be evaluated: {e}"))?
+        .map_err(|e| eval_failed("subject.extra", program, &e))?
     else {
         return Err(EXTRA_SHAPE.to_owned());
     };
@@ -455,4 +393,37 @@ fn string_map(
             _ => Err(EXTRA_SHAPE.to_owned()),
         })
         .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn an_evaluation_error_names_the_field_and_not_the_request_value() {
+        let program =
+            compile("resource_attributes.name", "{'known': 'x'}[args.tenant]").expect("valid CEL");
+        let mut ctx = Context::default();
+        ctx.add_variable_from_value(
+            "args",
+            HashMap::from([("tenant".to_owned(), "acme-private-tenant".to_owned())]),
+        );
+
+        let error = string(&program, &ctx, "resource_attributes.name")
+            .expect_err("the key is not in the map");
+
+        assert!(
+            error.contains("`resource_attributes.name`"),
+            "the field is named: {error}"
+        );
+        assert!(
+            !error.contains("acme-private-tenant"),
+            "a key computed from the request must not reach logs or audit: {error}"
+        );
+    }
 }
