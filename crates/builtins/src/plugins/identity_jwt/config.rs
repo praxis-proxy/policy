@@ -472,8 +472,8 @@ impl DecodingKeySource {
     /// # Errors
     ///
     /// Returns a message when the key material does not parse, when a PEM file
-    /// cannot be read, or when the source is `jwks_url`, which needs
-    /// [`build_async`].
+    /// cannot be read, when a shared secret is rejected (for example, if it
+    /// is empty), or when the source is `jwks_url`, which needs [`build_async`].
     ///
     /// [`build_async`]: Self::build_async
     pub fn build(&self) -> Result<KeyStore, String> {

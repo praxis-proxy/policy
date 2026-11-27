@@ -128,11 +128,11 @@ NON_FIPS_CRYPTO := sha2|hmac|ring|rustls|aws-lc-rs|aws-lc-sys|bcrypt|argon2|sha-
 #   uuid       trace, span and registry ids, CIBA poll owners, effect keys
 #   getrandom  the OS source behind `uuid::Uuid::new_v4`
 #   signature  `jsonwebtoken`'s signer and verifier traits; no algorithms
-#   rand_core  RNG traits used by `signature`; no random source
-FIPS_GRAPH_ALLOWED := uuid|getrandom|signature|rand_core
+#   rand_core  0.10.1 supplies RNG traits to `signature` without a random source
+FIPS_GRAPH_ALLOWED := (uuid|getrandom|signature) v[^ ]+|rand_core v0\.10\.1
 # Crypto crates that must be classified, as allowed or non-FIPS, before they
 # can appear in a FIPS graph.
-CRYPTO_PATTERN := rand|rand_core|chacha20|sha1|sha3|md-5|md5|blake2|blake3|aes|aes-gcm|p256|p384|p521|rsa|ed25519-dalek|curve25519-dalek|ecdsa|elliptic-curve|digest|signature|$(NON_FIPS_CRYPTO)|$(FIPS_GRAPH_ALLOWED)
+CRYPTO_PATTERN := rand|rand_core|chacha20|sha1|sha3|md-5|md5|blake2|blake3|aes|aes-gcm|p256|p384|p521|rsa|ed25519-dalek|curve25519-dalek|ecdsa|elliptic-curve|digest|signature|uuid|getrandom|$(NON_FIPS_CRYPTO)
 # Every supported FIPS selection: the shared backend, with optional identity
 # builtins.
 FIPS_SELECTIONS := fips fips,api-key fips,jwt-openssl-fips fips,api-key,jwt-openssl-fips
@@ -150,13 +150,13 @@ check_fips_tree = tree="$$(cat)"; \
 		grep -E "^($(NON_FIPS_CRYPTO)) v" <<< "$$tree" >&2; exit 1; \
 	fi; \
 	unclassified="$$(grep -E "^($(CRYPTO_PATTERN)) v" <<< "$$tree" \
-		| grep -Ev "^($(NON_FIPS_CRYPTO)|$(FIPS_GRAPH_ALLOWED)) v" | sort -u || true)"; \
+		| grep -Ev "^(($(NON_FIPS_CRYPTO)) v[^ ]+|$(FIPS_GRAPH_ALLOWED))( |$$)" | sort -u || true)"; \
 	if [ -n "$$unclassified" ]; then \
 		echo "FIPS graph for $(1) has unclassified crypto; add it to FIPS_GRAPH_ALLOWED or NON_FIPS_CRYPTO:" >&2; \
 		echo "$$unclassified" >&2; exit 1; \
 	fi; \
 	[ -n "$(2)" ] || grep -q '^openssl v' <<< "$$tree" || { echo "FIPS graph for $(1) is missing OpenSSL" >&2; exit 1; }; \
-	echo "$(1): allowed $$(grep -Eo "^($(FIPS_GRAPH_ALLOWED)) v[^ ]*" <<< "$$tree" | sort -u | tr '\n' ' ')"
+	echo "$(1): allowed $$(grep -Eo "^($(FIPS_GRAPH_ALLOWED))( |$$)" <<< "$$tree" | sed 's/ $$//' | sort -u | tr '\n' ' ')"
 
 CRYPTO_CONSUMER_MANIFEST := tests/consumers/crypto/Cargo.toml
 CRYPTO_CONSUMER_CARGO = CARGO_TARGET_DIR="$(abspath $(or $(CARGO_TARGET_DIR),target))" $(CARGO)
