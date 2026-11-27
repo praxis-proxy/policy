@@ -76,8 +76,7 @@ static PROVIDER: CryptoProvider = CryptoProvider {
 /// with the reason and a `policy_crypto_failure` alarm.
 ///
 /// Fails when the shared backend is unavailable, when OpenSSL's defaults reach
-/// a non-FIPS provider, or when another provider is already active, including
-/// the fallback `jsonwebtoken` selects if it is used before this call.
+/// a non-FIPS provider, or when another provider is already active.
 pub(crate) fn ensure_provider() -> Result<(), Box<PluginError>> {
     provider_ready().map_err(|source| startup_failure("jwt_provider", source))
 }

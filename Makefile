@@ -123,13 +123,13 @@ check:
 	@$(MAKE) check-fips-graph
 
 NON_FIPS_CRYPTO := sha2|hmac|ring|rustls|aws-lc-rs|aws-lc-sys|bcrypt|argon2|sha-crypt|password-hash
-# Crates a FIPS graph may contain although they hold or call non-validated
-# randomness. Each is accepted for identifiers only, never keys or secrets;
-# secret material goes through `praxis_policy_core::crypto::random_bytes`.
+# The OS randomness below is accepted for identifiers only. Secret material
+# goes through `praxis_policy_core::crypto::random_bytes`.
 #   uuid       trace, span and registry ids, CIBA poll owners, effect keys
 #   getrandom  the OS source behind `uuid::Uuid::new_v4`
 #   signature  `jsonwebtoken`'s signer and verifier traits; no algorithms
-FIPS_GRAPH_ALLOWED := uuid|getrandom|signature
+#   rand_core  RNG traits used by `signature`; no random source
+FIPS_GRAPH_ALLOWED := uuid|getrandom|signature|rand_core
 # Crypto crates that must be classified, as allowed or non-FIPS, before they
 # can appear in a FIPS graph.
 CRYPTO_PATTERN := rand|rand_core|chacha20|sha1|sha3|md-5|md5|blake2|blake3|aes|aes-gcm|p256|p384|p521|rsa|ed25519-dalek|curve25519-dalek|ecdsa|elliptic-curve|digest|signature|$(NON_FIPS_CRYPTO)|$(FIPS_GRAPH_ALLOWED)

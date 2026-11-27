@@ -506,7 +506,6 @@ impl<'a> DpopVerifier<'a> {
         }
         // RFC 7515 section 4.1.11: a recipient must reject a JWS naming critical
         // extensions it does not understand, and this verifier understands none.
-        // jsonwebtoken does not enforce `crit`, so it is checked here.
         if header_json.get("crit").is_some() {
             return Err(invalid(
                 "the DPoP proof's header names critical extensions (crit), which this \

@@ -387,7 +387,7 @@ mod tests {
             audiences: vec!["praxis".to_owned()],
             skip_audience_validation: false,
             keys: std::sync::Arc::new(std::sync::RwLock::new(KeyStore::single_fallback(
-                DecodingKey::from_secret(secret.as_bytes()),
+                DecodingKey::from_secret(secret.as_bytes()).expect("nonempty test secret"),
             ))),
             algorithms: vec![Algorithm::HS256],
             leeway_seconds: 60,
@@ -456,7 +456,7 @@ mod tests {
     fn debug_for_a_key_store_reports_kids_without_keys() {
         let store = KeyStore::from_jwks_entries([(
             "kid-1".to_owned(),
-            DecodingKey::from_secret(b"key-bytes"),
+            DecodingKey::from_secret(b"key-bytes").expect("nonempty test secret"),
         )]);
         let rendered = format!("{store:?}");
         assert!(rendered.contains("kid-1"), "got {rendered}");
@@ -474,7 +474,9 @@ mod tests {
         assert_eq!(KeyStore::empty().len(), 0);
         assert!(KeyStore::empty().is_empty());
 
-        let fallback = KeyStore::single_fallback(DecodingKey::from_secret(b"k"));
+        let fallback = KeyStore::single_fallback(
+            DecodingKey::from_secret(b"k").expect("nonempty test secret"),
+        );
         assert_eq!(fallback.len(), 1);
         assert!(!fallback.is_empty());
     }
