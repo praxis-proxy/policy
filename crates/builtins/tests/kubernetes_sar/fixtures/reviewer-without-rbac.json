@@ -1,0 +1,13 @@
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "subjectaccessreviews.authorization.k8s.io is forbidden: User \"system:serviceaccount:team-a:reviewer-norbac\" cannot create resource \"subjectaccessreviews\" in API group \"authorization.k8s.io\" at the cluster scope",
+  "reason": "Forbidden",
+  "details": {
+    "group": "authorization.k8s.io",
+    "kind": "subjectaccessreviews"
+  },
+  "code": 403
+}

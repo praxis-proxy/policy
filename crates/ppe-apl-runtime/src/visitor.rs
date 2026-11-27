@@ -96,7 +96,7 @@ use praxis_policy_apl_core::attribute_source::{AttributeSource as _, AttributeTr
 use praxis_policy_apl_core::parser::compile_policy_block_value;
 use praxis_policy_apl_core::plugin_decl::{EffectivePlugin, PluginDeclaration, PluginRegistry};
 use praxis_policy_apl_core::rules::{CompiledRoute, DenyResponse, Effect};
-use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
+use praxis_policy_apl_core::step::PdpResolver;
 
 use crate::decision_cache::{CachedPdpResolver, split_cache_block};
 use crate::dispatch_plan::{DispatchCache, walk_effects};
@@ -105,6 +105,7 @@ use crate::envelope_checks::{
     reject_writes_to_read_only_fields,
 };
 use crate::message_projection::Projection;
+use crate::pdp_factory::{PdpFactory, PdpHostServices};
 use crate::pdp_router::PdpRouter;
 use crate::route_handler::{AplRouteHandler, HookFamily, Phase};
 use crate::session_store::{SessionStore, SessionStoreFactory};
@@ -408,13 +409,23 @@ impl AplConfigVisitor {
         let (backend_entry, cache_config) = split_cache_block(entry)
             .map_err(|e| format!("global.pdp[{index}] (kind='{kind}') {e}"))?;
         let resolver = factory
-            .build(&backend_entry)
+            .build(&backend_entry, &self.pdp_host_services())
             .map_err(|e| format!("global.pdp[{index}] (kind='{kind}') failed to build: {e}"))?;
         let resolver = match cache_config {
             Some(config) => CachedPdpResolver::wrap(resolver, config, self.engine.clone()),
             None => resolver,
         };
         Ok(resolver)
+    }
+
+    /// The host services the engine has installed, for a PDP factory to
+    /// take what its resolver needs.
+    fn pdp_host_services(&self) -> PdpHostServices {
+        let http = self
+            .engine
+            .upgrade()
+            .and_then(|engine| engine.http_transport());
+        PdpHostServices { http }
     }
 
     /// Rebuild the config-owned PDP set from this load's `global.pdp[]`.
@@ -2073,14 +2084,13 @@ mod tests {
         PluginRouteRef, PolicyEngine, RouteEntry, apl_subblock, declares_post_phase,
         declares_pre_phase, displaced_plugin_chain, response_subblock,
     };
+    use crate::pdp_factory::{PdpFactory, PdpHostServices};
     use crate::session_store::MemorySessionStore;
     use praxis_policy_apl_core::attributes::AttributeBag;
     use praxis_policy_apl_core::evaluator::Decision;
     use praxis_policy_apl_core::pipeline::{FieldRule, Pipeline, Stage, TypeCheck};
     use praxis_policy_apl_core::rules::{CompiledRoute, Effect};
-    use praxis_policy_apl_core::step::{
-        PdpCall, PdpDecision, PdpDialect, PdpError, PdpFactory, PdpResolver,
-    };
+    use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
     use praxis_policy_core::cmf::enums::Role;
     use praxis_policy_core::cmf::{CmfHook, Message, MessagePayload};
     use praxis_policy_core::config::{HttpSelector, Pattern, StringOrList};
@@ -2947,6 +2957,7 @@ routes:
         fn build(
             &self,
             config: &serde_yaml::Value,
+            _services: &PdpHostServices,
         ) -> Result<Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>> {
             let label = config
                 .get("label")
@@ -2956,6 +2967,29 @@ routes:
             Ok(Arc::new(LabeledPdp {
                 dialect: self.dialect.clone(),
                 label,
+            }))
+        }
+    }
+
+    struct HttpNeedingFactory;
+
+    impl PdpFactory for HttpNeedingFactory {
+        fn kind(&self) -> &str {
+            "needs-http"
+        }
+
+        fn build(
+            &self,
+            _config: &serde_yaml::Value,
+            services: &PdpHostServices,
+        ) -> Result<Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>> {
+            services
+                .http
+                .as_ref()
+                .ok_or("no HTTP transport installed")?;
+            Ok(Arc::new(LabeledPdp {
+                dialect: PdpDialect::Custom("needs-http".to_owned()),
+                label: "has-http".to_owned(),
             }))
         }
     }
@@ -2985,6 +3019,40 @@ routes:
             Decision::Deny { reason, .. } => Ok(reason.expect("label")),
             Decision::Allow => panic!("labeled resolvers deny"),
         }
+    }
+
+    #[tokio::test]
+    async fn pdp_factory_receives_the_engine_http_transport() {
+        let engine = Arc::new(PolicyEngine::default());
+        let mut visitor = AplConfigVisitor::new(
+            Arc::new(DispatchCache::new()),
+            Arc::new(MemorySessionStore::new()),
+            Arc::downgrade(&engine),
+        );
+        visitor.register_pdp_factory(Arc::new(HttpNeedingFactory));
+        let config = yaml("pdp:\n  - kind: needs-http\n");
+
+        let without = visitor
+            .visit_global(&engine, &config)
+            .expect_err("a factory needing HTTP must fail the load without a transport");
+        assert!(
+            without.to_string().contains("no HTTP transport installed"),
+            "the factory's own error must reach the operator: {without}"
+        );
+
+        engine.set_http_transport(Arc::new(
+            praxis_policy_core::http_testing::FakeTransport::new(),
+        ));
+        visitor
+            .visit_global(&engine, &config)
+            .expect("the installed transport must reach the factory");
+        assert_eq!(
+            resolver_label(&visitor, PdpDialect::Custom("needs-http".to_owned()))
+                .await
+                .unwrap(),
+            "has-http",
+            "the resolver the factory built must be installed"
+        );
     }
 
     /// Code-supplied resolvers stay across reloads. Config-owned ones are

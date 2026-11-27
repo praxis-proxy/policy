@@ -22,7 +22,6 @@ pub use crate::token_lookup::directory;
 pub mod factory;
 /// The identity hook handler.
 pub mod resolver;
-mod reviewer_token;
 /// The backend that calls the `TokenReview` API.
 pub mod token_review;
 

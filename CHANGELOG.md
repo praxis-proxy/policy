@@ -19,6 +19,18 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Kubernetes SubjectAccessReview decision point.** The `kubernetes-sar`
+  feature adds a `kind: kubernetes-sar` PDP. A `pdp(kubernetes-sar):` step
+  sends a SubjectAccessReview to the API server, and the cluster's
+  authorizer chain decides. Both resource and non-resource reviews are
+  supported, and every field, including the subject, is a CEL expression over
+  the attribute bag. A failed expression always denies. When the API server
+  gives no answer, `on_error` decides: `deny` by default, or `allow` as an
+  advisory fallback. It shares the API server
+  and reviewer token configuration with `identity/kubernetes-token-review`,
+  and needs the host HTTP transport.
+  ([#214](https://github.com/praxis-proxy/policy/issues/214))
+
 - **Bounded metadata callout contracts.** `HostServices::remaining_invocation_time`
   and `Extensions::with_invocation_deadline` let the embedding propagate the
   gateway invocation budget through nested metadata dispatch. Stable metadata
@@ -126,6 +138,19 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   Predicates on the other half that read `client.*`, `caller.workload.*`, or
   `this.workload.*` need `read_client` or `read_workload` in the host baseline.
   ([#242](https://github.com/praxis-proxy/policy/issues/242))
+
+- **Breaking for PDP factory implementors:** `PdpFactory` moves from
+  `praxis_policy_apl_core::step` to `praxis_policy_apl_runtime`, and `build`
+  takes a second argument, `&PdpHostServices`, carrying the host's HTTP
+  transport when one is installed. A factory that needs no host service
+  ignores it. The `praxis_policy::PdpFactory` facade path is unchanged. A
+  decision point that calls out over HTTP takes the transport when its
+  `global.pdp` entry is built, so hosts call `set_http_transport` before
+  `load_config_yaml`. `PolicyEngine::http_transport` returns the installed
+  transport. The `cedar`, `cel` and `opa` builtin features now compile
+  `praxis-policy-apl-runtime` and so need a crypto backend selected, like the
+  other engine-backed features.
+  ([#214](https://github.com/praxis-proxy/policy/issues/214))
 
 ### Security
 

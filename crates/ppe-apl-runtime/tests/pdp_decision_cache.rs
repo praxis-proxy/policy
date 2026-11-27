@@ -19,10 +19,10 @@ use async_trait::async_trait;
 
 use praxis_policy_apl_core::attributes::AttributeBag;
 use praxis_policy_apl_core::evaluator::Decision;
-use praxis_policy_apl_core::step::{
-    PdpCall, PdpDecision, PdpDialect, PdpError, PdpFactory, PdpResolver,
+use praxis_policy_apl_core::step::{PdpCall, PdpDecision, PdpDialect, PdpError, PdpResolver};
+use praxis_policy_apl_runtime::{
+    AplOptions, DispatchCache, MemorySessionStore, PdpFactory, PdpHostServices, register_apl,
 };
-use praxis_policy_apl_runtime::{AplOptions, DispatchCache, MemorySessionStore, register_apl};
 
 #[path = "support/cache_contract.rs"]
 mod cache_contract;
@@ -76,6 +76,7 @@ impl PdpFactory for CountingFactory {
     fn build(
         &self,
         _config: &serde_yaml::Value,
+        _services: &PdpHostServices,
     ) -> Result<Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Arc::new(CountingResolver {
             calls: Arc::clone(&self.calls),

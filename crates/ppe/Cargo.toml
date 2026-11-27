@@ -72,6 +72,7 @@ builtins = [
   "elicitation-ciba",
   "cedar",
   "cel",
+  "kubernetes-sar",
   "opa",
   "valkey",
   "secrets-vault",
@@ -98,6 +99,7 @@ elicitation-ciba = [
 ]
 cedar = ["_builtin", "praxis-policy-builtins/cedar"]
 cel = ["_builtin", "praxis-policy-builtins/cel"]
+kubernetes-sar = ["_builtin", "praxis-policy-builtins/kubernetes-sar"]
 opa = ["_builtin", "praxis-policy-builtins/opa"]
 valkey = ["_builtin", "praxis-policy-builtins/valkey"]
 # Vault KV v2 secret backend. Off the default build; compiled with

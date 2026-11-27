@@ -31,6 +31,7 @@
 //! | `ratelimit/limitador` | `plugins::ratelimit` |
 //! | `cedar` | `pdps::cedar_direct` |
 //! | `cel` | `pdps::cel` |
+//! | `kubernetes-sar` | `pdps::kubernetes_sar`; implies `cel` |
 //! | `opa` | `pdps::opa` |
 //! | `valkey` | `session::valkey` |
 //! | `secrets-vault` | `secrets::vault` |
@@ -61,6 +62,9 @@ pub mod plugins;
 
 #[cfg(feature = "_token_lookup")]
 mod token_lookup;
+
+#[cfg(feature = "_kubernetes")]
+mod kubernetes;
 
 #[cfg(feature = "_validation")]
 mod validation;

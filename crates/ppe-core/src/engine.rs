@@ -2309,8 +2309,10 @@ impl PolicyEngine {
     /// keeps one HTTP stack in the process: one connection pool, one
     /// TLS trust store, one egress policy.
     ///
-    /// Call before [`initialize`](Self::initialize), since that is when
-    /// a plugin may first want it.
+    /// Call before [`load_config_yaml`](Self::load_config_yaml): a policy
+    /// decision point that calls out over HTTP takes the transport when
+    /// its `global.pdp` entry is built, and plugins may want it as early
+    /// as [`initialize`](Self::initialize).
     ///
     /// Set-once. A second call is ignored and returns `false`, so a host
     /// that wires twice does not silently swap the transport out from
@@ -2326,6 +2328,17 @@ impl PolicyEngine {
             warn!("policy: an HTTP transport is already installed; ignoring the second install");
         }
         installed
+    }
+
+    /// The host's outbound HTTP transport, or `None` before
+    /// [`set_http_transport`](Self::set_http_transport) installs one.
+    ///
+    /// For engine components that are not plugins, such as a policy
+    /// decision point the APL visitor builds from config. Plugins reach the
+    /// transport through their capability-gated host services instead.
+    #[must_use]
+    pub fn http_transport(&self) -> Option<Arc<dyn crate::http::HttpTransport>> {
+        self.http_transport.get().cloned()
     }
 
     /// Register the secret-provider factories this build carries.
@@ -9211,6 +9224,24 @@ routes:
         assert!(
             !mgr.set_http_transport(Arc::new(StubTransport)),
             "the second install must be refused, not silently applied"
+        );
+    }
+
+    #[test]
+    fn http_transport_returns_the_installed_transport() {
+        let mgr = PolicyEngine::default();
+        assert!(
+            mgr.http_transport().is_none(),
+            "no transport before the host installs one"
+        );
+
+        let transport: Arc<dyn crate::http::HttpTransport> = Arc::new(StubTransport);
+        mgr.set_http_transport(Arc::clone(&transport));
+
+        assert!(
+            mgr.http_transport()
+                .is_some_and(|t| { std::ptr::addr_eq(Arc::as_ptr(&t), Arc::as_ptr(&transport)) }),
+            "the getter must hand back the installed transport, not a copy"
         );
     }
 

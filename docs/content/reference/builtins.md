@@ -16,6 +16,7 @@ name it by `kind`.
 | `elicitation/ciba` | elicitation | `elicitation-ciba` | OIDC CIBA human approval. See [Elicitation](../apl/elicitation.md). |
 | `cedar-direct` | decision point | `cedar` | Evaluate Cedar policy (dialect `cedar`). |
 | `cel` | decision point | `cel` | Evaluate CEL expressions (dialect `cel`). |
+| `kubernetes-sar` | decision point | `kubernetes-sar` | Ask the Kubernetes API server with a SubjectAccessReview (step `pdp(kubernetes-sar)`). Needs the host HTTP transport. See [Kubernetes authorization](../apl/pdp.md#kubernetes-authorization). |
 | `opa` | decision point | `opa` | Evaluate Rego, embedded (dialect `opa`). |
 | `valkey` | session store | `valkey` | Persist Session Taint labels across processes. CIBA can use the same server for approvals. See [Session Taint](../apl/tainting.md). |
 | `vault` | secret provider | `secrets-vault` | Resolve `secret:` references from Vault KV v2. Not auto-registered: it needs an `HttpTransport` the host supplies. |
@@ -32,11 +33,12 @@ Configuring `global.session_store` does not change it unless the block
 references that connection. The CIBA `store:` block is required; see
 [Elicitation](../apl/elicitation.md#correlation-store).
 
-The three decision points are held to each other by a differential test
-suite. Given the same attributes and equivalent policy intent, they must
-agree across their shared boolean, integer, string, and string-set
-subset. Documented semantic differences are allowlisted; a new
-disagreement fails the build.
+The Cedar, CEL and OPA decision points are held to each other by a
+differential test suite. Given the same attributes and equivalent policy
+intent, they must agree across their shared boolean, integer, string, and
+string-set subset. Documented semantic differences are allowlisted; a new
+disagreement fails the build. `kubernetes-sar` is outside it: it holds no
+policy of its own, so there is nothing equivalent to compare.
 
 ## Not builtins
 
@@ -62,7 +64,7 @@ praxis-policy = { version = "0.7.0", features = ["jwt", "cedar"] }
 
 | Feature | Pulls in |
 |---|---|
-| `builtins` | all twelve below: `jwt`, `api-key`, `basic`, `kubernetes-token-review`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `opa`, `valkey`, `secrets-vault`. `basic` is unreleased: it is on `main` and not in 0.6.0, so a host pinned to a published version cannot select it yet |
+| `builtins` | all thirteen below: `jwt`, `api-key`, `basic`, `kubernetes-token-review`, `oauth`, `delegator-vault`, `elicitation-ciba`, `cedar`, `cel`, `kubernetes-sar`, `opa`, `valkey`, `secrets-vault`. `basic` is unreleased: it is on `main` and not in 0.6.0, so a host pinned to a published version cannot select it yet |
 | `jwt` | `identity/jwt`, verified with AWS-LC |
 | `jwt-openssl-fips` | `identity/jwt` and DPoP, verified with system OpenSSL under the FIPS provider. Requires `fips`; cannot be combined with `jwt`. HMAC (HS256, HS384, HS512) and EdDSA are refused at config load |
 | `api-key` | `identity/api-key` |
@@ -74,6 +76,7 @@ praxis-policy = { version = "0.7.0", features = ["jwt", "cedar"] }
 | `elicitation-ciba` | `elicitation/ciba` |
 | `cedar` | the `cedar-direct` decision point |
 | `cel` | the `cel` decision point |
+| `kubernetes-sar` | the `kubernetes-sar` decision point; implies `cel` |
 | `opa` | the `opa` decision point |
 | `valkey` | the Valkey session store, and the redis and TLS stack it carries |
 | `secrets-vault` | the Vault KV v2 secret provider. Not auto-registered: it needs an `HttpTransport` the host supplies |

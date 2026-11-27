@@ -84,7 +84,7 @@ pub trait SessionStore: Send + Sync {
 
 /// Factory the visitor consults when it encounters a
 /// `global.session_store` block in the unified config. Mirrors
-/// [`praxis_policy_apl_core::step::PdpFactory`]: each factory advertises a `kind()`
+/// [`crate::PdpFactory`]: each factory advertises a `kind()`
 /// string matching the YAML block's `kind:` field, and `build` turns the
 /// block into a live store. Registered up front via
 /// [`crate::AplOptions::session_store_factories`]; the visitor selects

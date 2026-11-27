@@ -74,6 +74,6 @@ pub use step::{
     DispatchPhase, ElicitKind, ElicitStep, ElicitationDispatch, ElicitationError,
     ElicitationInvoker, ElicitationOutcome, ElicitationStatus, ElicitationValidation,
     NoopDelegationInvoker, NoopElicitationInvoker, PdpCall, PdpDecision, PdpDialect, PdpError,
-    PdpFactory, PdpResolver, PendingElicitation, PluginError, PluginInvocation, PluginInvoker,
-    PluginOutcome, StructuredInputAvailability, delegation_bag_keys, elicitation_bag_keys,
+    PdpResolver, PendingElicitation, PluginError, PluginInvocation, PluginInvoker, PluginOutcome,
+    StructuredInputAvailability, delegation_bag_keys, elicitation_bag_keys,
 };

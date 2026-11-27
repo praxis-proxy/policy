@@ -59,6 +59,8 @@ mod message_projection;
 pub mod parallel_safety;
 /// What a field stage can address on a hook payload.
 pub mod payload_fields;
+/// Builds a decision point from config, with the host services it may use.
+pub mod pdp_factory;
 /// Routes a decision point call to the resolver for its dialect.
 pub mod pdp_router;
 /// Wires the runtime into a policy engine.
@@ -84,6 +86,7 @@ pub use dispatch_plan::{DispatchCache, RouteDispatchPlan, RoutePluginEntry};
 pub use elicitation_invoker::ElicitationPluginInvoker;
 pub use message_projection::Projection;
 pub use payload_fields::PayloadFields;
+pub use pdp_factory::{PdpFactory, PdpHostServices};
 pub use pdp_router::PdpRouter;
 pub use register::{AplOptions, register_apl};
 pub use route_handler::{

@@ -58,7 +58,7 @@
 //! enables every bundled extension, including the Valkey session
 //! store; or pick a granular subset (`jwt`, `api-key`, `basic`,
 //! `kubernetes-token-review`, `oauth`, `elicitation-ciba`, `cedar`, `cel`,
-//! `opa`, `valkey`, `secrets-vault`; or `jwt-openssl-fips` in
+//! `kubernetes-sar`, `opa`, `valkey`, `secrets-vault`; or `jwt-openssl-fips` in
 //! place of `jwt`). Any of them brings in the registration
 //! helpers, and each one re-exports its own concrete factory type here.
 //!
@@ -109,9 +109,9 @@ pub use {
     praxis_policy_apl_cmf, praxis_policy_apl_core, praxis_policy_apl_runtime, praxis_policy_core,
 };
 
-pub use praxis_policy_apl_core::step::PdpFactory;
 pub use praxis_policy_apl_runtime::{
-    AplOptions, DispatchCache, MemorySessionStore, SessionStore, SessionStoreFactory, register_apl,
+    AplOptions, DispatchCache, MemorySessionStore, PdpFactory, PdpHostServices, SessionStore,
+    SessionStoreFactory, register_apl,
 };
 pub use praxis_policy_core::engine::PolicyEngine;
 
@@ -216,6 +216,8 @@ pub use praxis_policy_core::prelude;
 pub use praxis_policy_builtins::pdps::cedar_direct::CedarDirectPdpFactory;
 #[cfg(feature = "cel")]
 pub use praxis_policy_builtins::pdps::cel::CelPdpFactory;
+#[cfg(feature = "kubernetes-sar")]
+pub use praxis_policy_builtins::pdps::kubernetes_sar::SubjectAccessReviewPdpFactory;
 #[cfg(feature = "opa")]
 pub use praxis_policy_builtins::pdps::opa::OpaPdpFactory;
 #[cfg(feature = "oauth")]
@@ -344,8 +346,8 @@ register_builtins! {
 }
 
 /// The enabled PDP factories, ready to drop into
-/// [`AplOptions::pdp_factories`]. A route's `cedar:`, `cel:` or `opa:` step
-/// selects which one runs.
+/// [`AplOptions::pdp_factories`]. A route's `cedar:`, `cel:`, `opa:` or
+/// `pdp(kubernetes-sar):` step selects which one runs.
 // `vec![]` can't replace the conditional pushes: each element is
 // `#[cfg]`-gated on its feature, so the set is built incrementally.
 #[cfg(feature = "_builtin")]
@@ -356,6 +358,8 @@ pub fn builtin_pdp_factories() -> Vec<std::sync::Arc<dyn PdpFactory>> {
     factories.push(std::sync::Arc::new(CedarDirectPdpFactory::new()));
     #[cfg(feature = "cel")]
     factories.push(std::sync::Arc::new(CelPdpFactory::new()));
+    #[cfg(feature = "kubernetes-sar")]
+    factories.push(std::sync::Arc::new(SubjectAccessReviewPdpFactory::new()));
     #[cfg(feature = "opa")]
     factories.push(std::sync::Arc::new(OpaPdpFactory::new()));
     factories
@@ -643,6 +647,7 @@ mod tests {
     fn pdp_factories_track_enabled_features() {
         let expected = usize::from(cfg!(feature = "cedar"))
             + usize::from(cfg!(feature = "cel"))
+            + usize::from(cfg!(feature = "kubernetes-sar"))
             + usize::from(cfg!(feature = "opa"));
         assert_eq!(
             builtin_pdp_factories().len(),
@@ -660,7 +665,8 @@ mod tests {
         use praxis_policy_pdp_diff::HARNESS_PDP_KINDS;
         for factory in builtin_pdp_factories() {
             assert!(
-                HARNESS_PDP_KINDS.contains(&factory.kind()),
+                HARNESS_PDP_KINDS.contains(&factory.kind())
+                    || EXTERNAL_AUTHORIZER_PDP_KINDS.contains(&factory.kind()),
                 "kind '{}' is registered in builtin_pdp_factories but not in \
                  the ppe-pdp-diff harness. Add a Dialect arm and catalog \
                  coverage there; registering it on PdpRouter is not enough.",
@@ -668,6 +674,11 @@ mod tests {
             );
         }
     }
+
+    /// Decision points that defer to an external authorizer. They hold no
+    /// policy of their own to express in the other dialects, so the
+    /// differential harness has nothing to compare them on.
+    const EXTERNAL_AUTHORIZER_PDP_KINDS: &[&str] = &["kubernetes-sar"];
 
     #[test]
     fn session_store_factories_track_enabled_features() {

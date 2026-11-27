@@ -20,7 +20,8 @@
 
 use std::sync::Arc;
 
-use praxis_policy_apl_core::step::{PdpFactory, PdpResolver};
+use praxis_policy_apl_core::step::PdpResolver;
+use praxis_policy_apl_runtime::{PdpFactory, PdpHostServices};
 
 use crate::pdps::cedar_direct::resolver::CedarDirectResolver;
 
@@ -45,6 +46,7 @@ impl PdpFactory for CedarDirectPdpFactory {
     fn build(
         &self,
         config: &serde_yaml::Value,
+        _services: &PdpHostServices,
     ) -> Result<Arc<dyn PdpResolver>, Box<dyn std::error::Error + Send + Sync>> {
         let resolver = CedarDirectResolver::from_config(config)?;
         Ok(Arc::new(resolver))
