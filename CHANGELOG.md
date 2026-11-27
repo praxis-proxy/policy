@@ -19,6 +19,17 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **HTTP metadata source.** The `metadata-http` feature registers
+  `kind: metadata/http`, which builds static-authority GET and POST requests
+  from capability-filtered policy context through the host HTTP transport.
+  Context-specific encoding, single-attempt execution, strict status and media
+  checks, duplicate-aware JSON parsing, and hard byte and structural ceilings
+  keep acquired facts bounded and atomic. Named shared-secret authentication
+  remains gated on the per-name plugin secret grants in #384.
+  ([#248](https://github.com/praxis-proxy/policy/issues/248),
+  [#249](https://github.com/praxis-proxy/policy/issues/249),
+  [#372](https://github.com/praxis-proxy/policy/issues/372))
+
 - **Bounded metadata callout contracts.** `HostServices::remaining_invocation_time`
   and `Extensions::with_invocation_deadline` let the embedding propagate the
   gateway invocation budget through nested metadata dispatch. Stable metadata

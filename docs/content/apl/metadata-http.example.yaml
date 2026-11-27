@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+engine_settings:
+  dispatch: policy
+
+plugins:
+  - name: account_status
+    kind: metadata/http
+    hooks: [metadata.fetch]
+    mode: sequential
+    on_error: fail
+    capabilities: [perform_http]
+    config:
+      require_authenticated: false
+      request:
+        method: GET
+        url: https://metadata.example
+        path_segments: [v1, accounts, "{meta.entity_name}"]
+        query:
+          resource: "{meta.entity_name}"
+        timeout_milliseconds: 1500
+        connect_timeout_milliseconds: 500
+        max_response_bytes: 65536
+      response:
+        type: json
+        max_depth: 8
+        max_nodes: 256
+
+routes:
+  - tool: check_account
+    authorization:
+      pre_invocation:
+        - "fetch(account_status)"
+        - "require(metadata.account_status.active)"

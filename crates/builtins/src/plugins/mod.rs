@@ -13,6 +13,7 @@
 //!   directly.
 //! - `identity_kubernetes` (`kubernetes-token-review`): kind
 //!   `identity/kubernetes-token-review`
+//! - `metadata_http` (`metadata-http`): kind `metadata/http`
 //! - `delegator_oauth` (`oauth`) — kind `delegator/oauth`
 //! - `delegator_vault` (`delegator-vault`) — kind `delegator/vault`
 //! - `elicitation_ciba` (`elicitation-ciba`) — kind `elicitation/ciba`
@@ -30,6 +31,12 @@ pub mod identity_basic;
 
 #[cfg(feature = "kubernetes-token-review")]
 pub mod identity_kubernetes;
+
+#[cfg(feature = "metadata-http")]
+mod metadata_common;
+
+#[cfg(feature = "metadata-http")]
+pub mod metadata_http;
 
 #[cfg(feature = "oauth")]
 pub mod delegator_oauth;
