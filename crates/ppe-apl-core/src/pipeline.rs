@@ -193,3 +193,328 @@ pub struct TaintEvent {
     /// How far it propagates.
     pub scopes: Vec<TaintScope>,
 }
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests")]
+#[expect(clippy::panic, reason = "tests use panic for pattern matching")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipeline_new_is_empty() {
+        let pipeline = Pipeline::new();
+        assert!(pipeline.is_empty());
+        assert!(pipeline.stages.is_empty());
+    }
+
+    #[test]
+    fn pipeline_push_adds_stage() {
+        let mut pipeline = Pipeline::new();
+        assert!(pipeline.is_empty());
+
+        pipeline.push(Stage::Type(TypeCheck::Str));
+        assert!(!pipeline.is_empty());
+        assert_eq!(pipeline.stages.len(), 1);
+    }
+
+    #[test]
+    fn pipeline_push_multiple_stages() {
+        let mut pipeline = Pipeline::new();
+        pipeline.push(Stage::Type(TypeCheck::Str));
+        pipeline.push(Stage::Type(TypeCheck::Int));
+        pipeline.push(Stage::Omit);
+
+        assert_eq!(pipeline.stages.len(), 3);
+        assert!(!pipeline.is_empty());
+    }
+
+    #[test]
+    fn type_check_variants_equality() {
+        assert_eq!(TypeCheck::Str, TypeCheck::Str);
+        assert_ne!(TypeCheck::Str, TypeCheck::Int);
+        assert_ne!(TypeCheck::Email, TypeCheck::Url);
+        assert_ne!(TypeCheck::Uuid, TypeCheck::Bool);
+        assert_ne!(TypeCheck::Float, TypeCheck::Int);
+    }
+
+    #[test]
+    fn taint_scope_variants_equality() {
+        assert_eq!(TaintScope::Session, TaintScope::Session);
+        assert_ne!(TaintScope::Session, TaintScope::Message);
+    }
+
+    #[test]
+    fn scan_kind_variants_equality() {
+        assert_eq!(ScanKind::PiiRedact, ScanKind::PiiRedact);
+        assert_ne!(ScanKind::PiiRedact, ScanKind::PiiDetect);
+        assert_ne!(ScanKind::InjectionScan, ScanKind::PiiDetect);
+        assert_ne!(ScanKind::PiiRedact, ScanKind::InjectionScan);
+    }
+
+    #[test]
+    fn stage_type_check_variant() {
+        let stage = Stage::Type(TypeCheck::Email);
+        match stage {
+            Stage::Type(check) => assert_eq!(check, TypeCheck::Email),
+            _ => panic!("expected Type variant"),
+        }
+    }
+
+    #[test]
+    fn stage_length_bounds_variant() {
+        let stage = Stage::Length {
+            min: Some(1),
+            max: Some(10),
+        };
+        match stage {
+            Stage::Length { min, max } => {
+                assert_eq!(min, Some(1));
+                assert_eq!(max, Some(10));
+            },
+            _ => panic!("expected Length variant"),
+        }
+    }
+
+    #[test]
+    fn stage_range_bounds_variant() {
+        let stage = Stage::Range {
+            min: Some(0),
+            max: Some(100),
+        };
+        match stage {
+            Stage::Range { min, max } => {
+                assert_eq!(min, Some(0));
+                assert_eq!(max, Some(100));
+            },
+            _ => panic!("expected Range variant"),
+        }
+    }
+
+    #[test]
+    fn stage_enum_variants_all() {
+        let regex = Stage::Regex {
+            pattern: "^test".to_owned(),
+        };
+        match regex {
+            Stage::Regex { pattern } => assert_eq!(pattern, "^test"),
+            _ => panic!("expected Regex variant"),
+        }
+
+        let validate = Stage::Validate {
+            name: "custom".to_owned(),
+        };
+        match validate {
+            Stage::Validate { name } => assert_eq!(name, "custom"),
+            _ => panic!("expected Validate variant"),
+        }
+
+        let enum_stage = Stage::Enum {
+            values: vec!["a".to_owned(), "b".to_owned()],
+        };
+        match enum_stage {
+            Stage::Enum { values } => assert_eq!(values.len(), 2),
+            _ => panic!("expected Enum variant"),
+        }
+    }
+
+    #[test]
+    fn stage_mask_variant() {
+        let stage = Stage::Mask { keep_last: 4 };
+        match stage {
+            Stage::Mask { keep_last } => assert_eq!(keep_last, 4),
+            _ => panic!("expected Mask variant"),
+        }
+    }
+
+    #[test]
+    fn stage_redact_unconditional_variant() {
+        let stage = Stage::Redact { condition: None };
+        match stage {
+            Stage::Redact { condition } => assert!(condition.is_none()),
+            _ => panic!("expected Redact variant"),
+        }
+    }
+
+    #[test]
+    fn stage_omit_variant() {
+        let stage = Stage::Omit;
+        match stage {
+            Stage::Omit => {},
+            _ => panic!("expected Omit variant"),
+        }
+    }
+
+    #[test]
+    fn stage_hash_variant() {
+        let stage = Stage::Hash;
+        match stage {
+            Stage::Hash => {},
+            _ => panic!("expected Hash variant"),
+        }
+    }
+
+    #[test]
+    fn stage_taint_variant() {
+        let stage = Stage::Taint {
+            label: "sensitive".to_owned(),
+            scopes: vec![TaintScope::Session, TaintScope::Message],
+        };
+        match stage {
+            Stage::Taint { label, scopes } => {
+                assert_eq!(label, "sensitive");
+                assert_eq!(scopes.len(), 2);
+            },
+            _ => panic!("expected Taint variant"),
+        }
+    }
+
+    #[test]
+    fn stage_plugin_variant() {
+        let stage = Stage::Plugin {
+            name: "redactor".to_owned(),
+        };
+        match stage {
+            Stage::Plugin { name } => assert_eq!(name, "redactor"),
+            _ => panic!("expected Plugin variant"),
+        }
+    }
+
+    #[test]
+    fn stage_scan_variant() {
+        let stage = Stage::Scan {
+            kind: ScanKind::PiiRedact,
+        };
+        match stage {
+            Stage::Scan { kind } => assert_eq!(kind, ScanKind::PiiRedact),
+            _ => panic!("expected Scan variant"),
+        }
+    }
+
+    #[test]
+    fn field_rule_construction() {
+        let rule = FieldRule {
+            field: "request.body.email".to_owned(),
+            pipeline: Pipeline::new(),
+            source: "policy.apl:42".to_owned(),
+        };
+        assert_eq!(rule.field, "request.body.email");
+        assert!(rule.pipeline.is_empty());
+        assert_eq!(rule.source, "policy.apl:42");
+    }
+
+    #[test]
+    fn field_rule_with_pipeline() {
+        let mut pipeline = Pipeline::new();
+        pipeline.push(Stage::Type(TypeCheck::Str));
+        pipeline.push(Stage::Mask { keep_last: 4 });
+
+        let rule = FieldRule {
+            field: "ssn".to_owned(),
+            pipeline,
+            source: "audit.apl:10".to_owned(),
+        };
+
+        assert_eq!(rule.field, "ssn");
+        assert!(!rule.pipeline.is_empty());
+        assert_eq!(rule.pipeline.stages.len(), 2);
+    }
+
+    #[test]
+    fn taint_event_construction() {
+        let event = TaintEvent {
+            label: "pii_found".to_owned(),
+            scopes: vec![TaintScope::Message],
+        };
+        assert_eq!(event.label, "pii_found");
+        assert_eq!(event.scopes.len(), 1);
+    }
+
+    #[test]
+    fn taint_event_multiple_scopes() {
+        let event = TaintEvent {
+            label: "injection_detected".to_owned(),
+            scopes: vec![TaintScope::Session, TaintScope::Message],
+        };
+        assert_eq!(event.label, "injection_detected");
+        assert_eq!(event.scopes.len(), 2);
+        assert!(event.scopes.contains(&TaintScope::Session));
+        assert!(event.scopes.contains(&TaintScope::Message));
+    }
+
+    #[test]
+    fn pipeline_serialization_empty() {
+        let pipeline = Pipeline::new();
+        let json = serde_json::to_string(&pipeline).expect("serialize");
+        let deserialized: Pipeline = serde_json::from_str(&json).expect("deserialize");
+        assert!(deserialized.is_empty());
+    }
+
+    #[test]
+    fn pipeline_serialization_with_stages() {
+        let mut pipeline = Pipeline::new();
+        pipeline.push(Stage::Type(TypeCheck::Str));
+        pipeline.push(Stage::Mask { keep_last: 4 });
+
+        let json = serde_json::to_string(&pipeline).expect("serialize");
+        let deserialized: Pipeline = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(deserialized, pipeline);
+    }
+
+    #[test]
+    fn stage_serialization_roundtrip_length() {
+        let stage = Stage::Length {
+            min: Some(5),
+            max: Some(50),
+        };
+
+        let json = serde_json::to_string(&stage).expect("serialize");
+        let deserialized: Stage = serde_json::from_str(&json).expect("deserialize");
+
+        match deserialized {
+            Stage::Length { min, max } => {
+                assert_eq!(min, Some(5));
+                assert_eq!(max, Some(50));
+            },
+            _ => panic!("deserialization failed"),
+        }
+    }
+
+    #[test]
+    fn stage_serialization_roundtrip_range() {
+        let stage = Stage::Range {
+            min: Some(-10),
+            max: Some(100),
+        };
+
+        let json = serde_json::to_string(&stage).expect("serialize");
+        let deserialized: Stage = serde_json::from_str(&json).expect("deserialize");
+
+        match deserialized {
+            Stage::Range { min, max } => {
+                assert_eq!(min, Some(-10));
+                assert_eq!(max, Some(100));
+            },
+            _ => panic!("deserialization failed"),
+        }
+    }
+
+    #[test]
+    fn type_check_serialization() {
+        let checks = vec![
+            TypeCheck::Str,
+            TypeCheck::Int,
+            TypeCheck::Bool,
+            TypeCheck::Float,
+            TypeCheck::Email,
+            TypeCheck::Url,
+            TypeCheck::Uuid,
+        ];
+
+        for check in checks {
+            let json = serde_json::to_string(&check).expect("serialize");
+            let deserialized: TypeCheck = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(deserialized, check);
+        }
+    }
+}

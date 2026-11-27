@@ -146,3 +146,99 @@ impl AttachedSink {
         filter_extensions(extensions, &self.capabilities)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+#[allow(clippy::uninlined_format_args)]
+mod tests {
+    use super::*;
+
+    struct TestAuditHandler {
+        name: String,
+    }
+
+    impl TestAuditHandler {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_owned(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AuditHandler for TestAuditHandler {
+        async fn handle(
+            &self,
+            _payload: &dyn PluginPayload,
+            _extensions: &Extensions,
+            _decisions: &DecisionLog,
+        ) {
+        }
+
+        async fn on_effect(&self, _effect: &EffectRecord, _extensions: &Extensions) {}
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+    }
+
+    #[test]
+    fn attached_sink_new() {
+        let handler = Arc::new(TestAuditHandler::new("test-sink"));
+        let capabilities = HashSet::new();
+        let sink = AttachedSink::new(handler, capabilities);
+
+        assert_eq!(sink.name(), "test-sink");
+    }
+
+    #[test]
+    fn attached_sink_handler_accessor() {
+        let handler: Arc<dyn AuditHandler> = Arc::new(TestAuditHandler::new("my-audit"));
+        let capabilities = HashSet::new();
+        let sink = AttachedSink::new(handler.clone(), capabilities);
+
+        assert!(Arc::ptr_eq(sink.handler(), &handler));
+    }
+
+    #[test]
+    fn attached_sink_name() {
+        let handler = Arc::new(TestAuditHandler::new("audit-logger"));
+        let capabilities = HashSet::new();
+        let sink = AttachedSink::new(handler, capabilities);
+
+        assert_eq!(sink.name(), "audit-logger");
+    }
+
+    #[test]
+    fn attached_sink_with_capabilities() {
+        let handler = Arc::new(TestAuditHandler::new("filtered-sink"));
+        let mut capabilities = HashSet::new();
+        capabilities.insert("read_subject".to_owned());
+        capabilities.insert("read_resource".to_owned());
+
+        let sink = AttachedSink::new(handler, capabilities);
+        assert_eq!(sink.name(), "filtered-sink");
+    }
+
+    #[test]
+    fn attached_sink_debug_format() {
+        let handler = Arc::new(TestAuditHandler::new("debug-test"));
+        let capabilities = HashSet::new();
+        let sink = AttachedSink::new(handler, capabilities);
+
+        let debug_str = format!("{:?}", sink);
+        assert!(debug_str.contains("AttachedSink"));
+        assert!(debug_str.contains("debug-test"));
+    }
+
+    #[test]
+    fn attached_sink_clone() {
+        let handler = Arc::new(TestAuditHandler::new("clone-test"));
+        let capabilities = HashSet::new();
+        let sink1 = AttachedSink::new(handler, capabilities);
+        let sink2 = sink1.clone();
+
+        assert_eq!(sink1.name(), sink2.name());
+        assert!(Arc::ptr_eq(sink1.handler(), sink2.handler()));
+    }
+}

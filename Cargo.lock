@@ -3147,6 +3147,7 @@ dependencies = [
  "deadpool-redis",
  "futures",
  "hmac",
+ "http",
  "jsonwebtoken",
  "limitador",
  "mcf",

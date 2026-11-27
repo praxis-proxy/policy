@@ -24,6 +24,7 @@ features = [
   "api-key",
   "basic",
   "kubernetes-token-review",
+  "metadata-http",
   "oauth",
   "delegator-vault",
   "elicitation-ciba",
@@ -67,6 +68,13 @@ kubernetes-token-review = [
   "_token_lookup",
   "_validation",
   "dep:base64",
+]
+metadata-http = [
+  "_engine-core",
+  "_engine-apl-core",
+  "_engine-apl-cmf",
+  "_plugins",
+  "dep:url",
 ]
 # RFC 7617 Basic authentication. `base64` decodes the credential and
 # `unicode-normalization` NFC-folds the user-id before it is used as an index
@@ -166,6 +174,7 @@ arc-swap = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -458,6 +467,11 @@ required-features = ["basic"]
 name = "token_review"
 path = "tests/token_review/main.rs"
 required-features = ["kubernetes-token-review"]
+
+[[test]]
+name = "metadata_http"
+path = "tests/metadata_http/main.rs"
+required-features = ["metadata-http"]
 
 [[test]]
 name = "oauth"

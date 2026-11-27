@@ -150,3 +150,144 @@ impl SecretError {
         true
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_error_config() {
+        let err = SecretError::config("unknown provider");
+        match err {
+            SecretError::Config { message } => assert_eq!(message, "unknown provider"),
+            _ => panic!("expected Config variant"),
+        }
+    }
+
+    #[test]
+    fn secret_error_reference() {
+        let err = SecretError::reference("key/secret", "invalid path");
+        match err {
+            SecretError::Reference { reference, reason } => {
+                assert_eq!(reference, "key/secret");
+                assert_eq!(reason, "invalid path");
+            },
+            _ => panic!("expected Reference variant"),
+        }
+    }
+
+    #[test]
+    fn secret_error_not_found() {
+        let err = SecretError::not_found("vault/db-password");
+        match err {
+            SecretError::NotFound { reference } => {
+                assert_eq!(reference, "vault/db-password");
+            },
+            _ => panic!("expected NotFound variant"),
+        }
+    }
+
+    #[test]
+    fn secret_error_malformed() {
+        let err = SecretError::malformed("env/TOKEN", "empty string");
+        match err {
+            SecretError::Malformed { reference, reason } => {
+                assert_eq!(reference, "env/TOKEN");
+                assert_eq!(reason, "empty string");
+            },
+            _ => panic!("expected Malformed variant"),
+        }
+    }
+
+    #[test]
+    fn secret_error_backend() {
+        let err = SecretError::backend("connection timeout");
+        match err {
+            SecretError::Backend { reason } => {
+                assert_eq!(reason, "connection timeout");
+            },
+            _ => panic!("expected Backend variant"),
+        }
+    }
+
+    #[test]
+    fn secret_error_keeps_last_good() {
+        let errors = vec![
+            SecretError::config("test"),
+            SecretError::reference("ref", "reason"),
+            SecretError::not_found("ref"),
+            SecretError::malformed("ref", "reason"),
+            SecretError::backend("reason"),
+        ];
+
+        for err in errors {
+            assert!(err.keeps_last_good(), "all variants should keep last good");
+        }
+    }
+
+    #[test]
+    fn secret_resolve_error_construction() {
+        let source = SecretError::not_found("vault/secret");
+        let err = SecretResolveError {
+            secret: "db-password".to_owned(),
+            provider: "vault".to_owned(),
+            source,
+        };
+
+        assert_eq!(err.secret, "db-password");
+        assert_eq!(err.provider, "vault");
+    }
+
+    #[test]
+    fn secret_error_display() {
+        let err = SecretError::config("bad config");
+        assert_eq!(err.to_string(), "bad config");
+
+        let err = SecretError::reference("path/to/secret", "malformed");
+        assert!(err.to_string().contains("path/to/secret"));
+        assert!(err.to_string().contains("malformed"));
+
+        let err = SecretError::not_found("vault/api-key");
+        assert!(err.to_string().contains("vault/api-key"));
+
+        let err = SecretError::malformed("env/KEY", "empty");
+        assert!(err.to_string().contains("env/KEY"));
+        assert!(err.to_string().contains("empty"));
+
+        let err = SecretError::backend("network error");
+        assert_eq!(err.to_string(), "network error");
+    }
+
+    #[test]
+    fn secret_resolve_error_display() {
+        let source = SecretError::backend("connection failed");
+        let err = SecretResolveError {
+            secret: "api_key".to_owned(),
+            provider: "vault".to_owned(),
+            source,
+        };
+
+        let msg = err.to_string();
+        assert!(msg.contains("api_key"));
+        assert!(msg.contains("vault"));
+        assert!(msg.contains("connection failed"));
+    }
+
+    #[test]
+    fn secret_error_clone() {
+        let err1 = SecretError::not_found("secret");
+        let err2 = err1.clone();
+        assert_eq!(err1, err2);
+    }
+
+    #[test]
+    fn secret_error_partial_eq() {
+        let err1 = SecretError::config("message");
+        let err2 = SecretError::config("message");
+        assert_eq!(err1, err2);
+
+        let err3 = SecretError::config("different");
+        assert_ne!(err1, err3);
+    }
+}
