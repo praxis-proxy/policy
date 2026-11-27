@@ -472,8 +472,8 @@ impl DecodingKeySource {
     /// # Errors
     ///
     /// Returns a message when the key material does not parse, when a PEM file
-    /// cannot be read, or when the source is `jwks_url`, which needs
-    /// [`build_async`].
+    /// cannot be read, when a shared secret is rejected (for example, if it
+    /// is empty), or when the source is `jwks_url`, which needs [`build_async`].
     ///
     /// [`build_async`]: Self::build_async
     pub fn build(&self) -> Result<KeyStore, String> {
@@ -491,7 +491,8 @@ impl DecodingKeySource {
                     "JwksUrl source '{url}' requires async resolution — call build_async()"
                 ));
             },
-            Self::Secret { secret } => DecodingKey::from_secret(secret.as_bytes()),
+            Self::Secret { secret } => DecodingKey::from_secret(secret.as_bytes())
+                .map_err(|e| format!("shared secret not usable: {e}"))?,
         };
         check_key(&key)?;
         Ok(KeyStore::single_fallback(key))
@@ -1151,6 +1152,17 @@ mod tests {
             secret: "test-secret".into(),
         };
         src.build().unwrap();
+    }
+
+    #[test]
+    fn decoding_key_source_rejects_empty_secret() {
+        let source = DecodingKeySource::Secret {
+            secret: String::new(),
+        };
+        assert!(matches!(
+            source.build(),
+            Err(message) if message.starts_with("shared secret not usable:")
+        ));
     }
 
     #[test]

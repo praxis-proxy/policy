@@ -1568,7 +1568,7 @@ mod tests {
             audiences: vec!["test-aud".into()],
             skip_audience_validation: false,
             keys: std::sync::Arc::new(std::sync::RwLock::new(KeyStore::single_fallback(
-                jsonwebtoken::DecodingKey::from_secret(b"secret"),
+                jsonwebtoken::DecodingKey::from_secret(b"secret").expect("nonempty test secret"),
             ))),
             algorithms: vec![],
             leeway_seconds: 0,
@@ -1599,7 +1599,7 @@ mod tests {
             audiences: vec![],
             skip_audience_validation: false,
             keys: std::sync::Arc::new(std::sync::RwLock::new(KeyStore::single_fallback(
-                jsonwebtoken::DecodingKey::from_secret(b"secret"),
+                jsonwebtoken::DecodingKey::from_secret(b"secret").expect("nonempty test secret"),
             ))),
             algorithms: vec![jsonwebtoken::Algorithm::HS256],
             leeway_seconds: 0,
@@ -2074,7 +2074,7 @@ mod tests {
     fn classify_jwt_error_uses_malformed_credential_for_base64() {
         use jsonwebtoken::errors::ErrorKind;
         let bad_token = "!!!.payload.sig";
-        let key = jsonwebtoken::DecodingKey::from_secret(b"unused");
+        let key = jsonwebtoken::DecodingKey::from_secret(b"unused").expect("nonempty test secret");
         let validation = jsonwebtoken::Validation::default();
         let base64_err = jsonwebtoken::decode::<std::collections::HashMap<String, String>>(
             bad_token,
@@ -2928,7 +2928,7 @@ mod tests {
         jsonwebtoken::encode(
             &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
             claims,
-            &jsonwebtoken::EncodingKey::from_secret(secret),
+            &jsonwebtoken::EncodingKey::from_secret(secret).expect("nonempty test secret"),
         )
         .expect("signing a test token")
     }
@@ -3302,7 +3302,8 @@ mod tests {
             skip_audience_validation: false,
             keys: std::sync::Arc::new(std::sync::RwLock::new(KeyStore::from_jwks_entries([(
                 "key-1".to_owned(),
-                jsonwebtoken::DecodingKey::from_secret(b"test-secret"),
+                jsonwebtoken::DecodingKey::from_secret(b"test-secret")
+                    .expect("nonempty test secret"),
             )]))),
             algorithms: vec![jsonwebtoken::Algorithm::HS256],
             leeway_seconds: 0,
@@ -3318,7 +3319,7 @@ mod tests {
         let token = jsonwebtoken::encode(
             &header,
             &valid_claims(json!({})),
-            &jsonwebtoken::EncodingKey::from_secret(b"test-secret"),
+            &jsonwebtoken::EncodingKey::from_secret(b"test-secret").expect("nonempty test secret"),
         )
         .expect("signing a test token");
 
@@ -3335,7 +3336,7 @@ mod tests {
         let good = jsonwebtoken::encode(
             &header,
             &valid_claims(json!({})),
-            &jsonwebtoken::EncodingKey::from_secret(b"test-secret"),
+            &jsonwebtoken::EncodingKey::from_secret(b"test-secret").expect("nonempty test secret"),
         )
         .expect("signing a test token");
         assert!(

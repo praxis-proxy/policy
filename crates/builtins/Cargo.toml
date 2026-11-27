@@ -202,8 +202,7 @@ openssl = { workspace = true, optional = true }
 # `base64` for the peek-at-iss helper in the JWT resolver, the RFC 7617
 # credential decode in the Basic resolver, the read-only `act` claim interop
 # check in the OAuth delegator, and the approver-claim decode in CIBA. None of
-# the four verifies a signature with it. jsonwebtoken 11 still
-# pulls 0.22, so both versions sit in the tree until it catches up.
+# the four verifies a signature with it.
 base64 = { workspace = true, optional = true }
 
 # --- basic -------------------------------------------------------------------

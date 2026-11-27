@@ -158,7 +158,10 @@ pub fn forge(header: &Value, claims: &Value, signer: Signer<'_>) -> String {
     let (key, alg) = match signer {
         Signer::Realm => (rsa(keys()), Algorithm::RS256),
         Signer::Foreign => (rsa(foreign_keys()), Algorithm::RS256),
-        Signer::Hs256(secret) => (EncodingKey::from_secret(secret), Algorithm::HS256),
+        Signer::Hs256(secret) => (
+            EncodingKey::from_secret(secret).expect("nonempty test secret"),
+            Algorithm::HS256,
+        ),
         Signer::Unsigned => return format!("{input}."),
     };
     let signature = jsonwebtoken::crypto::sign(input.as_bytes(), &key, alg).expect("sign JWT");
