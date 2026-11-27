@@ -78,6 +78,34 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-test-
       - run: make test
 
+  ocsf-vectors:
+    name: OCSF records verify independently
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-ocsf-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-ocsf-
+      # The verifier shares no code with the emitter. Every package is pinned
+      # and hashed in requirements.txt, which Dependabot keeps current.
+      - run: |
+          python3 -m venv "$RUNNER_TEMP/verifier"
+          "$RUNNER_TEMP/verifier/bin/pip" install --no-deps --require-hashes -r .github/ocsf-vectors/requirements.txt
+          echo "$RUNNER_TEMP/verifier/bin" >> "$GITHUB_PATH"
+      - run: .github/ocsf-vectors/verify.sh
+
   doc:
     name: docs build
     runs-on: ubuntu-24.04
