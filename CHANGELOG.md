@@ -19,6 +19,16 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Bounded metadata callout contracts.** `HostServices::remaining_invocation_time`
+  and `Extensions::with_invocation_deadline` let the embedding propagate the
+  gateway invocation budget through nested metadata dispatch. Stable metadata
+  callout error classes and codes, plus the versioned value-free
+  `MetadataCalloutAuditEvent` and `CalloutObserver`, provide bounded operational
+  reporting without exposing request or response values.
+  ([#246](https://github.com/praxis-proxy/policy/issues/246),
+  [#247](https://github.com/praxis-proxy/policy/issues/247),
+  [#365](https://github.com/praxis-proxy/policy/pull/365))
+
 - **Resource and prompt payload projection.** APL fields can read resource
   references, fetched resources and rendered prompt content. Edits are
   written back to the selected content part; missing or ambiguous
@@ -87,6 +97,13 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
   plugin tests can grant a secret without a provider behind it.
 
 ### Changed
+
+- **Deadline-aware HTTP retries.** Public `execute_with_retry` now bounds each
+  attempt, shrinks later attempt budgets, and returns
+  `HttpTransportError::Timeout` when an attempt or retry budget expires.
+  Request-time host services also cap retries at the invocation deadline;
+  direct calls to `execute_with_retry` have no invocation deadline.
+  ([#246](https://github.com/praxis-proxy/policy/issues/246))
 
 - **Documentation navigation.** Organize published pages into Getting started,
   Guides, Concepts, APL, and Reference sections. Add section landing pages

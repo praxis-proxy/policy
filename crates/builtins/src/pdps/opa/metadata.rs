@@ -431,7 +431,19 @@ fn collect_rule_references(
     match rule {
         Rule::Spec { head, bodies, .. } => {
             match head {
-                RuleHead::Compr { assign, .. } | RuleHead::Func { assign, .. } => {
+                RuleHead::Compr { refr, assign, .. } => {
+                    collect_head_index_references(refr, package, imports, out);
+                    if let Some(assign) = assign {
+                        collect_expression_references(&assign.value, package, imports, out);
+                    }
+                },
+                RuleHead::Func {
+                    refr, args, assign, ..
+                } => {
+                    collect_head_index_references(refr, package, imports, out);
+                    for arg in args {
+                        collect_argument_references(arg, package, imports, out);
+                    }
                     if let Some(assign) = assign {
                         collect_expression_references(&assign.value, package, imports, out);
                     }
@@ -452,6 +464,45 @@ fn collect_rule_references(
         Rule::Default { value, .. } => {
             collect_expression_references(value, package, imports, out);
         },
+    }
+}
+
+fn collect_head_index_references(
+    expression: &Expr,
+    package: &[String],
+    imports: &HashMap<String, Vec<String>>,
+    out: &mut HashSet<RulePath>,
+) {
+    match expression {
+        Expr::RefBrack { refr, index, .. } => {
+            collect_head_index_references(refr, package, imports, out);
+            collect_expression_references(index, package, imports, out);
+        },
+        Expr::RefDot { refr, .. } => collect_head_index_references(refr, package, imports, out),
+        _ => {},
+    }
+}
+
+fn collect_argument_references(
+    expression: &Expr,
+    package: &[String],
+    imports: &HashMap<String, Vec<String>>,
+    out: &mut HashSet<RulePath>,
+) {
+    match expression {
+        Expr::Var { .. } => {},
+        Expr::Array { items, .. } | Expr::Set { items, .. } => {
+            for item in items {
+                collect_argument_references(item, package, imports, out);
+            }
+        },
+        Expr::Object { fields, .. } => {
+            for (_, key, value) in fields {
+                collect_expression_references(key, package, imports, out);
+                collect_argument_references(value, package, imports, out);
+            }
+        },
+        _ => collect_expression_references(expression, package, imports, out),
     }
 }
 

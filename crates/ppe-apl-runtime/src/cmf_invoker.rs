@@ -722,12 +722,14 @@ where
         updated
             .install_metadata(&step.plugin_name, &source_kind, facts)
             .map_err(|error| PluginError::Dispatch(error.to_string()))?;
+        let metadata_snapshot = updated.metadata.as_ref().map(Arc::clone);
+        drop(updated);
         let mut attributes = AttributeBag::new();
-        if let Some(metadata) = updated.metadata.as_deref() {
+        if let Some(metadata) = metadata_snapshot.as_deref() {
             praxis_policy_apl_cmf::extract_metadata(metadata, &mut attributes);
         }
         let (metadata, cedar_metadata, metadata_provenance) = if self.project_structured_metadata {
-            praxis_policy_apl_cmf::project_structured_metadata(updated.metadata.as_deref())
+            praxis_policy_apl_cmf::project_structured_metadata(metadata_snapshot.as_deref())
         } else {
             (
                 serde_json::json!({}),

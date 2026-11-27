@@ -468,7 +468,7 @@ impl SourcePath {
             Self::SubjectPermissions => Some(Cow::Owned(sorted_set(
                 &security.subject.as_ref()?.permissions,
             ))),
-            Self::Claim(name) => claim(&security.subject.as_ref()?.claims, name).map(Cow::Owned),
+            Self::Claim(name) => claim(&security.subject.as_ref()?.claims, name).map(Cow::Borrowed),
             Self::ClientId => Some(Cow::Owned(Value::String(
                 security.client.as_ref()?.client_id.clone(),
             ))),
@@ -494,7 +494,7 @@ impl SourcePath {
                 &security.client.as_ref()?.authorized_audiences,
             ))),
             Self::ClientClaim(name) => {
-                claim(&security.client.as_ref()?.claims, name).map(Cow::Owned)
+                claim(&security.client.as_ref()?.claims, name).map(Cow::Borrowed)
             },
             // Answered above, before the security slot was required. Spelled
             // out rather than folded into a wildcard so a slot added later
@@ -506,10 +506,13 @@ impl SourcePath {
 }
 
 /// One claim, or `None` when it is absent or holds JSON null.
-fn claim(claims: &std::collections::HashMap<String, Value>, name: &str) -> Option<Value> {
+fn claim<'a>(
+    claims: &'a std::collections::HashMap<String, Value>,
+    name: &str,
+) -> Option<&'a Value> {
     match claims.get(name) {
         None | Some(Value::Null) => None,
-        Some(value) => Some(value.clone()),
+        Some(value) => Some(value),
     }
 }
 

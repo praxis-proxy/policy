@@ -64,6 +64,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -100,6 +101,39 @@ pub const SECRET_CAPABILITY_PREFIX: &str = "read_secret:";
 /// cleanup operation that must survive cancellation of its parent handler.
 pub type HttpRequestFuture =
     Pin<Box<dyn Future<Output = Result<HttpResponse, HttpRequestError>> + Send + 'static>>;
+
+/// Absolute deadline shared by nested request-time host-service carriers.
+///
+/// Hosts may seed a request with
+/// [`Extensions::with_invocation_deadline`]. Nested dispatch preserves the
+/// absolute instant, so it cannot reset the outer invocation's budget.
+/// Initialization carriers deliberately have no deadline because no request
+/// exists yet.
+///
+/// [`Extensions::with_invocation_deadline`]: crate::extensions::Extensions::with_invocation_deadline
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct InvocationDeadline(Option<tokio::time::Instant>);
+
+impl InvocationDeadline {
+    /// Narrow the deadline to `remaining` from now without extending it.
+    fn cap(&mut self, remaining: Duration) {
+        let now = tokio::time::Instant::now();
+        let candidate = now.checked_add(remaining).unwrap_or(now);
+        self.0 = Some(self.0.map_or(candidate, |current| current.min(candidate)));
+    }
+
+    /// Time left before the invocation expires.
+    #[must_use]
+    fn remaining(self) -> Option<Duration> {
+        self.0
+            .map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()))
+    }
+
+    /// Absolute instant used by the retry executor.
+    pub(crate) const fn instant(self) -> Option<tokio::time::Instant> {
+        self.0
+    }
+}
 
 /// Why a host service was not available to a plugin.
 ///
@@ -216,6 +250,15 @@ impl<T> ServiceSlot<T> {
 /// taking a degraded path.
 #[async_trait]
 pub trait HostServices: Send + Sync {
+    /// Time left in the current policy invocation, when request-scoped.
+    ///
+    /// Initialization returns `None`. Request-time carriers return a value
+    /// that shrinks monotonically across nested dispatches.
+    #[must_use]
+    fn remaining_invocation_time(&self) -> Option<Duration> {
+        None
+    }
+
     /// Perform one outbound HTTP request through the host's transport.
     ///
     /// `retry` is required rather than defaulted because whether a
@@ -294,16 +337,28 @@ pub(crate) fn start_request(
     retry: RetryPolicy,
 ) -> Result<HttpRequestFuture, HttpRequestError> {
     let transport = Arc::clone(slot.slot().get(HTTP_SERVICE, HTTP_CAPABILITY)?);
+    let deadline = slot.deadline;
+    if deadline
+        .remaining()
+        .is_some_and(|remaining| remaining.is_zero())
+    {
+        return Err(HttpTransportError::Timeout.into());
+    }
     Ok(Box::pin(async move {
-        crate::http_retry::execute_with_retry(transport.as_ref(), req, retry)
-            .await
-            .map_err(HttpRequestError::Transport)
+        crate::http_retry::execute_with_retry_until(
+            transport.as_ref(),
+            req,
+            retry,
+            deadline.instant(),
+        )
+        .await
+        .map_err(HttpRequestError::Transport)
     }))
 }
 
 /// The host's HTTP transport as one carrier sees it.
 ///
-/// A newtype over the slot rather than the slot itself, so the `Arc`
+/// An opaque carrier rather than the service slot itself, so the `Arc`
 /// inside cannot be taken out. The field on `Extensions` has to stay
 /// public — Rust forbids `..Default::default()` when any field is
 /// invisible, and nearly four hundred construction sites rely on it —
@@ -331,13 +386,19 @@ pub(crate) fn start_request(
 /// let _stashed: HttpTransportSlot = ext.http_transport.clone();
 /// ```
 #[derive(Debug, Default)]
-pub struct HttpTransportSlot(ServiceSlot<Arc<dyn HttpTransport>>);
+pub struct HttpTransportSlot {
+    deadline: InvocationDeadline,
+    slot: ServiceSlot<Arc<dyn HttpTransport>>,
+}
 
 impl HttpTransportSlot {
     /// A slot holding `transport`, for a host or test wiring one in.
     #[must_use]
     pub fn installed(transport: Arc<dyn HttpTransport>) -> Self {
-        Self(ServiceSlot::Available(transport))
+        Self {
+            deadline: InvocationDeadline::default(),
+            slot: ServiceSlot::Available(transport),
+        }
     }
 
     /// A slot recording that a transport exists but this plugin may not
@@ -345,17 +406,43 @@ impl HttpTransportSlot {
     /// host for installing nothing.
     #[must_use]
     pub fn withheld() -> Self {
-        Self(ServiceSlot::NotPermitted)
+        Self {
+            deadline: InvocationDeadline::default(),
+            slot: ServiceSlot::NotPermitted,
+        }
     }
 
     /// Whether a transport is present and permitted.
     #[must_use]
     pub fn is_available(&self) -> bool {
-        self.0.is_available()
+        self.slot.is_available()
     }
 
     pub(crate) fn slot(&self) -> &ServiceSlot<Arc<dyn HttpTransport>> {
-        &self.0
+        &self.slot
+    }
+
+    /// Preserve the deadline while attaching the host's current transport.
+    pub(crate) fn install(&mut self, transport: Arc<dyn HttpTransport>) {
+        self.slot = ServiceSlot::Available(transport);
+    }
+
+    /// Deadline-only copy used when `Extensions::clone` drops host authority.
+    pub(crate) fn detached(&self) -> Self {
+        Self {
+            deadline: self.deadline,
+            slot: ServiceSlot::NotInstalled,
+        }
+    }
+
+    /// Remaining invocation time carried independently of service authority.
+    pub(crate) fn remaining(&self) -> Option<Duration> {
+        self.deadline.remaining()
+    }
+
+    /// Replace the host-seeded invocation deadline.
+    pub(crate) fn set_deadline(&mut self, remaining: Duration) {
+        self.deadline.cap(remaining);
     }
 
     /// A second slot carrying the same verdict, for building the per-plugin
@@ -367,7 +454,18 @@ impl HttpTransportSlot {
     /// use it: a copy carries no transport, so a stashed copy cannot outlive
     /// the grant it was built under.
     pub(crate) fn rebuilt(&self) -> Self {
-        Self(self.0.clone())
+        Self {
+            deadline: self.deadline,
+            slot: self.slot.clone(),
+        }
+    }
+
+    /// Preserve the deadline while recording a withheld capability.
+    pub(crate) fn withheld_rebuilt(&self) -> Self {
+        Self {
+            deadline: self.deadline,
+            slot: ServiceSlot::NotPermitted,
+        }
     }
 }
 

@@ -119,8 +119,20 @@ struct AcquiredFactsWire<V = Value, E = String, S = MetadataSource> {
     stale: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     status: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     value: Option<V>,
+}
+
+fn deserialize_present_value<'de, D, V>(deserializer: D) -> Result<Option<V>, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    V::deserialize(deserializer).map(Some)
 }
 
 impl PartialEq for AcquiredFacts {
@@ -374,6 +386,7 @@ impl MetadataExtension {
             return Err(MetadataInstallError::DuplicateInstance(instance.to_owned()));
         }
 
+        facts.numbers_validated = true;
         facts.source = Some(MetadataSource {
             instance: instance.to_owned(),
             kind: kind.to_owned(),
@@ -774,7 +787,7 @@ fn exact_binary64_decimal(candidate: f64) -> (String, i32) {
     let bits = candidate.abs().to_bits();
     let stored_exponent = i32::try_from((bits >> FRACTION_BITS) & 0x7ff).unwrap_or_default();
     let fraction = bits & FRACTION_MASK;
-    let (significand, binary_exponent) = if stored_exponent == 0 {
+    let (mut significand, mut binary_exponent) = if stored_exponent == 0 {
         (fraction, SUBNORMAL_EXPONENT)
     } else {
         (
@@ -782,6 +795,12 @@ fn exact_binary64_decimal(candidate: f64) -> (String, i32) {
             stored_exponent - EXPONENT_BIAS - FRACTION_EXPONENT,
         )
     };
+    if binary_exponent < 0 {
+        while significand % 2 == 0 {
+            significand /= 2;
+            binary_exponent += 1;
+        }
+    }
     let mut digits: Vec<u8> = significand
         .to_string()
         .bytes()
@@ -1227,6 +1246,45 @@ mod tests {
         assert_eq!(
             decoded, facts,
             "record equality must survive either serde format"
+        );
+    }
+
+    #[test]
+    fn typed_success_round_trips_without_changing_validation_state() {
+        let mut extensions = Extensions::default();
+        let facts =
+            AcquiredFacts::success(json!(true), instant(), MetadataCacheDisposition::Disabled);
+        extensions
+            .install_metadata("account", "metadata/http", facts)
+            .expect("metadata installs");
+        let metadata = extensions.metadata.as_deref().expect("metadata exists");
+
+        let encoded = serde_json::to_value(metadata).expect("metadata serializes");
+        let decoded: MetadataExtension =
+            serde_json::from_value(encoded).expect("installed metadata deserializes");
+
+        assert_eq!(&decoded, metadata);
+    }
+
+    #[test]
+    fn successful_null_round_trips_as_a_present_value() {
+        let mut extensions = Extensions::default();
+        let facts =
+            AcquiredFacts::success_json("null", instant(), MetadataCacheDisposition::Disabled)
+                .expect("null is a valid successful JSON value");
+        extensions
+            .install_metadata("account", "metadata/http", facts)
+            .expect("metadata installs");
+        let metadata = extensions.metadata.as_deref().expect("metadata exists");
+
+        let encoded = serde_json::to_value(metadata).expect("metadata serializes");
+        let decoded: MetadataExtension =
+            serde_json::from_value(encoded).expect("installed null metadata deserializes");
+
+        assert_eq!(&decoded, metadata);
+        assert_eq!(
+            decoded.get("account").and_then(AcquiredFacts::value),
+            Some(&Value::Null)
         );
     }
 
