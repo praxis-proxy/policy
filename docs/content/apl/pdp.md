@@ -517,10 +517,12 @@ How a step is built and decided:
   `name` every object, and `namespace` every namespace. Each of those asks a
   different or broader question than a narrow grant covers, so leaving a
   field out can only make a request harder to allow. `"*"` asks about every
-  value only for `group`, `version`, `resource` and `verb`, and only a rule
-  that itself grants `"*"` allows it. For `name` and `namespace` it is a
-  literal value, not a wildcard; leave those out to ask about every object
-  or namespace.
+  value only for `group`, `resource` and `verb`, and only a rule that itself
+  grants `"*"` allows it. For `name` and `namespace` it is a literal value,
+  not a wildcard; leave those out to ask about every object or namespace.
+  RBAC does not read `version` at all, so any value, `"*"` included, is
+  allowed by a rule that grants the rest; only a webhook authorizer can
+  decide on it.
 - `subject` names who is reviewed: `user` defaults to `subject.id` and
   `groups` to `subject.roles`; `uid` and `extra` are sent only when set. Set
   any of them on the `global.pdp` block, or on one step to review a

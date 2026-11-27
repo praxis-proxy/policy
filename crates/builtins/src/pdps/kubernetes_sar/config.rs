@@ -154,8 +154,8 @@ pub struct NonResourceFields<T> {
 /// `spec.resourceAttributes`. An unset field is omitted, which Kubernetes
 /// reads as the empty value. That is not a wildcard: it asks a different,
 /// usually broader question, so a narrow grant does not allow it. `"*"` asks
-/// about all values of `group`, `version`, `resource` and `verb`; for `name`
-/// and `namespace` it is a literal value, not a wildcard.
+/// about all values of `group`, `resource` and `verb`; for `name` and
+/// `namespace` it is a literal value, not a wildcard.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceFields<T> {
@@ -177,7 +177,7 @@ pub struct ResourceFields<T> {
     /// The verb, such as `get` or `create`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verb: Option<T>,
-    /// The API version.
+    /// The API version. RBAC ignores it; only a webhook authorizer reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<T>,
 }
