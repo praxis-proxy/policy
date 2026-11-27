@@ -725,12 +725,18 @@ fn each_key_is_documented_under_the_slot_it_comes_from() {
 #[test]
 fn the_capability_guide_names_only_capabilities_core_recognises() {
     use praxis_policy_core::extensions::Capability;
+    use praxis_policy_core::host::SECRET_CAPABILITY_PREFIX;
 
     let text = std::fs::read_to_string(guide_path()).expect("the capability guide reads");
     let mut unknown: Vec<&str> = text
         .split('`')
         .filter(|token| token.starts_with("read_"))
         .filter(|token| serde_json::from_str::<Capability>(&format!("\"{token}\"")).is_err())
+        .filter(|token| {
+            token
+                .strip_prefix(SECRET_CAPABILITY_PREFIX)
+                .is_none_or(str::is_empty)
+        })
         .collect();
     unknown.sort_unstable();
     unknown.dedup();

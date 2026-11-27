@@ -88,6 +88,14 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 [RFC 7617]: https://datatracker.ietf.org/doc/html/rfc7617
 [What Basic asks of the host]: docs/content/reference/builtins.md#what-basic-asks-of-the-host
 
+- **Plugin-facing secret reads.** A plugin whose entry declares
+  `read_secret:<name>` can exchange that name for a `SecretRef` during
+  `initialize_with`, through the new `InitExtensions::resolve_secret`. One grant
+  covers one declared value. A missing grant and a grant naming nothing in
+  `secrets.values` fail as distinct `SecretAccessError` variants, each naming
+  its fix. `SecretRef::fixed` is now public under the `test-util` feature, so
+  plugin tests can grant a secret without a provider behind it.
+
 ### Changed
 
 - **Deadline-aware HTTP retries.** Public `execute_with_retry` now bounds each

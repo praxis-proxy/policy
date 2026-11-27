@@ -32,6 +32,15 @@ pub enum MutabilityTier {
 /// matching write capabilities are therefore absent from this enum
 /// until a use case appears for plugin-driven mutation of these slots
 /// outside the resolve/delegate hooks.
+///
+/// # Why no secret read here
+///
+/// A plugin reads a declared secret under `read_secret:<name>`, one grant per
+/// value, through [`InitExtensions::resolve_secret`]. That grant names a value,
+/// so it is not a variant of this fieldless enum, and there is deliberately no
+/// variant granting every secret at once.
+///
+/// [`InitExtensions::resolve_secret`]: crate::host::InitExtensions::resolve_secret
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
